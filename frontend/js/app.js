@@ -28,7 +28,6 @@
 
   const root = document.getElementById('app');
 
-  // Fail clearly if index.html is missing the application root.
   if (!root) {
     console.error(
       '[InvoiceFlow] Fatal: #app element was not found in index.html.'
@@ -220,7 +219,11 @@
   // ---------------------------------------------------------------------------
 
   const routes = {
-    '#/login': renderLoginPage,
+    '#/login':
+      renderLoginPage,
+
+    '#/signup':
+      renderSignupPage,
 
     '#/dashboard':
       renderDashboardPage,
@@ -315,7 +318,8 @@
 
       if (
         !token &&
-        hash !== '#/login'
+        hash !== '#/login' &&
+        hash !== '#/signup'
       ) {
         location.hash =
           '#/login';
@@ -329,7 +333,10 @@
 
       if (
         token &&
-        hash === '#/login'
+        (
+          hash === '#/login' ||
+          hash === '#/signup'
+        )
       ) {
         location.hash =
           '#/dashboard';
@@ -371,6 +378,7 @@
 
           AppState.sessionError =
             null;
+
         } catch (error) {
           if (isAuthError(error)) {
             handleSessionExpired(
@@ -417,6 +425,7 @@
             AppState.health =
               await response.json();
           }
+
         } catch (error) {
           console.warn(
             '[Router] Health check failed:',
@@ -950,6 +959,23 @@
       });
 
     // ---------------------------------------------------------------
+    // SIGN UP LINK
+    // ---------------------------------------------------------------
+
+    const signupLink =
+      document.getElementById(
+        'login-signup-link'
+      );
+
+    if (signupLink) {
+      signupLink.onclick =
+        () => {
+          location.hash =
+            '#/signup';
+        };
+    }
+
+    // ---------------------------------------------------------------
     // Login form
     // ---------------------------------------------------------------
 
@@ -1051,6 +1077,310 @@
           renderLoginPage(
             error?.message ||
             'Unable to sign in.'
+          );
+        }
+      };
+  }
+
+  // ---------------------------------------------------------------------------
+  // SIGN UP
+  // ---------------------------------------------------------------------------
+
+  function renderSignupPage(error) {
+    if (
+      typeof window.renderSignup !==
+      'function'
+    ) {
+      root.innerHTML = `
+        <div style="
+          min-height:100vh;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:24px;
+          font-family:system-ui,sans-serif;
+        ">
+          <div style="
+            max-width:520px;
+            text-align:center;
+          ">
+            <h2>Signup interface failed to load</h2>
+
+            <p>
+              The InvoiceFlow signup interface could not be loaded.
+            </p>
+
+            <button
+              type="button"
+              class="btn btn-primary"
+              id="fallback-login-btn"
+            >
+              Back to sign in
+            </button>
+          </div>
+        </div>
+      `;
+
+      const fallbackBtn =
+        document.getElementById(
+          'fallback-login-btn'
+        );
+
+      if (fallbackBtn) {
+        fallbackBtn.onclick =
+          () => {
+            location.hash =
+              '#/login';
+          };
+      }
+
+      return;
+    }
+
+    root.innerHTML =
+      renderSignup(
+        error || null
+      );
+
+    // ---------------------------------------------------------------
+    // Back to login
+    // ---------------------------------------------------------------
+
+    const loginLink =
+      document.getElementById(
+        'signup-login-link'
+      );
+
+    if (loginLink) {
+      loginLink.onclick =
+        () => {
+          location.hash =
+            '#/login';
+        };
+    }
+
+    // ---------------------------------------------------------------
+    // Signup form
+    // ---------------------------------------------------------------
+
+    const signupForm =
+      document.getElementById(
+        'signup-form'
+      );
+
+    if (!signupForm) {
+      console.error(
+        '[Signup] #signup-form was not found.'
+      );
+
+      return;
+    }
+
+    signupForm.onsubmit =
+      async (event) => {
+        event.preventDefault();
+
+        const submitBtn =
+          signupForm.querySelector(
+            'button[type="submit"]'
+          );
+
+        const form =
+          new FormData(
+            signupForm
+          );
+
+        const name =
+          String(
+            form.get('name') ||
+            ''
+          ).trim();
+
+        const email =
+          String(
+            form.get('email') ||
+            ''
+          ).trim()
+            .toLowerCase();
+
+        const password =
+          String(
+            form.get('password') ||
+            ''
+          );
+
+        const confirmPassword =
+          String(
+            form.get('confirmPassword') ||
+            ''
+          );
+
+        // -----------------------------------------------------------
+        // Validation
+        // -----------------------------------------------------------
+
+        if (
+          !name ||
+          !email ||
+          !password ||
+          !confirmPassword
+        ) {
+          renderSignup(
+            'Please complete all fields.'
+          );
+
+          return;
+        }
+
+        if (
+          !email.includes('@') ||
+          !email.includes('.')
+        ) {
+          renderSignup(
+            'Please enter a valid email address.'
+          );
+
+          return;
+        }
+
+        if (
+          password.length < 8
+        ) {
+          renderSignup(
+            'Your password must be at least 8 characters.'
+          );
+
+          return;
+        }
+
+        if (
+          password !==
+          confirmPassword
+        ) {
+          renderSignup(
+            'Your passwords do not match.'
+          );
+
+          return;
+        }
+
+        // -----------------------------------------------------------
+        // API availability
+        // -----------------------------------------------------------
+
+        if (
+          !hasAPI() ||
+          !hasFunction(
+            API,
+            'register'
+          )
+        ) {
+          renderSignup(
+            'Signup is not available because the registration API is missing.'
+          );
+
+          console.error(
+            '[Signup] API.register() is not available.'
+          );
+
+          return;
+        }
+
+        // -----------------------------------------------------------
+        // Submit
+        // -----------------------------------------------------------
+
+        if (submitBtn) {
+          submitBtn.disabled =
+            true;
+
+          submitBtn.textContent =
+            'Creating account…';
+        }
+
+        try {
+          console.log(
+            '[Signup] Creating account:',
+            {
+              name,
+              email,
+            }
+          );
+
+          const response =
+            await API.register({
+              name,
+              email,
+              password,
+            });
+
+          console.log(
+            '[Signup] Registration successful:',
+            response
+          );
+
+          if (
+            !response ||
+            response.success === false
+          ) {
+            throw new Error(
+              response?.message ||
+              response?.error ||
+              'The server could not create your account.'
+            );
+          }
+
+          // ---------------------------------------------------------
+          // Some backends automatically log the user in.
+          // If a token is returned, use it immediately.
+          // Otherwise send them to login.
+          // ---------------------------------------------------------
+
+          if (
+            response.token &&
+            response.user
+          ) {
+            setLoggedIn(
+              response.token,
+              response.user
+            );
+
+            toast(
+              'Account created successfully.',
+              'success'
+            );
+
+            location.hash =
+              '#/dashboard';
+
+            return;
+          }
+
+          toast(
+            'Account created successfully. Please sign in.',
+            'success'
+          );
+
+          location.hash =
+            '#/login';
+
+        } catch (error) {
+          console.error(
+            '[Signup] Signup failed:',
+            error
+          );
+
+          if (submitBtn) {
+            submitBtn.disabled =
+              false;
+
+            submitBtn.textContent =
+              'Create account';
+          }
+
+          renderSignup(
+            error?.message ||
+            'Unable to create your account.'
           );
         }
       };
@@ -1430,10 +1760,6 @@
 
     bindShellEvents();
 
-    // ---------------------------------------------------------------
-    // Document preview
-    // ---------------------------------------------------------------
-
     const docImgWrap =
       document.getElementById(
         'review-doc-image'
@@ -1499,10 +1825,6 @@
         }
       }
     }
-
-    // ---------------------------------------------------------------
-    // Editable fields
-    // ---------------------------------------------------------------
 
     document
       .querySelectorAll(
@@ -1582,10 +1904,6 @@
         );
       });
 
-    // ---------------------------------------------------------------
-    // APPROVE
-    // ---------------------------------------------------------------
-
     const approveBtn =
       document.getElementById(
         'btn-approve'
@@ -1643,10 +1961,6 @@
         };
     }
 
-    // ---------------------------------------------------------------
-    // REJECT
-    // ---------------------------------------------------------------
-
     const rejectBtn =
       document.getElementById(
         'btn-reject'
@@ -1659,10 +1973,6 @@
             invoice.id
           );
     }
-
-    // ---------------------------------------------------------------
-    // RETAKE / RETRY
-    // ---------------------------------------------------------------
 
     const retakeBtn =
       document.getElementById(
@@ -2052,10 +2362,6 @@
           };
       });
 
-    // ---------------------------------------------------------------
-    // Export all
-    // ---------------------------------------------------------------
-
     const exportAllBtn =
       document.getElementById(
         'btn-export-all'
@@ -2090,10 +2396,6 @@
           }
         };
     }
-
-    // ---------------------------------------------------------------
-    // Export selected
-    // ---------------------------------------------------------------
 
     const exportSelectedBtn =
       document.getElementById(
