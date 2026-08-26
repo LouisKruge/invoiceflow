@@ -2,6 +2,7 @@
 // InvoiceFlow — Frontend API Module
 // =============================================================================
 // Browser-side API client.
+//
 // IMPORTANT:
 // - This file runs in the browser.
 // - Do NOT use require(), dotenv, express, pg, fs, path, or other Node modules.
@@ -57,12 +58,23 @@
       opts.headers || {}
     );
 
+    // Internal option.
+    // Prevents login/register 401/403 responses from being treated
+    // as an expired existing session.
+    const skipAuthFailureHandling =
+      opts.skipAuthFailureHandling === true;
+
+    // Do not send this internal option to fetch().
+    delete opts.skipAuthFailureHandling;
+
     // Do not set JSON content type for FormData.
     if (!(opts.body instanceof FormData)) {
-      headers['Content-Type'] = 'application/json';
+      headers['Content-Type'] =
+        'application/json';
     }
 
-    const currentToken = token();
+    const currentToken =
+      token();
 
     if (currentToken) {
       headers['Authorization'] =
@@ -72,13 +84,15 @@
     let response;
 
     try {
-      response = await fetch(
-        BASE + path,
-        {
-          ...opts,
-          headers
-        }
-      );
+      response =
+        await fetch(
+          BASE + path,
+          {
+            ...opts,
+            headers
+          }
+        );
+
     } catch (error) {
       throw new Error(
         'Unable to connect to InvoiceFlow. Please check your internet connection.'
@@ -86,10 +100,14 @@
     }
 
     const contentType =
-      response.headers.get('content-type') || '';
+      response.headers.get(
+        'content-type'
+      ) || '';
 
     const isJson =
-      contentType.includes('application/json');
+      contentType.includes(
+        'application/json'
+      );
 
     // ========================================================================
     // AUTH FAILURE
@@ -99,34 +117,30 @@
       response.status === 401 ||
       response.status === 403
     ) {
-      /*
-       * IMPORTANT:
-       *
-       * Do not automatically destroy a saved session for failed
-       * login/register requests.
-       *
-       * A 401 during login simply means the supplied credentials
-       * are invalid. Clearing an existing token here can create
-       * confusing behaviour.
-       */
-
-      if (
-        !path.startsWith('/auth/login') &&
-        !path.startsWith('/auth/register')
-      ) {
-        invalidateSession();
-      }
-
       let message =
         'Your session has expired. Please sign in again.';
 
       if (isJson) {
         const body =
-          await response.json().catch(() => ({}));
+          await response
+            .json()
+            .catch(() => ({}));
 
-        if (body && body.error) {
-          message = body.error;
+        if (
+          body &&
+          body.error
+        ) {
+          message =
+            body.error;
         }
+      }
+
+      // Login/register failures must NOT clear an existing session
+      // automatically.
+      if (
+        !skipAuthFailureHandling
+      ) {
+        invalidateSession();
       }
 
       const error =
@@ -136,8 +150,7 @@
         response.status;
 
       error.sessionExpired =
-        !path.startsWith('/auth/login') &&
-        !path.startsWith('/auth/register');
+        !skipAuthFailureHandling;
 
       throw error;
     }
@@ -152,14 +165,22 @@
 
       if (isJson) {
         const body =
-          await response.json().catch(() => ({}));
+          await response
+            .json()
+            .catch(() => ({}));
 
-        if (body && body.error) {
-          message = body.error;
+        if (
+          body &&
+          body.error
+        ) {
+          message =
+            body.error;
         }
       } else {
         const text =
-          await response.text().catch(() => '');
+          await response
+            .text()
+            .catch(() => '');
 
         if (text) {
           message = text;
@@ -190,35 +211,40 @@
   // AUTH — LOGIN
   // ===========================================================================
 
-  async function login(email, password) {
+  async function login(
+    email,
+    password
+  ) {
     const data =
       await request(
         '/auth/login',
         {
           method: 'POST',
-          body: JSON.stringify({
-            email,
-            password
-          })
+
+          body:
+            JSON.stringify({
+              email,
+              password
+            }),
+
+          // IMPORTANT:
+          // A failed login must NOT be treated as an expired session.
+          skipAuthFailureHandling: true
         }
       );
 
-    if (!data || !data.token) {
+    if (
+      !data ||
+      !data.token
+    ) {
       throw new Error(
         'Login succeeded but the server did not return a session token.'
       );
     }
 
-    /*
-     * Save token immediately.
-     *
-     * This means:
-     * - refreshing the page keeps the user logged in
-     * - closing/reopening the browser keeps the session
-     * - API.me() can restore the user on application startup
-     */
-
-    setToken(data.token);
+    setToken(
+      data.token
+    );
 
     return data;
   }
@@ -230,43 +256,72 @@
   async function register(
     name,
     email,
-    password
+    password,
+    companyName
   ) {
     const data =
       await request(
         '/auth/register',
         {
           method: 'POST',
-          body: JSON.stringify({
-            name,
-            email,
-            password
-          })
+
+          body:
+            JSON.stringify({
+              name,
+              email,
+              password,
+              company_name:
+                companyName
+            }),
+
+          // IMPORTANT:
+          // Registration errors such as 403 when registration is closed
+          // should be shown to the user, not treated as session expiry.
+          skipAuthFailureHandling: true
         }
       );
 
-    /*
-     * The preferred backend behaviour is to return a token
-     * immediately after creating the account.
-     *
-     * That gives us:
-     *
-     * Sign Up
-     *   ↓
-     * Account created
-     *   ↓
-     * JWT returned
-     *   ↓
-     * User automatically logged in
-     *   ↓
-     * Dashboard
-     */
-
-    if (data?.token) {
-      setToken(data.token);
+    if (
+      !data ||
+      !data.token
+    ) {
+      throw new Error(
+        'Account was created but the server did not return a session token.'
+      );
     }
 
+    if (
+      !data.user
+    ) {
+      throw new Error(
+        'Account was created but the server did not return the user profile.'
+      );
+    }
+
+    // Backend automatically creates a JWT.
+    // Save it immediately so the new user is logged in.
+    setToken(
+      data.token
+    );
+
     return data;
+  }
+
+  // ===========================================================================
+  // AUTH — SETUP STATUS
+  // ===========================================================================
+
+  async function setupStatus() {
+    return request(
+      '/auth/setup-status',
+      {
+        method: 'GET',
+
+        // This endpoint is intentionally public.
+        // Never invalidate a session based on its response.
+        skipAuthFailureHandling: true
+      }
+    );
   }
 
   // ===========================================================================
@@ -274,7 +329,9 @@
   // ===========================================================================
 
   async function me() {
-    return request('/auth/me');
+    return request(
+      '/auth/me'
+    );
   }
 
   // ===========================================================================
@@ -282,7 +339,9 @@
   // ===========================================================================
 
   async function health() {
-    return request('/health');
+    return request(
+      '/health'
+    );
   }
 
   // ===========================================================================
@@ -290,17 +349,23 @@
   // ===========================================================================
 
   async function dashboardSummary() {
-    return request('/dashboard/summary');
+    return request(
+      '/dashboard/summary'
+    );
   }
 
   // ===========================================================================
   // INVOICES
   // ===========================================================================
 
-  async function listInvoices(params = {}) {
+  async function listInvoices(
+    params = {}
+  ) {
     const cleanParams =
       Object.fromEntries(
-        Object.entries(params).filter(
+        Object.entries(
+          params
+        ).filter(
           ([, value]) =>
             value !== undefined &&
             value !== null &&
@@ -322,7 +387,9 @@
     );
   }
 
-  async function getInvoice(id) {
+  async function getInvoice(
+    id
+  ) {
     return request(
       `/invoices/${encodeURIComponent(id)}`
     );
@@ -332,7 +399,9 @@
   // INVOICE DOCUMENT
   // ===========================================================================
 
-  function documentUrl(id) {
+  function documentUrl(
+    id
+  ) {
     const currentToken =
       token();
 
@@ -341,17 +410,22 @@
     }
 
     return (
-      `${BASE}/invoices/${encodeURIComponent(id)}` +
-      `/document?t=${encodeURIComponent(currentToken)}`
+      `${BASE}/invoices/` +
+      `${encodeURIComponent(id)}` +
+      `/document?t=` +
+      `${encodeURIComponent(currentToken)}`
     );
   }
 
-  async function fetchDocumentBlob(id) {
+  async function fetchDocumentBlob(
+    id
+  ) {
     const currentToken =
       token();
 
     if (!currentToken) {
       invalidateSession();
+
       return null;
     }
 
@@ -360,7 +434,9 @@
     try {
       response =
         await fetch(
-          `${BASE}/invoices/${encodeURIComponent(id)}/document`,
+          `${BASE}/invoices/` +
+          `${encodeURIComponent(id)}` +
+          `/document`,
           {
             headers: {
               Authorization:
@@ -368,6 +444,7 @@
             }
           }
         );
+
     } catch (error) {
       throw new Error(
         'Unable to load the invoice document. Please check your connection.'
@@ -403,7 +480,9 @@
     const blob =
       await response.blob();
 
-    return URL.createObjectURL(blob);
+    return URL.createObjectURL(
+      blob
+    );
   }
 
   // ===========================================================================
@@ -490,7 +569,8 @@
       `/invoices/${encodeURIComponent(id)}`,
       {
         method: 'PATCH',
-        body: JSON.stringify(fields)
+        body:
+          JSON.stringify(fields)
       }
     );
   }
@@ -499,7 +579,9 @@
   // APPROVE
   // ===========================================================================
 
-  async function approveInvoice(id) {
+  async function approveInvoice(
+    id
+  ) {
     return request(
       `/invoices/${encodeURIComponent(id)}/approve`,
       {
@@ -520,9 +602,11 @@
       `/invoices/${encodeURIComponent(id)}/reject`,
       {
         method: 'POST',
-        body: JSON.stringify({
-          reason
-        })
+
+        body:
+          JSON.stringify({
+            reason
+          })
       }
     );
   }
@@ -532,7 +616,9 @@
   // ===========================================================================
 
   async function listSuppliers() {
-    return request('/suppliers');
+    return request(
+      '/suppliers'
+    );
   }
 
   // ===========================================================================
@@ -540,7 +626,9 @@
   // ===========================================================================
 
   function exportAllUrl() {
-    return `${BASE}/export/all`;
+    return (
+      `${BASE}/export/all`
+    );
   }
 
   function exportRangeUrl(
@@ -558,14 +646,18 @@
   // EXPORT SELECTED
   // ===========================================================================
 
-  async function exportSelected(ids) {
+  async function exportSelected(
+    ids
+  ) {
     return request(
       '/export/selected',
       {
         method: 'POST',
-        body: JSON.stringify({
-          ids
-        })
+
+        body:
+          JSON.stringify({
+            ids
+          })
       }
     );
   }
@@ -580,7 +672,10 @@
     onProgress
   ) {
     return new Promise(
-      (resolve, reject) => {
+      (
+        resolve,
+        reject
+      ) => {
         const currentToken =
           token();
 
@@ -644,6 +739,7 @@
                     '{}'
                   );
               }
+
             } catch (error) {
               console.warn(
                 '[InvoiceFlow] Could not parse upload response:',
@@ -675,7 +771,9 @@
               error.sessionExpired =
                 true;
 
-              reject(error);
+              reject(
+                error
+              );
 
               return;
             }
@@ -697,7 +795,9 @@
               error.status =
                 xhr.status;
 
-              reject(error);
+              reject(
+                error
+              );
 
               return;
             }
@@ -706,7 +806,9 @@
             // SUCCESS
             // ================================================================
 
-            resolve(data);
+            resolve(
+              data
+            );
           };
 
         xhr.onerror =
@@ -751,45 +853,80 @@
   // ===========================================================================
 
   const API = {
+
+    // -------------------------------------------------------------------------
     // Auth
+    // -------------------------------------------------------------------------
+
     login,
     register,
+    setupStatus,
     me,
 
+    // -------------------------------------------------------------------------
     // Health
+    // -------------------------------------------------------------------------
+
     health,
 
+    // -------------------------------------------------------------------------
     // Dashboard
+    // -------------------------------------------------------------------------
+
     dashboardSummary,
 
+    // -------------------------------------------------------------------------
     // Invoices
+    // -------------------------------------------------------------------------
+
     listInvoices,
     getInvoice,
 
+    // -------------------------------------------------------------------------
     // Documents
+    // -------------------------------------------------------------------------
+
     documentUrl,
     fetchDocumentBlob,
 
+    // -------------------------------------------------------------------------
     // Capture
+    // -------------------------------------------------------------------------
+
     captureInvoice,
     retryInvoice,
 
+    // -------------------------------------------------------------------------
     // Editing
+    // -------------------------------------------------------------------------
+
     updateInvoice,
 
+    // -------------------------------------------------------------------------
     // Approval
+    // -------------------------------------------------------------------------
+
     approveInvoice,
     rejectInvoice,
 
+    // -------------------------------------------------------------------------
     // Suppliers
+    // -------------------------------------------------------------------------
+
     listSuppliers,
 
+    // -------------------------------------------------------------------------
     // Exports
+    // -------------------------------------------------------------------------
+
     exportAllUrl,
     exportRangeUrl,
     exportSelected,
 
-    // Token/session
+    // -------------------------------------------------------------------------
+    // Token / session
+    // -------------------------------------------------------------------------
+
     setToken,
     clearToken,
     token,
