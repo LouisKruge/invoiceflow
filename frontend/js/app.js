@@ -1,19 +1,11 @@
 // app.js — router + state + event wiring for the InvoiceFlow SPA.
-// Production frontend:
-// - No mock invoice data
-// - No mock AI data
-// - Uses the real backend API
-// - Automatically clears expired sessions
-// - Provides a visible session reset option
-// - Mobile-friendly authentication and invoice capture
+// Production version: no mock invoice data or mock AI logic.
 
 const AppState = {
   user: null,
   health: null,
   invoiceFilters: { q: '', status: 'all' },
   selectedIds: new Set(),
-  booting: false,
-  sessionError: null,
 };
 
 const root = document.getElementById('app');
@@ -23,9 +15,9 @@ const root = document.getElementById('app');
 // -----------------------------------------------------------------------------
 
 function toast(message, type = '') {
-  const container = document.getElementById('toast-root');
+  const toastRoot = document.getElementById('toast-root');
 
-  if (!container) {
+  if (!toastRoot) {
     console[type === 'error' ? 'error' : 'log'](message);
     return;
   }
@@ -34,37 +26,31 @@ function toast(message, type = '') {
   el.className = `toast ${type}`;
   el.textContent = message;
 
-  container.appendChild(el);
+  toastRoot.appendChild(el);
 
   setTimeout(() => {
-    if (el.parentNode) el.remove();
+    el.remove();
   }, 3800);
 }
 
 // -----------------------------------------------------------------------------
-// Authentication / Session
+// Authentication
 // -----------------------------------------------------------------------------
 
 function setLoggedIn(token, user) {
-  if (!token) {
-    throw new Error('Authentication token was not returned by the server.');
-  }
-
   API.setToken(token);
-  AppState.user = user || null;
-  AppState.sessionError = null;
+  AppState.user = user;
 }
 
 function logout(showMessage = false) {
   API.clearToken();
-
   AppState.user = null;
   AppState.health = null;
   AppState.selectedIds.clear();
-  AppState.sessionError = null;
+  AppState.invoiceFilters = { q: '', status: 'all' };
 
   if (showMessage) {
-    toast('You have been signed out.', 'success');
+    toast('You have been signed out.');
   }
 
   if (location.hash !== '#/login') {
@@ -72,43 +58,6 @@ function logout(showMessage = false) {
   } else {
     router();
   }
-}
-
-function handleSessionExpired(message = 'Your session has expired. Please sign in again.') {
-  API.clearToken();
-
-  AppState.user = null;
-  AppState.health = null;
-  AppState.selectedIds.clear();
-  AppState.sessionError = message;
-
-  if (location.hash !== '#/login') {
-    location.hash = '#/login';
-  } else {
-    renderLoginPage(message);
-  }
-}
-
-function isAuthError(error) {
-  return error && (error.status === 401 || error.status === 403);
-}
-
-// -----------------------------------------------------------------------------
-// Generic API error handling
-// -----------------------------------------------------------------------------
-
-function handleApiError(error, fallbackMessage = 'Something went wrong.') {
-  console.error('[InvoiceFlow]', error);
-
-  if (isAuthError(error)) {
-    handleSessionExpired(
-      error.message || 'Your session has expired. Please sign in again.'
-    );
-    return true;
-  }
-
-  toast(error?.message || fallbackMessage, 'error');
-  return false;
 }
 
 // -----------------------------------------------------------------------------
@@ -144,47 +93,58 @@ async function router() {
     const invoiceMatch = hash.match(/^#\/invoices\/(.+)$/);
     const reviewMatch = hash.match(/^#\/review\/(.+)$/);
 
-    // No session.
+    // -------------------------------------------------------------------------
+    // Authentication guard
+    // -------------------------------------------------------------------------
+
     if (!API.token() && hash !== '#/login') {
-      location.hash = '#/login';
+      if (location.hash !== '#/login') {
+        location.hash = '#/login';
+      } else {
+        await renderLoginPage();
+      }
       return;
     }
 
-    // Already authenticated.
     if (API.token() && hash === '#/login') {
       location.hash = '#/dashboard';
       return;
     }
 
-    // Load authenticated user.
+    // -------------------------------------------------------------------------
+    // Load authenticated user
+    // -------------------------------------------------------------------------
+
     if (API.token() && !AppState.user) {
       try {
         const response = await API.me();
 
         if (!response || !response.user) {
-          throw new Error('Authentication response did not contain a user.');
+          throw new Error('Session is no longer valid.');
         }
 
         AppState.user = response.user;
-        AppState.sessionError = null;
       } catch (error) {
-        if (isAuthError(error)) {
-          handleSessionExpired(
-            'Your session is no longer valid. Please sign in again.'
-          );
-        } else {
-          console.error('[Router] Failed to load authenticated user:', error);
-          toast(
-            error?.message || 'Unable to verify your session.',
-            'error'
-          );
+        API.clearToken();
+        AppState.user = null;
+        AppState.health = null;
+
+        if (location.hash !== '#/login') {
+          location.hash = '#/login';
         }
+
+        await renderLoginPage(
+          'Your session has expired. Please sign in again.'
+        );
 
         return;
       }
     }
 
-    // Load backend health once per session.
+    // -------------------------------------------------------------------------
+    // Load backend health
+    // -------------------------------------------------------------------------
+
     if (API.token() && !AppState.health) {
       try {
         const response = await fetch('/api/health', {
@@ -197,9 +157,13 @@ async function router() {
           AppState.health = await response.json();
         }
       } catch (error) {
-        console.warn('[Router] Health check failed:', error);
+        console.warn('[app] Could not load backend health:', error);
       }
     }
+
+    // -------------------------------------------------------------------------
+    // Detail routes
+    // -------------------------------------------------------------------------
 
     if (invoiceMatch) {
       await renderInvoiceDetailPage(invoiceMatch[1]);
@@ -211,6 +175,10 @@ async function router() {
       return;
     }
 
+    // -------------------------------------------------------------------------
+    // Normal routes
+    // -------------------------------------------------------------------------
+
     const handler = routes[hash] || renderDashboardPage;
 
     await handler();
@@ -220,10 +188,13 @@ async function router() {
 }
 
 window.addEventListener('hashchange', router);
-window.addEventListener('DOMContentLoaded', router);
+
+window.addEventListener('DOMContentLoaded', () => {
+  router();
+});
 
 // -----------------------------------------------------------------------------
-// Shell
+// Shell mount
 // -----------------------------------------------------------------------------
 
 async function mountShell(contentHtml, activeRoute) {
@@ -234,26 +205,15 @@ async function mountShell(contentHtml, activeRoute) {
       status: 'exception',
     });
 
-    exceptionsCount = Array.isArray(response?.invoices)
+    exceptionsCount = Array.isArray(response.invoices)
       ? response.invoices.length
       : 0;
   } catch (error) {
-    if (isAuthError(error)) {
-      handleSessionExpired(
-        'Your session is no longer valid. Please sign in again.'
-      );
-      return false;
-    }
-
+    // Do not break the application if the exception counter fails.
     console.warn(
-      '[Shell] Could not load exception count:',
-      error
+      '[app] Could not load exception count:',
+      error.message
     );
-  }
-
-  if (!AppState.user) {
-    location.hash = '#/login';
-    return false;
   }
 
   root.innerHTML = renderShell(
@@ -264,9 +224,11 @@ async function mountShell(contentHtml, activeRoute) {
   );
 
   bindShellEvents();
-
-  return true;
 }
+
+// -----------------------------------------------------------------------------
+// Shell events
+// -----------------------------------------------------------------------------
 
 function bindShellEvents() {
   root.querySelectorAll('[data-route]').forEach((el) => {
@@ -283,7 +245,7 @@ function bindShellEvents() {
 
   if (logoutBtn) {
     logoutBtn.onclick = () => {
-      logout(true);
+      logout();
     };
   }
 
@@ -298,7 +260,9 @@ function bindShellEvents() {
   const mobileNavBtn = document.getElementById('mobile-nav-btn');
 
   if (mobileNavBtn) {
-    mobileNavBtn.onclick = () => openMobileNav();
+    mobileNavBtn.onclick = () => {
+      openMobileNav();
+    };
   }
 }
 
@@ -307,16 +271,9 @@ function bindShellEvents() {
 // -----------------------------------------------------------------------------
 
 function openMobileNav() {
-  const existing = document.querySelector('.mobile-nav-backdrop');
-
-  if (existing) {
-    existing.remove();
-  }
-
   const backdrop = document.createElement('div');
 
-  backdrop.className = 'modal-backdrop mobile-nav-backdrop';
-
+  backdrop.className = 'modal-backdrop';
   backdrop.style.justifyContent = 'flex-start';
   backdrop.style.alignItems = 'stretch';
   backdrop.style.padding = '0';
@@ -339,7 +296,6 @@ function openMobileNav() {
         max-width:280px;
         padding:20px 16px;
         color:#fff;
-        min-height:100vh;
       "
     >
       <div
@@ -350,9 +306,7 @@ function openMobileNav() {
           margin-bottom:20px;
         "
       >
-        <div style="font-weight:800;">
-          InvoiceFlow
-        </div>
+        <div style="font-weight:800;">InvoiceFlow</div>
 
         <button
           class="icon-btn"
@@ -402,7 +356,9 @@ function openMobileNav() {
   const closeBtn = backdrop.querySelector('#close-mobile-nav');
 
   if (closeBtn) {
-    closeBtn.onclick = () => backdrop.remove();
+    closeBtn.onclick = () => {
+      backdrop.remove();
+    };
   }
 
   const mobileLogoutBtn = backdrop.querySelector(
@@ -412,7 +368,7 @@ function openMobileNav() {
   if (mobileLogoutBtn) {
     mobileLogoutBtn.onclick = () => {
       backdrop.remove();
-      logout(true);
+      logout();
     };
   }
 
@@ -434,267 +390,132 @@ function openMobileNav() {
 // -----------------------------------------------------------------------------
 
 function renderLoginPage(error) {
-  const hasExistingToken = !!API.token();
+  root.innerHTML = renderLogin(error);
 
-  const sessionMessage =
-    error ||
-    AppState.sessionError ||
-    null;
+  /*
+   * Demo login accounts intentionally removed.
+   * Production authentication uses the real backend.
+   */
 
-  root.innerHTML = renderLogin(sessionMessage);
+  const loginForm = document.getElementById('login-form');
 
-  // If a stale token exists, show a clear-session option.
-  if (hasExistingToken) {
-    const authCard = root.querySelector('.auth-card');
-
-    if (authCard) {
-      const existingSession = document.createElement('div');
-
-      existingSession.className = 'auth-error';
-
-      existingSession.style.marginTop = '12px';
-
-      existingSession.innerHTML = `
-        <div style="margin-bottom:8px;">
-          A saved session exists in this browser.
-          If the app says your session is no longer valid,
-          clear it and sign in again.
-        </div>
-
-        <button
-          type="button"
-          class="btn btn-ghost btn-block"
-          id="clear-session-btn"
-        >
-          Clear saved session
-        </button>
-      `;
-
-      authCard.appendChild(existingSession);
-
-      const clearBtn =
-        existingSession.querySelector('#clear-session-btn');
-
-      if (clearBtn) {
-        clearBtn.onclick = () => {
-          API.clearToken();
-
-          AppState.user = null;
-          AppState.health = null;
-          AppState.sessionError = null;
-
-          toast('Saved session cleared.', 'success');
-
-          renderLoginPage();
-        };
-      }
-    }
+  if (!loginForm) {
+    return;
   }
-
-  // Demo chips.
-  // These only fill the login form.
-  // They do NOT create invoice mock data.
-  document.querySelectorAll('.demo-chip').forEach((chip) => {
-    chip.onclick = () => {
-      const emailInput =
-        document.querySelector('input[name="email"]');
-
-      const passwordInput =
-        document.querySelector('input[name="password"]');
-
-      if (emailInput) {
-        emailInput.value = chip.dataset.email || '';
-      }
-
-      if (passwordInput) {
-        passwordInput.value = chip.dataset.pass || '';
-      }
-    };
-  });
-
-  const loginForm =
-    document.getElementById('login-form');
-
-  if (!loginForm) return;
 
   loginForm.onsubmit = async (event) => {
     event.preventDefault();
 
-    const submitBtn =
-      loginForm.querySelector('button[type="submit"]');
+    const submitButton = loginForm.querySelector(
+      'button[type="submit"]'
+    );
 
     const form = new FormData(loginForm);
 
-    const email = String(
-      form.get('email') || ''
-    ).trim();
-
-    const password = String(
-      form.get('password') || ''
-    );
+    const email = String(form.get('email') || '').trim();
+    const password = String(form.get('password') || '');
 
     if (!email || !password) {
       renderLoginPage('Please enter your email and password.');
       return;
     }
 
-    if (submitBtn) {
-      submitBtn.disabled = true;
-      submitBtn.textContent = 'Signing in…';
-    }
-
     try {
-      const response = await API.login(
-        email,
-        password
-      );
-
-      if (!response?.token) {
-        throw new Error(
-          'The server did not return an authentication token.'
-        );
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = 'Signing in…';
       }
 
-      if (!response?.user) {
-        throw new Error(
-          'The server did not return your user profile.'
-        );
+      const response = await API.login(email, password);
+
+      if (!response || !response.token || !response.user) {
+        throw new Error('Invalid authentication response from server.');
       }
 
-      setLoggedIn(
-        response.token,
-        response.user
-      );
+      setLoggedIn(response.token, response.user);
 
-      AppState.sessionError = null;
+      AppState.health = null;
 
       location.hash = '#/dashboard';
     } catch (error) {
-      console.error('[Login] Login failed:', error);
-
-      if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Sign in';
-      }
+      console.error('[app] Login failed:', error);
 
       renderLoginPage(
-        error?.message || 'Unable to sign in.'
+        error?.message || 'Unable to sign in. Please try again.'
       );
     }
   };
 }
 
 // -----------------------------------------------------------------------------
-// Dashboard
+// Dashboard page
 // -----------------------------------------------------------------------------
 
 async function renderDashboardPage() {
-  const mounted = await mountShell(
+  await mountShell(
     `<div class="loading-inline">Loading dashboard…</div>`,
     '#/dashboard'
   );
 
-  if (!mounted) return;
-
   try {
     const data = await API.dashboardSummary();
 
-    const content =
-      document.querySelector('.content');
-
-    if (!content) return;
-
-    content.innerHTML =
+    document.querySelector('.content').innerHTML =
       renderDashboard(data);
 
     bindShellEvents();
 
     document
-      .querySelectorAll(
-        '#recent-table tbody tr[data-id]'
-      )
-      .forEach((tr) => {
-        tr.onclick = () => {
-          location.hash =
-            `#/invoices/${tr.dataset.id}`;
+      .querySelectorAll('#recent-table tbody tr[data-id]')
+      .forEach((row) => {
+        row.onclick = () => {
+          location.hash = `#/invoices/${row.dataset.id}`;
         };
       });
   } catch (error) {
-    if (handleApiError(
-      error,
-      'Unable to load dashboard.'
-    )) return;
+    console.error('[app] Dashboard failed:', error);
+
+    toast(
+      error?.message || 'Unable to load dashboard.',
+      'error'
+    );
   }
 }
 
 // -----------------------------------------------------------------------------
-// Capture
+// Capture page
 // -----------------------------------------------------------------------------
 
 async function renderCapturePage() {
-  const mounted = await mountShell(
+  await mountShell(
     renderCapture(),
     '#/capture'
   );
 
-  if (!mounted) return;
+  const takePhotoButton =
+    document.getElementById('btn-take-photo');
 
-  const takePhotoBtn =
-    document.getElementById(
-      'btn-take-photo'
-    );
-
-  if (takePhotoBtn) {
-    takePhotoBtn.onclick = () => {
-      if (
-        typeof Camera === 'undefined' ||
-        !Camera.open
-      ) {
-        toast(
-          'Camera is not available on this device.',
-          'error'
-        );
-        return;
-      }
-
+  if (takePhotoButton) {
+    takePhotoButton.onclick = () => {
       Camera.open({
         onCapture: (file) => {
-          if (file) {
-            runCapture(file);
-          }
+          runCapture(file);
         },
         onCancel: () => {},
       });
     };
   }
 
-  const uploadBtn =
-    document.getElementById(
-      'btn-upload-invoice'
-    );
+  const uploadButton =
+    document.getElementById('btn-upload-invoice');
 
-  if (uploadBtn) {
-    uploadBtn.onclick = () => {
-      if (
-        typeof Camera === 'undefined' ||
-        !Camera.openNativePicker
-      ) {
-        toast(
-          'File picker is not available.',
-          'error'
-        );
-        return;
-      }
-
+  if (uploadButton) {
+    uploadButton.onclick = () => {
       Camera.openNativePicker({
         capture: false,
-
         onCapture: (file) => {
-          if (file) {
-            runCapture(file);
-          }
+          runCapture(file);
         },
-
         onCancel: () => {},
       });
     };
@@ -714,141 +535,90 @@ const PROCESSING_STAGES = [
 
 async function runCapture(file) {
   if (!file) {
-    toast(
-      'No invoice file was selected.',
-      'error'
-    );
+    toast('No invoice file was selected.', 'error');
     return;
   }
 
   let stageIndex = 0;
 
-  root.innerHTML =
-    renderProcessing(
-      stageIndex,
+  root.innerHTML = renderProcessing(
+    stageIndex,
+    PROCESSING_STAGES,
+    false
+  );
+
+  const stageTimer = setInterval(() => {
+    if (stageIndex < PROCESSING_STAGES.length - 1) {
+      stageIndex++;
+
+      root.innerHTML = renderProcessing(
+        stageIndex,
+        PROCESSING_STAGES,
+        false
+      );
+    }
+  }, 900);
+
+  try {
+    const result = await API.captureInvoice(file);
+
+    clearInterval(stageTimer);
+
+    root.innerHTML = renderProcessing(
+      PROCESSING_STAGES.length - 1,
       PROCESSING_STAGES,
       false
     );
 
-  let stageTimer = setInterval(() => {
-    if (
-      stageIndex <
-      PROCESSING_STAGES.length - 1
-    ) {
-      stageIndex++;
-
-      root.innerHTML =
-        renderProcessing(
-          stageIndex,
-          PROCESSING_STAGES,
-          false
-        );
-    }
-  }, 1200);
-
-  try {
-    console.log(
-      '[Capture] Sending invoice to production backend:',
-      {
-        name: file.name,
-        type: file.type,
-        size: file.size,
-      }
-    );
-
-    const result =
-      await API.captureInvoice(file);
-
-    clearInterval(stageTimer);
-    stageTimer = null;
-
-    if (
-      !result ||
-      !result.invoice ||
-      !result.invoice.id
-    ) {
+    if (!result || !result.invoice || !result.invoice.id) {
       throw new Error(
-        'The server processed the invoice but did not return an invoice ID.'
+        'The server did not return a valid processed invoice.'
       );
     }
-
-    root.innerHTML =
-      renderProcessing(
-        PROCESSING_STAGES.length - 1,
-        PROCESSING_STAGES,
-        false
-      );
 
     setTimeout(() => {
-      location.hash =
-        `#/review/${result.invoice.id}`;
-    }, 500);
+      location.hash = `#/review/${result.invoice.id}`;
 
-    if (result.warning) {
-      setTimeout(() => {
-        toast(
-          result.warning,
-          'error'
-        );
-      }, 800);
-    }
+      if (result.warning) {
+        toast(result.warning, 'error');
+      }
+    }, 500);
   } catch (error) {
-    if (stageTimer) {
-      clearInterval(stageTimer);
-      stageTimer = null;
-    }
+    clearInterval(stageTimer);
 
     console.error(
-      '[Capture] Invoice capture failed:',
+      '[app] Invoice capture failed:',
       error
     );
 
-    if (isAuthError(error)) {
-      handleSessionExpired(
-        'Your session expired while uploading the invoice. Please sign in again.'
-      );
-      return;
-    }
-
     toast(
-      `Upload failed: ${
-        error?.message ||
-        'Unknown error'
+      `Invoice processing failed: ${
+        error?.message || 'Unknown error'
       }`,
       'error'
     );
 
-    location.hash = '#/capture';
+    setTimeout(() => {
+      location.hash = '#/capture';
+    }, 100);
   }
 }
 
 // -----------------------------------------------------------------------------
-// Review
+// Review page
 // -----------------------------------------------------------------------------
 
-async function renderReviewPage(
-  id,
-  warning
-) {
-  const mounted =
-    await mountShell(
-      `<div class="loading-inline">Loading invoice…</div>`,
-      '#/invoices'
-    );
-
-  if (!mounted) return;
+async function renderReviewPage(id, warning) {
+  await mountShell(
+    `<div class="loading-inline">Loading invoice…</div>`,
+    '#/invoices'
+  );
 
   try {
-    const response =
-      await API.getInvoice(id);
+    const response = await API.getInvoice(id);
 
-    if (
-      !response ||
-      !response.invoice
-    ) {
-      throw new Error(
-        'Invoice was not returned by the server.'
-      );
+    if (!response || !response.invoice) {
+      throw new Error('Invoice could not be loaded.');
     }
 
     await paintReview(
@@ -856,12 +626,15 @@ async function renderReviewPage(
       warning
     );
   } catch (error) {
-    if (
-      handleApiError(
-        error,
-        'Unable to load invoice.'
-      )
-    ) return;
+    console.error(
+      '[app] Invoice review failed:',
+      error
+    );
+
+    toast(
+      error?.message || 'Unable to load invoice.',
+      'error'
+    );
 
     location.hash = '#/invoices';
   }
@@ -875,162 +648,94 @@ async function renderInvoiceDetailPage(id) {
 // Paint review
 // -----------------------------------------------------------------------------
 
-async function paintReview(
-  invoice,
-  warning
-) {
-  const content =
-    document.querySelector('.content');
-
-  if (!content) return;
-
-  content.innerHTML =
-    renderReview(
-      invoice,
-      { warning }
-    );
+async function paintReview(invoice, warning) {
+  document.querySelector('.content').innerHTML =
+    renderReview(invoice, { warning });
 
   bindShellEvents();
 
-  // ---------------------------------------------------------------------------
-  // Document preview
-  // ---------------------------------------------------------------------------
-
   const docImgWrap =
-    document.getElementById(
-      'review-doc-image'
-    );
+    document.getElementById('review-doc-image');
 
   if (docImgWrap) {
-    try {
-      const url =
-        await API.fetchDocumentBlob(
-          invoice.id
-        );
+    API.fetchDocumentBlob(invoice.id)
+      .then((url) => {
+        if (!docImgWrap.isConnected) return;
 
-      if (url) {
-        const current =
-          document.getElementById(
-            'review-doc-image'
-          );
-
-        if (current) {
-          current.outerHTML = `
+        if (url) {
+          docImgWrap.outerHTML = `
             <img
               id="review-doc-image"
               src="${url}"
               alt="Original invoice document"
-              style="max-width:100%;height:auto;"
             />
           `;
-        }
-      } else {
-        const current =
-          document.getElementById(
-            'review-doc-image'
-          );
-
-        if (current) {
-          current.textContent =
+        } else {
+          docImgWrap.textContent =
             'No document on file';
         }
-      }
-    } catch (error) {
-      if (isAuthError(error)) {
-        handleSessionExpired(
-          'Your session expired while loading the invoice document.'
-        );
-        return;
-      }
-
-      console.warn(
-        '[Review] Could not load invoice document:',
-        error
-      );
-
-      const current =
-        document.getElementById(
-          'review-doc-image'
-        );
-
-      if (current) {
-        current.textContent =
-          'Could not load document';
-      }
-    }
+      })
+      .catch(() => {
+        if (docImgWrap.isConnected) {
+          docImgWrap.textContent =
+            'Could not load document';
+        }
+      });
   }
 
   // ---------------------------------------------------------------------------
-  // Editable fields
+  // Editable invoice fields
   // ---------------------------------------------------------------------------
 
   document
-    .querySelectorAll(
-      '[data-field-input]'
-    )
+    .querySelectorAll('[data-field-input]')
     .forEach((input) => {
-      let original = input.value;
+      const original = input.value;
 
-      input.addEventListener(
-        'blur',
-        async () => {
-          const value =
-            input.value;
+      input.addEventListener('blur', async () => {
+        if (input.value === original) {
+          return;
+        }
 
-          if (value === original) {
-            return;
-          }
+        const field = input.dataset.fieldInput;
 
-          const field =
-            input.dataset.fieldInput;
-
-          if (!field) return;
-
+        try {
           input.disabled = true;
 
-          try {
-            const response =
-              await API.updateInvoice(
-                invoice.id,
-                {
-                  [field]: value,
-                }
-              );
-
-            if (
-              !response ||
-              !response.invoice
-            ) {
-              throw new Error(
-                'The server did not return the updated invoice.'
-              );
+          const response = await API.updateInvoice(
+            invoice.id,
+            {
+              [field]: input.value,
             }
+          );
 
-            original = value;
-
-            toast(
-              'Field updated',
-              'success'
+          if (!response || !response.invoice) {
+            throw new Error(
+              'Server did not return updated invoice.'
             );
-
-            await paintReview(
-              response.invoice,
-              warning
-            );
-          } catch (error) {
-            input.disabled = false;
-
-            if (
-              handleApiError(
-                error,
-                'Unable to update invoice field.'
-              )
-            ) {
-              return;
-            }
           }
+
+          toast('Field updated');
+
+          await paintReview(
+            response.invoice,
+            warning
+          );
+        } catch (error) {
+          console.error(
+            '[app] Invoice update failed:',
+            error
+          );
+
+          input.disabled = false;
+
+          toast(
+            error?.message ||
+              'Unable to update invoice.',
+            'error'
+          );
         }
-      );
+      });
     });
 
   // ---------------------------------------------------------------------------
@@ -1038,28 +743,20 @@ async function paintReview(
   // ---------------------------------------------------------------------------
 
   const approveBtn =
-    document.getElementById(
-      'btn-approve'
-    );
+    document.getElementById('btn-approve');
 
   if (approveBtn) {
     approveBtn.onclick = async () => {
-      approveBtn.disabled = true;
-      approveBtn.textContent =
-        'Approving…';
-
       try {
-        const response =
-          await API.approveInvoice(
-            invoice.id
-          );
+        approveBtn.disabled = true;
+        approveBtn.textContent = 'Approving…';
 
-        if (
-          !response ||
-          !response.invoice
-        ) {
+        const response =
+          await API.approveInvoice(invoice.id);
+
+        if (!response || !response.invoice) {
           throw new Error(
-            'The server did not return the approved invoice.'
+            'Server did not return the approved invoice.'
           );
         }
 
@@ -1072,18 +769,20 @@ async function paintReview(
           response.invoice
         );
       } catch (error) {
-        if (
-          handleApiError(
-            error,
-            'Unable to approve invoice.'
-          )
-        ) {
-          return;
-        }
+        console.error(
+          '[app] Invoice approval failed:',
+          error
+        );
 
         approveBtn.disabled = false;
         approveBtn.textContent =
           'Approve Invoice';
+
+        toast(
+          error?.message ||
+            'Unable to approve invoice.',
+          'error'
+        );
       }
     };
   }
@@ -1093,13 +792,12 @@ async function paintReview(
   // ---------------------------------------------------------------------------
 
   const rejectBtn =
-    document.getElementById(
-      'btn-reject'
-    );
+    document.getElementById('btn-reject');
 
   if (rejectBtn) {
-    rejectBtn.onclick = () =>
+    rejectBtn.onclick = () => {
       confirmReject(invoice.id);
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -1107,33 +805,17 @@ async function paintReview(
   // ---------------------------------------------------------------------------
 
   const retakeBtn =
-    document.getElementById(
-      'btn-retake'
-    );
+    document.getElementById('btn-retake');
 
   if (retakeBtn) {
     retakeBtn.onclick = () => {
-      if (
-        typeof Camera === 'undefined' ||
-        !Camera.open
-      ) {
-        toast(
-          'Camera is not available.',
-          'error'
-        );
-        return;
-      }
-
       Camera.open({
         onCapture: async (file) => {
-          if (!file) return;
-
-          root.innerHTML =
-            renderProcessing(
-              1,
-              PROCESSING_STAGES,
-              false
-            );
+          root.innerHTML = renderProcessing(
+            1,
+            PROCESSING_STAGES,
+            false
+          );
 
           try {
             const response =
@@ -1142,30 +824,23 @@ async function paintReview(
                 file
               );
 
-            if (
-              !response ||
-              !response.invoice
-            ) {
+            if (!response || !response.invoice) {
               throw new Error(
-                'The server did not return the reprocessed invoice.'
+                'Server did not return the reprocessed invoice.'
               );
             }
 
             location.hash =
               `#/review/${response.invoice.id}`;
           } catch (error) {
-            if (
-              handleApiError(
-                error,
-                'Unable to reprocess invoice.'
-              )
-            ) {
-              return;
-            }
+            console.error(
+              '[app] Invoice retry failed:',
+              error
+            );
 
             toast(
               error?.message ||
-                'Reprocessing failed.',
+                'Unable to reprocess invoice.',
               'error'
             );
 
@@ -1181,7 +856,7 @@ async function paintReview(
 }
 
 // -----------------------------------------------------------------------------
-// Reject modal
+// Reject confirmation
 // -----------------------------------------------------------------------------
 
 function confirmReject(id) {
@@ -1196,9 +871,9 @@ function confirmReject(id) {
       <h3>Reject this invoice?</h3>
 
       <p>
-        This marks the invoice as rejected
-        and removes it from approval queues.
-        This can be reviewed later in the archive.
+        This marks the invoice as rejected and removes it
+        from approval queues. This can be reviewed later
+        in the archive.
       </p>
 
       <div class="modal-actions">
@@ -1225,9 +900,7 @@ function confirmReject(id) {
     </div>
   `;
 
-  document.body.appendChild(
-    backdrop
-  );
+  document.body.appendChild(backdrop);
 
   const cancelBtn =
     backdrop.querySelector(
@@ -1235,8 +908,9 @@ function confirmReject(id) {
     );
 
   if (cancelBtn) {
-    cancelBtn.onclick = () =>
+    cancelBtn.onclick = () => {
       backdrop.remove();
+    };
   }
 
   const confirmBtn =
@@ -1246,78 +920,67 @@ function confirmReject(id) {
 
   if (confirmBtn) {
     confirmBtn.onclick = async () => {
-      confirmBtn.disabled = true;
-      confirmBtn.textContent =
-        'Rejecting…';
-
       try {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent =
+          'Rejecting…';
+
         const response =
           await API.rejectInvoice(id);
 
-        if (
-          !response ||
-          !response.invoice
-        ) {
+        if (!response || !response.invoice) {
           throw new Error(
-            'The server did not return the rejected invoice.'
+            'Server did not return the rejected invoice.'
           );
         }
 
         backdrop.remove();
 
         toast(
-          'Invoice rejected',
-          'success'
+          'Invoice rejected'
         );
 
         await paintReview(
           response.invoice
         );
       } catch (error) {
-        if (
-          handleApiError(
-            error,
-            'Unable to reject invoice.'
-          )
-        ) {
-          return;
-        }
+        console.error(
+          '[app] Invoice rejection failed:',
+          error
+        );
 
         confirmBtn.disabled = false;
         confirmBtn.textContent =
           'Reject Invoice';
+
+        toast(
+          error?.message ||
+            'Unable to reject invoice.',
+          'error'
+        );
       }
     };
   }
 }
 
 // -----------------------------------------------------------------------------
-// Invoices list
+// Invoices list page
 // -----------------------------------------------------------------------------
 
-async function renderInvoicesPage(
-  opts
-) {
-  const activeRoute =
+async function renderInvoicesPage(opts) {
+  await mountShell(
+    `<div class="loading-inline">Loading invoices…</div>`,
     opts.forceExceptionView
       ? '#/exceptions'
-      : '#/invoices';
+      : '#/invoices'
+  );
 
-  const mounted =
-    await mountShell(
-      `<div class="loading-inline">Loading invoices…</div>`,
-      activeRoute
-    );
-
-  if (!mounted) return;
-
-  const filters =
-    opts.status
-      ? {
-          ...AppState.invoiceFilters,
-          status: opts.status,
-        }
-      : AppState.invoiceFilters;
+  const filters = opts.status
+    ? {
+        ...AppState.invoiceFilters,
+        status: opts.status,
+      }
+    : AppState.invoiceFilters;
 
   await loadAndPaintInvoices(
     filters,
@@ -1334,47 +997,31 @@ async function loadAndPaintInvoices(
   try {
     const params = {
       q: filters.q,
-      status:
-        isExceptionView
-          ? undefined
-          : (
-              filters.status === 'all'
-                ? undefined
-                : filters.status
-            ),
+      status: isExceptionView
+        ? undefined
+        : filters.status === 'all'
+        ? undefined
+        : filters.status,
     };
 
     const response =
-      await API.listInvoices(
-        params
-      );
+      await API.listInvoices(params);
 
     const invoices =
-      Array.isArray(response?.invoices)
+      Array.isArray(response.invoices)
         ? response.invoices
         : [];
 
-    const finalList =
-      isExceptionView
-        ? invoices.filter(
-            (invoice) =>
-              [
-                'exception',
-                'duplicate',
-              ].includes(
-                invoice.status
-              )
-          )
-        : invoices;
+    const finalList = isExceptionView
+      ? invoices.filter((invoice) =>
+          [
+            'exception',
+            'duplicate',
+          ].includes(invoice.status)
+        )
+      : invoices;
 
-    const content =
-      document.querySelector(
-        '.content'
-      );
-
-    if (!content) return;
-
-    content.innerHTML =
+    document.querySelector('.content').innerHTML =
       renderInvoicesList(
         finalList,
         filters,
@@ -1389,9 +1036,15 @@ async function loadAndPaintInvoices(
       isExceptionView
     );
   } catch (error) {
-    handleApiError(
-      error,
-      'Unable to load invoices.'
+    console.error(
+      '[app] Invoice list failed:',
+      error
+    );
+
+    toast(
+      error?.message ||
+        'Unable to load invoices.',
+      'error'
     );
   }
 }
@@ -1405,12 +1058,16 @@ function bindInvoicesListEvents(
     .querySelectorAll(
       'table.data-table tbody tr[data-id]'
     )
-    .forEach((tr) => {
-      tr.onclick = () => {
+    .forEach((row) => {
+      row.onclick = () => {
         location.hash =
-          `#/invoices/${tr.dataset.id}`;
+          `#/invoices/${row.dataset.id}`;
       };
     });
+
+  // ---------------------------------------------------------------------------
+  // Search
+  // ---------------------------------------------------------------------------
 
   const searchInput =
     document.getElementById(
@@ -1435,6 +1092,10 @@ function bindInvoicesListEvents(
       }, 300);
     };
   }
+
+  // ---------------------------------------------------------------------------
+  // Status filters
+  // ---------------------------------------------------------------------------
 
   document
     .querySelectorAll(
@@ -1463,27 +1124,17 @@ function bindInvoicesListEvents(
     );
 
   if (exportAllBtn) {
-    exportAllBtn.onclick = async () => {
-      exportAllBtn.disabled = true;
-
-      try {
-        await downloadAuthenticated(
-          API.exportAllUrl(),
-          'invoiceflow-export.xlsx'
-        );
-
+    exportAllBtn.onclick = () => {
+      downloadAuthenticated(
+        API.exportAllUrl(),
+        'invoiceflow-export.xlsx'
+      ).catch((error) => {
         toast(
-          'Export downloaded',
-          'success'
+          error?.message ||
+            'Export failed.',
+          'error'
         );
-      } catch (error) {
-        handleApiError(
-          error,
-          'Export failed.'
-        );
-      } finally {
-        exportAllBtn.disabled = false;
-      }
+      });
     };
   }
 
@@ -1499,143 +1150,124 @@ function bindInvoicesListEvents(
   if (exportSelectedBtn) {
     exportSelectedBtn.onclick =
       async () => {
-        const ids =
-          Array.from(
-            document.querySelectorAll(
-              '.row-check:checked'
-            )
-          ).map(
-            (checkbox) =>
-              checkbox.dataset.id
-          );
+        const ids = Array.from(
+          document.querySelectorAll(
+            '.row-check:checked'
+          )
+        ).map(
+          (checkbox) =>
+            checkbox.dataset.id
+        );
 
         if (!ids.length) {
           toast(
-            'Select at least one invoice first.',
+            'Select at least one invoice first',
             'error'
           );
           return;
         }
 
-        exportSelectedBtn.disabled = true;
-
         try {
+          exportSelectedBtn.disabled =
+            true;
+
           const response =
-            await API.exportSelected(
-              ids
-            );
+            await API.exportSelected(ids);
 
-          // API.exportSelected() may return JSON
-          // or a backend response depending on implementation.
-          // If the API wrapper returns the actual response,
-          // handle it accordingly.
-
+          // If the API wrapper returns a normal response,
+          // handle it here.
           if (response instanceof Response) {
-            if (!response.ok) {
-              throw new Error(
-                'Export failed.'
-              );
-            }
-
             const blob =
               await response.blob();
 
-            triggerDownload(
-              blob,
+            const url =
+              URL.createObjectURL(blob);
+
+            const anchor =
+              document.createElement('a');
+
+            anchor.href = url;
+
+            anchor.download =
               `invoiceflow-selected-${new Date()
                 .toISOString()
-                .slice(0, 10)}.xlsx`
+                .slice(0, 10)}.xlsx`;
+
+            document.body.appendChild(
+              anchor
             );
-          } else {
-            // If backend/API returns a URL,
-            // allow it to be downloaded.
-            if (response?.url) {
-              await downloadAuthenticated(
-                response.url,
-                `invoiceflow-selected-${new Date()
-                  .toISOString()
-                  .slice(0, 10)}.xlsx`
-              );
-            } else {
-              throw new Error(
-                'The export response was invalid.'
-              );
-            }
+
+            anchor.click();
+
+            anchor.remove();
+
+            URL.revokeObjectURL(url);
           }
+        } catch (error) {
+          console.error(
+            '[app] Selected export failed:',
+            error
+          );
 
           toast(
-            'Selected invoices exported',
-            'success'
-          );
-        } catch (error) {
-          handleApiError(
-            error,
-            'Selected invoice export failed.'
+            error?.message ||
+              'Export failed.',
+            'error'
           );
         } finally {
-          exportSelectedBtn.disabled = false;
+          exportSelectedBtn.disabled =
+            false;
         }
       };
   }
 }
 
 // -----------------------------------------------------------------------------
-// Suppliers
+// Suppliers page
 // -----------------------------------------------------------------------------
 
 async function renderSuppliersPage() {
-  const mounted =
-    await mountShell(
-      `<div class="loading-inline">Loading suppliers…</div>`,
-      '#/suppliers'
-    );
-
-  if (!mounted) return;
+  await mountShell(
+    `<div class="loading-inline">Loading suppliers…</div>`,
+    '#/suppliers'
+  );
 
   try {
     const response =
       await API.listSuppliers();
 
     const suppliers =
-      Array.isArray(
-        response?.suppliers
-      )
+      Array.isArray(response.suppliers)
         ? response.suppliers
         : [];
 
-    const content =
-      document.querySelector(
-        '.content'
-      );
-
-    if (!content) return;
-
-    content.innerHTML =
-      renderSuppliers(
-        suppliers
-      );
+    document.querySelector('.content').innerHTML =
+      renderSuppliers(suppliers);
 
     bindShellEvents();
   } catch (error) {
-    handleApiError(
-      error,
-      'Unable to load suppliers.'
+    console.error(
+      '[app] Suppliers failed:',
+      error
+    );
+
+    toast(
+      error?.message ||
+        'Unable to load suppliers.',
+      'error'
     );
   }
 }
 
 // -----------------------------------------------------------------------------
-// Reports
+// Reports page
 // -----------------------------------------------------------------------------
 
 async function renderReportsPage() {
-  const mounted =
-    await mountShell(
-      `<div class="loading-inline">Loading reports…</div>`,
-      '#/reports'
-    );
-
-  if (!mounted) return;
+  await mountShell(
+    `<div class="loading-inline">Loading reports…</div>`,
+    '#/reports'
+  );
 
   try {
     const [
@@ -1648,19 +1280,12 @@ async function renderReportsPage() {
 
     const suppliers =
       Array.isArray(
-        supplierResponse?.suppliers
+        supplierResponse.suppliers
       )
         ? supplierResponse.suppliers
         : [];
 
-    const content =
-      document.querySelector(
-        '.content'
-      );
-
-    if (!content) return;
-
-    content.innerHTML =
+    document.querySelector('.content').innerHTML =
       renderReports(
         suppliers,
         summary
@@ -1668,157 +1293,29 @@ async function renderReportsPage() {
 
     bindShellEvents();
   } catch (error) {
-    handleApiError(
-      error,
-      'Unable to load reports.'
+    console.error(
+      '[app] Reports failed:',
+      error
+    );
+
+    toast(
+      error?.message ||
+        'Unable to load reports.',
+      'error'
     );
   }
 }
 
 // -----------------------------------------------------------------------------
-// Settings
+// Settings page
 // -----------------------------------------------------------------------------
 
 async function renderSettingsPage() {
-  const mounted =
-    await mountShell(
-      renderSettings(
-        AppState.user,
-        AppState.health
-      ),
-      '#/settings'
-    );
-
-  if (!mounted) return;
-
-  bindShellEvents();
-}
-
-// -----------------------------------------------------------------------------
-// Download helper
-// -----------------------------------------------------------------------------
-
-function triggerDownload(
-  blob,
-  filename
-) {
-  const url =
-    URL.createObjectURL(
-      blob
-    );
-
-  const a =
-    document.createElement('a');
-
-  a.href = url;
-  a.download = filename;
-
-  document.body.appendChild(a);
-
-  a.click();
-
-  a.remove();
-
-  setTimeout(() => {
-    URL.revokeObjectURL(url);
-  }, 1000);
-}
-
-// -----------------------------------------------------------------------------
-// Authenticated file download
-// -----------------------------------------------------------------------------
-
-async function downloadAuthenticated(
-  url,
-  filenameFallback
-) {
-  const token =
-    API.token();
-
-  if (!token) {
-    handleSessionExpired(
-      'Your session has expired. Please sign in again.'
-    );
-
-    throw new Error(
-      'Authentication required.'
-    );
-  }
-
-  const resp =
-    await fetch(
-      url,
-      {
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-        },
-      }
-    );
-
-  if (resp.status === 401 ||
-      resp.status === 403) {
-    handleSessionExpired(
-      'Your session has expired. Please sign in again.'
-    );
-
-    throw new Error(
-      'Session expired.'
-    );
-  }
-
-  if (!resp.ok) {
-    throw new Error(
-      `Export failed (${resp.status}).`
-    );
-  }
-
-  const blob =
-    await resp.blob();
-
-  const disposition =
-    resp.headers.get(
-      'content-disposition'
-    ) || '';
-
-  const match =
-    disposition.match(
-      /filename="?([^"]+)"?/i
-    );
-
-  const filename =
-    match
-      ? match[1]
-      : filenameFallback;
-
-  triggerDownload(
-    blob,
-    filename
+  await mountShell(
+    renderSettings(
+      AppState.user,
+      AppState.health
+    ),
+    '#/settings'
   );
 }
-
-// -----------------------------------------------------------------------------
-// Global unhandled rejection logging
-// -----------------------------------------------------------------------------
-
-window.addEventListener(
-  'unhandledrejection',
-  (event) => {
-    console.error(
-      '[InvoiceFlow] Unhandled promise rejection:',
-      event.reason
-    );
-
-    if (
-      isAuthError(
-        event.reason
-      )
-    ) {
-      event.preventDefault();
-
-      handleSessionExpired(
-        'Your session has expired. Please sign in again.'
-      );
-    }
-  }
-);
