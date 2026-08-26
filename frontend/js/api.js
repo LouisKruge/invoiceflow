@@ -546,6 +546,132 @@
   }
 
   // ===========================================================================
+  // UPDATE HELPERS
+  // ===========================================================================
+
+  /*
+   * Convert values coming from HTML inputs into sensible JSON values.
+   *
+   * IMPORTANT:
+   * HTML input.value is ALWAYS a string.
+   *
+   * Examples:
+   *
+   *   "true"   -> true
+   *   "false"  -> false
+   *   "123"    -> 123
+   *   "12.50"  -> 12.5
+   *   "ABC"    -> "ABC"
+   *
+   * Empty strings remain empty strings because some invoice fields may
+   * legitimately be optional text fields.
+   */
+
+  function normalizeUpdateValue(
+    value
+  ) {
+    if (
+      typeof value !== 'string'
+    ) {
+      return value;
+    }
+
+    const trimmed =
+      value.trim();
+
+    // -------------------------------------------------------------------------
+    // Boolean strings
+    // -------------------------------------------------------------------------
+
+    if (
+      trimmed.toLowerCase() ===
+      'true'
+    ) {
+      return true;
+    }
+
+    if (
+      trimmed.toLowerCase() ===
+      'false'
+    ) {
+      return false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Integer strings
+    //
+    // Only convert strings that are clearly integers.
+    // -------------------------------------------------------------------------
+
+    if (
+      /^-?\d+$/.test(trimmed)
+    ) {
+      const number =
+        Number(trimmed);
+
+      if (
+        Number.isSafeInteger(
+          number
+        )
+      ) {
+        return number;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Decimal / numeric strings
+    // -------------------------------------------------------------------------
+
+    if (
+      /^-?(?:\d+\.\d+|\d+\.)$/.test(
+        trimmed
+      )
+    ) {
+      const number =
+        Number(trimmed);
+
+      if (
+        Number.isFinite(number)
+      ) {
+        return number;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Otherwise leave it as text.
+    // -------------------------------------------------------------------------
+
+    return value;
+  }
+
+  function normalizeUpdateFields(
+    fields
+  ) {
+    if (
+      !fields ||
+      typeof fields !== 'object' ||
+      Array.isArray(fields)
+    ) {
+      throw new Error(
+        'Invoice update data is invalid.'
+      );
+    }
+
+    const normalized = {};
+
+    Object.entries(fields).forEach(
+      ([key, value]) => {
+        normalized[key] =
+          normalizeUpdateValue(
+            value
+          );
+      }
+    );
+
+    return normalized;
+  }
+
+  // ===========================================================================
   // UPDATE
   // ===========================================================================
 
@@ -553,12 +679,45 @@
     id,
     fields
   ) {
+    if (!id) {
+      throw new Error(
+        'Invoice ID is required.'
+      );
+    }
+
+    const normalizedFields =
+      normalizeUpdateFields(
+        fields
+      );
+
+    if (
+      !Object.keys(
+        normalizedFields
+      ).length
+    ) {
+      throw new Error(
+        'No invoice fields were provided for update.'
+      );
+    }
+
+    console.log(
+      '[InvoiceFlow] Updating invoice:',
+      {
+        id,
+        fields:
+          normalizedFields
+      }
+    );
+
     return request(
       `/invoices/${encodeURIComponent(id)}`,
       {
         method: 'PATCH',
+
         body:
-          JSON.stringify(fields)
+          JSON.stringify(
+            normalizedFields
+          )
       }
     );
   }
