@@ -1,13 +1,13 @@
 // server/app.js
 //
-// InvoiceFlow production server
+// InvoiceFlow production backend
 //
-// IMPORTANT:
-// - No automatic demo-data seeding.
-// - SQLite persistence is handled by db.js.
-// - Render Persistent Disk should be mounted to /data.
-// - Authentication is handled by the auth routes.
-// - AI extraction is handled by the invoice routes/services.
+// - PostgreSQL database
+// - No SQLite
+// - No automatic demo users
+// - No automatic sample invoices
+// - No mock invoice seeding
+// - Database connection comes from DATABASE_URL
 //
 
 require('dotenv').config();
@@ -16,20 +16,17 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 
-// ---------------------------------------------------------------------------
-// DATABASE
-// ---------------------------------------------------------------------------
-
 const db = require('./db');
 
 // ---------------------------------------------------------------------------
 // ROUTES
 // ---------------------------------------------------------------------------
 
-const authRoutes = require('./routes/auth');
+const authRoutes =
+  require('./routes/auth');
 
 const {
-  router: invoiceRoutes,
+  router: invoiceRoutes
 } = require('./routes/invoices');
 
 const dashboardRoutes =
@@ -48,33 +45,19 @@ const exportRoutes =
 const app = express();
 
 const PORT =
-  Number(process.env.PORT) || 4000;
+  process.env.PORT || 4000;
 
 // ---------------------------------------------------------------------------
-// CORS
+// MIDDLEWARE
 // ---------------------------------------------------------------------------
 
 app.use(
-  cors({
-    origin: true,
-    credentials: true,
-  })
+  cors()
 );
-
-// ---------------------------------------------------------------------------
-// BODY PARSER
-// ---------------------------------------------------------------------------
 
 app.use(
   express.json({
-    limit: '10mb',
-  })
-);
-
-app.use(
-  express.urlencoded({
-    extended: true,
-    limit: '10mb',
+    limit: '2mb'
   })
 );
 
@@ -113,7 +96,8 @@ app.use(
 
 app.get(
   '/api/health',
-  (req, res) => {
+  async (req, res) => {
+
     const geminiConfigured =
       Boolean(
         process.env.GEMINI_API_KEY
@@ -125,24 +109,49 @@ app.get(
       );
 
     let provider =
-      String(
-        process.env.AI_PROVIDER || ''
+      (
+        process.env.AI_PROVIDER ||
+        ''
       )
-        .trim()
-        .toLowerCase();
+        .toLowerCase()
+        .trim();
 
     if (!provider) {
+
       if (geminiConfigured) {
         provider = 'gemini';
+
       } else if (claudeConfigured) {
         provider = 'claude';
+
       } else {
         provider = 'none';
       }
     }
 
+    let database;
+
+    try {
+
+      database =
+        await db.healthCheck();
+
+    } catch (error) {
+
+      database = {
+        connected: false,
+        error: error.message
+      };
+    }
+
     res.json({
-      status: 'ok',
+
+      status:
+        database.connected
+          ? 'ok'
+          : 'degraded',
+
+      database,
 
       ai_provider:
         provider,
@@ -161,27 +170,10 @@ app.get(
         process.env.GEMINI_MODEL ||
         'gemini-3.6-flash',
 
-      database:
-        'sqlite',
+      claude_model:
+        process.env.CLAUDE_MODEL ||
+        'claude-sonnet-4-6'
 
-      persistence:
-        Boolean(
-          process.env.RENDER_DISK_PATH ||
-          process.env.DATA_DIR
-        ),
-    });
-  }
-);
-
-// ---------------------------------------------------------------------------
-// API 404
-// ---------------------------------------------------------------------------
-
-app.use(
-  '/api',
-  (req, res) => {
-    res.status(404).json({
-      error: 'API endpoint not found.',
     });
   }
 );
@@ -199,10 +191,7 @@ const FRONTEND_DIR =
 
 app.use(
   express.static(
-    FRONTEND_DIR,
-    {
-      maxAge: '1h',
-    }
+    FRONTEND_DIR
   )
 );
 
@@ -213,6 +202,7 @@ app.use(
 app.get(
   '*',
   (req, res, next) => {
+
     if (
       req.path.startsWith('/api/')
     ) {
@@ -233,24 +223,21 @@ app.get(
 // ---------------------------------------------------------------------------
 
 app.use(
-  (
-    err,
-    req,
-    res,
-    next
-  ) => {
+  (err, req, res, next) => {
+
     console.error(
       '[unhandled]',
       err
     );
 
-    const status =
-      Number(err.status) || 500;
+    res.status(
+      err.status || 500
+    ).json({
 
-    res.status(status).json({
       error:
         err.message ||
-        'Something went wrong. Please try again.',
+        'Something went wrong. Please try again.'
+
     });
   }
 );
@@ -259,90 +246,168 @@ app.use(
 // START SERVER
 // ---------------------------------------------------------------------------
 
-app.listen(
-  PORT,
-  '0.0.0.0',
-  () => {
-    const provider =
-      String(
+async function startServer() {
+
+  try {
+
+    // -----------------------------------------------------------------------
+    // DATABASE
+    //
+    // IMPORTANT:
+    // This only creates/updates the database schema.
+    //
+    // It DOES NOT create demo users.
+    // It DOES NOT create sample invoices.
+    // It DOES NOT reset existing data.
+    // -----------------------------------------------------------------------
+
+    console.log(
+      '[startup] Initializing PostgreSQL database...'
+    );
+
+    await db.initializeDatabase();
+
+    console.log(
+      '[startup] PostgreSQL database ready.'
+    );
+
+    // -----------------------------------------------------------------------
+    // AI CONFIGURATION
+    // -----------------------------------------------------------------------
+
+    const geminiConfigured =
+      Boolean(
+        process.env.GEMINI_API_KEY
+      );
+
+    const claudeConfigured =
+      Boolean(
+        process.env.ANTHROPIC_API_KEY
+      );
+
+    let provider =
+      (
         process.env.AI_PROVIDER ||
         ''
       )
-        .trim()
-        .toLowerCase() ||
-      (
-        process.env.GEMINI_API_KEY
-          ? 'gemini'
-          : process.env.ANTHROPIC_API_KEY
-            ? 'claude'
-            : 'none'
-      );
+        .toLowerCase()
+        .trim();
 
-    console.log(
-      '================================================='
+    if (!provider) {
+
+      if (geminiConfigured) {
+
+        provider =
+          'gemini';
+
+      } else if (claudeConfigured) {
+
+        provider =
+          'claude';
+
+      } else {
+
+        provider =
+          'none';
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // SERVER
+    // -----------------------------------------------------------------------
+
+    app.listen(
+      PORT,
+      () => {
+
+        console.log(
+          '--------------------------------------------------'
+        );
+
+        console.log(
+          `InvoiceFlow backend listening on port ${PORT}`
+        );
+
+        console.log(
+          `AI provider: ${provider}`
+        );
+
+        console.log(
+          `Gemini configured: ${geminiConfigured}`
+        );
+
+        console.log(
+          `Claude configured: ${claudeConfigured}`
+        );
+
+        if (
+          provider === 'gemini'
+        ) {
+
+          console.log(
+            `Gemini model: ${
+              process.env.GEMINI_MODEL ||
+              'gemini-3.6-flash'
+            }`
+          );
+        }
+
+        if (
+          provider === 'claude'
+        ) {
+
+          console.log(
+            `Claude model: ${
+              process.env.CLAUDE_MODEL ||
+              'claude-sonnet-4-6'
+            }`
+          );
+        }
+
+        console.log(
+          'Demo/sample database seeding: DISABLED'
+        );
+
+        console.log(
+          '--------------------------------------------------'
+        );
+      }
     );
 
-    console.log(
-      'InvoiceFlow backend started'
-    );
-
-    console.log(
-      `Port: ${PORT}`
-    );
-
-    console.log(
-      `AI provider: ${provider}`
-    );
-
-    console.log(
-      `Gemini configured: ${Boolean(
-        process.env.GEMINI_API_KEY
-      )}`
-    );
-
-    console.log(
-      `Claude configured: ${Boolean(
-        process.env.ANTHROPIC_API_KEY
-      )}`
-    );
-
-    console.log(
-      'Automatic demo seeding: DISABLED'
-    );
-
-    console.log(
-      '================================================='
-    );
-  }
-);
-
-// ---------------------------------------------------------------------------
-// GRACEFUL SHUTDOWN
-// ---------------------------------------------------------------------------
-
-function shutdown(signal) {
-  console.log(
-    `[server] Received ${signal}. Shutting down...`
-  );
-
-  try {
-    db.close();
   } catch (error) {
-    console.error(
-      '[server] Database close failed:',
-      error.message
-    );
-  }
 
-  process.exit(0);
+    console.error(
+      '--------------------------------------------------'
+    );
+
+    console.error(
+      '[startup] InvoiceFlow failed to start.'
+    );
+
+    console.error(
+      '[startup] Database initialization error:'
+    );
+
+    console.error(
+      error
+    );
+
+    console.error(
+      '--------------------------------------------------'
+    );
+
+    process.exit(1);
+  }
 }
 
-process.on(
-  'SIGTERM',
-  () => shutdown('SIGTERM')
-);
+// ---------------------------------------------------------------------------
+// START
+// ---------------------------------------------------------------------------
 
-process.on(
-  'SIGINT',
-  () => shutdown('SIGINT')
-);
+startServer();
+
+// ---------------------------------------------------------------------------
+// EXPORT
+// ---------------------------------------------------------------------------
+
+module.exports = app;
