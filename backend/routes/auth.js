@@ -1,4 +1,3 @@
-```javascript
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -55,10 +54,10 @@ function publicUser(user) {
 // ===========================================================================
 // POST /api/auth/register
 //
-// CREATE A NEW INVOICEFLOW USER
+// Creates a new InvoiceFlow account.
 //
-// The first registered user becomes an administrator.
-// All users registered afterwards become normal users.
+// First user = admin
+// All following users = user
 //
 // Every account is permanently saved in PostgreSQL.
 // ===========================================================================
@@ -102,6 +101,10 @@ router.post(
       const normalizedPassword =
         String(password);
 
+      // ---------------------------------------------------------------------
+      // Validate values
+      // ---------------------------------------------------------------------
+
       if (
         !normalizedName ||
         !normalizedEmail ||
@@ -113,10 +116,6 @@ router.post(
             'All fields are required'
         });
       }
-
-      // ---------------------------------------------------------------------
-      // Basic validation
-      // ---------------------------------------------------------------------
 
       if (normalizedName.length < 2) {
         return res.status(400).json({
@@ -177,8 +176,8 @@ router.post(
       // ---------------------------------------------------------------------
       // Determine role
       //
-      // First account = admin
-      // Every account after that = user
+      // First account becomes administrator.
+      // All accounts after that become normal users.
       // ---------------------------------------------------------------------
 
       const userCount =
@@ -206,7 +205,7 @@ router.post(
         );
 
       // ---------------------------------------------------------------------
-      // Create user
+      // Create account
       // ---------------------------------------------------------------------
 
       const user =
@@ -251,7 +250,7 @@ router.post(
         createToken(user);
 
       console.log(
-        `[auth/register] New ${role} account created: ${user.email}`
+        `[auth/register] Created ${role} account: ${user.email}`
       );
 
       return res.status(201).json({
@@ -295,9 +294,10 @@ router.post(
 // ===========================================================================
 // GET /api/auth/setup-status
 //
-// Kept for frontend compatibility.
+// Returns whether the database currently has any users.
 //
-// This no longer controls whether registration is allowed.
+// This endpoint is informational only.
+// Registration is NOT disabled after the first user.
 // ===========================================================================
 
 router.get(
@@ -313,9 +313,12 @@ router.get(
           `
         );
 
+      const setupRequired =
+        Number(userCount?.count || 0) === 0;
+
       return res.json({
         setup_required:
-          Number(userCount?.count || 0) === 0
+          setupRequired
       });
 
     } catch (error) {
@@ -359,13 +362,6 @@ router.post(
       const normalizedEmail =
         normalizeEmail(email);
 
-      if (!normalizedEmail) {
-        return res.status(400).json({
-          error:
-            'Email is required'
-        });
-      }
-
       // ---------------------------------------------------------------------
       // Find user
       // ---------------------------------------------------------------------
@@ -390,11 +386,7 @@ router.post(
 
       if (
         !user ||
-        !user.password_hash ||
-        !(await bcrypt.compare(
-          String(password),
-          user.password_hash
-        ))
+        !user.password_hash
       ) {
         return res.status(401).json({
           error:
@@ -402,8 +394,21 @@ router.post(
         });
       }
 
+      const passwordValid =
+        await bcrypt.compare(
+          String(password),
+          user.password_hash
+        );
+
+      if (!passwordValid) {
+        return res.status(401).json({
+          error:
+            'Invalid email or password'
+        });
+      }
+
       // ---------------------------------------------------------------------
-      // Create session token
+      // Create JWT
       // ---------------------------------------------------------------------
 
       const token =
@@ -487,6 +492,4 @@ router.get(
 // EXPORT
 // ===========================================================================
 
-module.exports =
-  router;
-```
+module.exports = router;
