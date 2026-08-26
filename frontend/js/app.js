@@ -1132,10 +1132,6 @@
   function renderSignupPage(
     error
   ) {
-    // -------------------------------------------------------------------------
-    // If the views.js already provides a signup renderer, use it.
-    // -------------------------------------------------------------------------
-
     if (
       typeof window.renderSignup ===
       'function'
@@ -1145,11 +1141,6 @@
           error || null
         );
     } else {
-      // -----------------------------------------------------------------------
-      // Fallback signup UI.
-      // This makes the signup flow work even if views.js has no signup view.
-      // -----------------------------------------------------------------------
-
       root.innerHTML = `
         <div style="
           min-height:100vh;
@@ -1411,10 +1402,6 @@
       `;
     }
 
-    // -------------------------------------------------------------------------
-    // Login navigation
-    // -------------------------------------------------------------------------
-
     const loginLink =
       root.querySelector(
         '#login-link'
@@ -1429,10 +1416,6 @@
             '#/login';
         };
     }
-
-    // -------------------------------------------------------------------------
-    // Signup form
-    // -------------------------------------------------------------------------
 
     const signupForm =
       document.getElementById(
@@ -1461,16 +1444,6 @@
 
     const formData =
       new FormData(form);
-
-    // -------------------------------------------------------------------------
-    // IMPORTANT:
-    // These names exactly match the backend:
-    //
-    // name
-    // email
-    // password
-    // company_name
-    // -------------------------------------------------------------------------
 
     const name =
       String(
@@ -1517,10 +1490,6 @@
           password.length > 0
       }
     );
-
-    // -------------------------------------------------------------------------
-    // Validation
-    // -------------------------------------------------------------------------
 
     if (!name) {
       renderSignupPage(
@@ -1586,10 +1555,6 @@
         'Creating account…';
     }
 
-    // -------------------------------------------------------------------------
-    // Register
-    // -------------------------------------------------------------------------
-
     try {
       const response =
         await API.register(
@@ -1616,8 +1581,6 @@
         );
       }
 
-      // API.register already stores the token,
-      // but setLoggedIn also establishes frontend state.
       setLoggedIn(
         response.token,
         response.user
@@ -1751,6 +1714,10 @@
       return;
     }
 
+    // =========================================================================
+    // TAKE PHOTO
+    // =========================================================================
+
     const takePhotoBtn =
       document.getElementById(
         'btn-take-photo'
@@ -1762,7 +1729,8 @@
           if (
             typeof window.Camera ===
               'undefined' ||
-            !Camera.open
+            typeof window.Camera.open !==
+              'function'
           ) {
             toast(
               'Camera is not available on this device.',
@@ -1788,42 +1756,294 @@
         };
     }
 
+    // =========================================================================
+    // UPLOAD INVOICE
+    // =========================================================================
+    //
+    // IMPORTANT:
+    //
+    // The previous implementation depended on:
+    //
+    //     Camera.openNativePicker()
+    //
+    // That function is not guaranteed to exist in the browser environment.
+    //
+    // We now use the standard HTML file input API instead.
+    //
+    // This works with:
+    //
+    // - Chrome
+    // - Edge
+    // - Firefox
+    // - Safari
+    // - Windows
+    // - macOS
+    // - Android
+    // - iPhone/iPad
+    //
+    // Supported:
+    //
+    // - PDF
+    // - JPG
+    // - JPEG
+    // - PNG
+    // - WEBP
+    //
+    // =========================================================================
+
     const uploadBtn =
       document.getElementById(
         'btn-upload-invoice'
       );
 
     if (uploadBtn) {
-      uploadBtn.onclick =
-        () => {
-          if (
-            typeof window.Camera ===
-              'undefined' ||
-            !Camera.openNativePicker
-          ) {
+
+      // -----------------------------------------------------------------------
+      // Prevent duplicate hidden inputs if this route gets rendered repeatedly.
+      // -----------------------------------------------------------------------
+
+      const existingInput =
+        document.getElementById(
+          'invoice-file-input'
+        );
+
+      if (existingInput) {
+        existingInput.remove();
+      }
+
+      // -----------------------------------------------------------------------
+      // Create native browser file input.
+      // -----------------------------------------------------------------------
+
+      const fileInput =
+        document.createElement(
+          'input'
+        );
+
+      fileInput.type =
+        'file';
+
+      fileInput.id =
+        'invoice-file-input';
+
+      fileInput.name =
+        'invoice';
+
+      fileInput.accept =
+        'image/*,.pdf,application/pdf';
+
+      fileInput.multiple =
+        false;
+
+      fileInput.style.position =
+        'fixed';
+
+      fileInput.style.left =
+        '-9999px';
+
+      fileInput.style.top =
+        '-9999px';
+
+      fileInput.style.width =
+        '1px';
+
+      fileInput.style.height =
+        '1px';
+
+      fileInput.style.opacity =
+        '0';
+
+      fileInput.setAttribute(
+        'aria-hidden',
+        'true'
+      );
+
+      document.body.appendChild(
+        fileInput
+      );
+
+      // -----------------------------------------------------------------------
+      // When the user selects a file.
+      // -----------------------------------------------------------------------
+
+      fileInput.addEventListener(
+        'change',
+        (event) => {
+          try {
+            const files =
+              event.target.files;
+
+            if (
+              !files ||
+              !files.length
+            ) {
+              console.log(
+                '[Capture] File picker closed without selecting a file.'
+              );
+
+              return;
+            }
+
+            const file =
+              files[0];
+
+            console.log(
+              '[Capture] Invoice file selected:',
+              {
+                name:
+                  file.name,
+
+                type:
+                  file.type,
+
+                size:
+                  file.size,
+
+                lastModified:
+                  file.lastModified
+              }
+            );
+
+            // -----------------------------------------------------------------
+            // Validate file.
+            // -----------------------------------------------------------------
+
+            const fileName =
+              String(
+                file.name ||
+                ''
+              ).toLowerCase();
+
+            const isPdf =
+              file.type ===
+                'application/pdf' ||
+              fileName.endsWith(
+                '.pdf'
+              );
+
+            const isImage =
+              file.type.startsWith(
+                'image/'
+              ) ||
+              /\.(jpg|jpeg|png|webp|gif|bmp|heic|heif)$/i.test(
+                fileName
+              );
+
+            if (
+              !isPdf &&
+              !isImage
+            ) {
+              toast(
+                'Please select a PDF or image invoice.',
+                'error'
+              );
+
+              fileInput.value =
+                '';
+
+              return;
+            }
+
+            // -----------------------------------------------------------------
+            // Validate file size.
+            //
+            // 25 MB is a safe frontend limit.
+            // The backend may have its own limit as well.
+            // -----------------------------------------------------------------
+
+            const maxFileSize =
+              25 *
+              1024 *
+              1024;
+
+            if (
+              file.size >
+              maxFileSize
+            ) {
+              toast(
+                'The invoice file is too large. Maximum size is 25 MB.',
+                'error'
+              );
+
+              fileInput.value =
+                '';
+
+              return;
+            }
+
+            if (
+              file.size <= 0
+            ) {
+              toast(
+                'The selected file is empty.',
+                'error'
+              );
+
+              fileInput.value =
+                '';
+
+              return;
+            }
+
+            // -----------------------------------------------------------------
+            // Pass the actual File object into the existing invoice pipeline.
+            // -----------------------------------------------------------------
+
+            runCapture(
+              file
+            );
+
+          } catch (error) {
+            console.error(
+              '[Capture] Error handling selected invoice:',
+              error
+            );
+
             toast(
-              'File picker is not available.',
+              error?.message ||
+              'Unable to read the selected invoice.',
               'error'
             );
 
-            return;
+          } finally {
+            // -----------------------------------------------------------------
+            // Clear the input.
+            //
+            // This allows the user to select the exact same file again.
+            // -----------------------------------------------------------------
+
+            fileInput.value =
+              '';
           }
+        }
+      );
 
-          Camera.openNativePicker({
-            capture: false,
+      // -----------------------------------------------------------------------
+      // Open the browser's native file picker.
+      // -----------------------------------------------------------------------
 
-            onCapture: (
-              file
-            ) => {
-              if (file) {
-                runCapture(
-                  file
-                );
-              }
-            },
+      uploadBtn.onclick =
+        (event) => {
+          event.preventDefault();
 
-            onCancel: () => {},
-          });
+          console.log(
+            '[Capture] Opening browser file picker...'
+          );
+
+          try {
+            fileInput.click();
+
+          } catch (error) {
+            console.error(
+              '[Capture] Could not open file picker:',
+              error
+            );
+
+            toast(
+              'Unable to open the file picker.',
+              'error'
+            );
+          }
         };
     }
   }
@@ -2321,7 +2541,8 @@
           if (
             typeof window.Camera ===
               'undefined' ||
-            !Camera.open
+            typeof Camera.open !==
+              'function'
           ) {
             toast(
               'Camera is not available.',
