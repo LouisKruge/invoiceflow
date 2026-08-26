@@ -3,8 +3,8 @@
 // =============================================================================
 // Browser-side SPA router, state management and event wiring.
 // IMPORTANT:
-// This file runs in the browser.
-// Do NOT use require(), dotenv, express, pg, fs, path, or other Node modules.
+// - This file runs in the browser.
+// - Do NOT use require(), dotenv, express, pg, fs, path, or other Node modules.
 // =============================================================================
 
 (() => {
@@ -17,11 +17,17 @@
   const AppState = {
     user: null,
     health: null,
+
+    setupRequired: false,
+    setupChecked: false,
+
     invoiceFilters: {
       q: '',
       status: 'all',
     },
+
     selectedIds: new Set(),
+
     booting: false,
     sessionError: null,
   };
@@ -215,15 +221,64 @@
   }
 
   // ---------------------------------------------------------------------------
+  // SETUP STATUS
+  // ---------------------------------------------------------------------------
+
+  async function checkSetupStatus() {
+    if (
+      !hasAPI() ||
+      !hasFunction(API, 'setupStatus')
+    ) {
+      console.warn(
+        '[InvoiceFlow] setupStatus() is unavailable. Assuming normal login.'
+      );
+
+      AppState.setupRequired = false;
+      AppState.setupChecked = true;
+
+      return false;
+    }
+
+    try {
+      const response =
+        await API.setupStatus();
+
+      AppState.setupRequired =
+        response?.setup_required === true;
+
+      AppState.setupChecked =
+        true;
+
+      console.log(
+        '[InvoiceFlow] Setup status:',
+        {
+          setupRequired:
+            AppState.setupRequired,
+        }
+      );
+
+      return AppState.setupRequired;
+
+    } catch (error) {
+      console.error(
+        '[InvoiceFlow] Failed to check setup status:',
+        error
+      );
+
+      AppState.setupRequired = false;
+      AppState.setupChecked = true;
+
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // ROUTES
   // ---------------------------------------------------------------------------
 
   const routes = {
     '#/login':
       renderLoginPage,
-
-    '#/signup':
-      renderSignupPage,
 
     '#/dashboard':
       renderDashboardPage,
@@ -318,8 +373,7 @@
 
       if (
         !token &&
-        hash !== '#/login' &&
-        hash !== '#/signup'
+        hash !== '#/login'
       ) {
         location.hash =
           '#/login';
@@ -333,10 +387,7 @@
 
       if (
         token &&
-        (
-          hash === '#/login' ||
-          hash === '#/signup'
-        )
+        hash === '#/login'
       ) {
         location.hash =
           '#/dashboard';
@@ -425,7 +476,6 @@
             AppState.health =
               await response.json();
           }
-
         } catch (error) {
           console.warn(
             '[Router] Health check failed:',
@@ -813,577 +863,855 @@
       });
   }
 
-  // ---------------------------------------------------------------------------
-  // LOGIN
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
+  // AUTH UI
+  // ===========================================================================
+  //
+  // We render the authentication screen directly here rather than depending
+  // on renderLogin(). This guarantees that the login/signup flow works even
+  // if the old UI renderer does not know about registration yet.
+  //
+  // ===========================================================================
 
-  function renderLoginPage(error) {
-    const hasExistingToken =
-      hasFunction(API, 'token')
-        ? !!API.token()
-        : false;
+  function renderAuthPage(
+    message = null
+  ) {
+    const setupRequired =
+      AppState.setupRequired === true;
 
-    const sessionMessage =
-      error ||
-      AppState.sessionError ||
-      null;
-
-    if (
-      typeof window.renderLogin !==
-      'function'
-    ) {
-      root.innerHTML = `
-        <div style="
-          min-height:100vh;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-        ">
-          <p>Login interface failed to load.</p>
-        </div>
-      `;
-
-      return;
-    }
-
-    root.innerHTML =
-      renderLogin(
-        sessionMessage
-      );
-
-    // ---------------------------------------------------------------
-    // Existing session
-    // ---------------------------------------------------------------
-
-    if (hasExistingToken) {
-      const authCard =
-        root.querySelector(
-          '.auth-card'
-        );
-
-      if (authCard) {
-        const existingSession =
-          document.createElement(
-            'div'
-          );
-
-        existingSession.className =
-          'auth-error';
-
-        existingSession.style.marginTop =
-          '12px';
-
-        existingSession.innerHTML = `
-          <div style="margin-bottom:8px;">
-            A saved session exists in this browser.
-            If the app says your session is no longer valid,
-            clear it and sign in again.
-          </div>
-
-          <button
-            type="button"
-            class="btn btn-ghost btn-block"
-            id="clear-session-btn"
+    const errorHtml =
+      message
+        ? `
+          <div
+            class="auth-error"
+            style="
+              margin-bottom:18px;
+              padding:12px 14px;
+              border-radius:10px;
+            "
           >
-            Clear saved session
-          </button>
-        `;
+            ${escapeHtml(message)}
+          </div>
+        `
+        : '';
 
-        authCard.appendChild(
-          existingSession
-        );
-
-        const clearBtn =
-          existingSession.querySelector(
-            '#clear-session-btn'
-          );
-
-        if (clearBtn) {
-          clearBtn.onclick =
-            () => {
-              API.clearToken();
-
-              AppState.user =
-                null;
-
-              AppState.health =
-                null;
-
-              AppState.sessionError =
-                null;
-
-              toast(
-                'Saved session cleared.',
-                'success'
-              );
-
-              renderLoginPage();
-            };
-        }
-      }
-    }
-
-    // ---------------------------------------------------------------
-    // Demo login chips
-    // ---------------------------------------------------------------
-
-    document
-      .querySelectorAll(
-        '.demo-chip'
-      )
-      .forEach((chip) => {
-        chip.onclick =
-          () => {
-            const emailInput =
-              document.querySelector(
-                'input[name="email"]'
-              );
-
-            const passwordInput =
-              document.querySelector(
-                'input[name="password"]'
-              );
-
-            if (emailInput) {
-              emailInput.value =
-                chip.dataset.email ||
-                '';
-            }
-
-            if (passwordInput) {
-              passwordInput.value =
-                chip.dataset.pass ||
-                '';
-            }
-          };
-      });
-
-    // ---------------------------------------------------------------
-    // SIGN UP LINK
-    // ---------------------------------------------------------------
-
-    const signupLink =
-      document.getElementById(
-        'login-signup-link'
-      );
-
-    if (signupLink) {
-      signupLink.onclick =
-        () => {
-          location.hash =
-            '#/signup';
-        };
-    }
-
-    // ---------------------------------------------------------------
-    // Login form
-    // ---------------------------------------------------------------
-
-    const loginForm =
-      document.getElementById(
-        'login-form'
-      );
-
-    if (!loginForm) {
-      return;
-    }
-
-    loginForm.onsubmit =
-      async (event) => {
-        event.preventDefault();
-
-        const submitBtn =
-          loginForm.querySelector(
-            'button[type="submit"]'
-          );
-
-        const form =
-          new FormData(
-            loginForm
-          );
-
-        const email =
-          String(
-            form.get('email') ||
-            ''
-          ).trim();
-
-        const password =
-          String(
-            form.get('password') ||
-            ''
-          );
-
-        if (!email || !password) {
-          renderLoginPage(
-            'Please enter your email and password.'
-          );
-
-          return;
-        }
-
-        if (submitBtn) {
-          submitBtn.disabled =
-            true;
-
-          submitBtn.textContent =
-            'Signing in…';
-        }
-
-        try {
-          const response =
-            await API.login(
-              email,
-              password
-            );
-
-          if (!response?.token) {
-            throw new Error(
-              'The server did not return an authentication token.'
-            );
-          }
-
-          if (!response?.user) {
-            throw new Error(
-              'The server did not return your user profile.'
-            );
-          }
-
-          setLoggedIn(
-            response.token,
-            response.user
-          );
-
-          AppState.sessionError =
-            null;
-
-          location.hash =
-            '#/dashboard';
-
-        } catch (error) {
-          console.error(
-            '[Login] Login failed:',
-            error
-          );
-
-          if (submitBtn) {
-            submitBtn.disabled =
-              false;
-
-            submitBtn.textContent =
-              'Sign in';
-          }
-
-          renderLoginPage(
-            error?.message ||
-            'Unable to sign in.'
-          );
-        }
-      };
-  }
-
-  // ---------------------------------------------------------------------------
-  // SIGN UP
-  // ---------------------------------------------------------------------------
-
-  function renderSignupPage(error) {
-    if (
-      typeof window.renderSignup !==
-      'function'
-    ) {
-      root.innerHTML = `
-        <div style="
+    root.innerHTML = `
+      <div
+        style="
           min-height:100vh;
           display:flex;
           align-items:center;
           justify-content:center;
           padding:24px;
-          font-family:system-ui,sans-serif;
-        ">
-          <div style="
-            max-width:520px;
-            text-align:center;
-          ">
-            <h2>Signup interface failed to load</h2>
+          background:var(--bg,#f6f7f9);
+        "
+      >
+        <div
+          class="auth-card"
+          style="
+            width:100%;
+            max-width:460px;
+            background:#fff;
+            border-radius:18px;
+            padding:34px;
+            box-shadow:0 15px 50px rgba(0,0,0,.08);
+          "
+        >
 
-            <p>
-              The InvoiceFlow signup interface could not be loaded.
-            </p>
-
-            <button
-              type="button"
-              class="btn btn-primary"
-              id="fallback-login-btn"
+          <div
+            style="
+              text-align:center;
+              margin-bottom:28px;
+            "
+          >
+            <div
+              style="
+                font-size:28px;
+                font-weight:800;
+                letter-spacing:-.03em;
+              "
             >
-              Back to sign in
-            </button>
+              InvoiceFlow
+            </div>
+
+            <div
+              style="
+                margin-top:7px;
+                color:#6b7280;
+                font-size:14px;
+              "
+            >
+              ${setupRequired
+                ? 'Create your administrator account'
+                : 'Invoice intelligence for your business'}
+            </div>
           </div>
+
+          ${errorHtml}
+
+          ${
+            setupRequired
+              ? renderSignupForm()
+              : renderLoginForm()
+          }
+
         </div>
-      `;
+      </div>
+    `;
 
-      const fallbackBtn =
-        document.getElementById(
-          'fallback-login-btn'
-        );
+    bindAuthEvents();
+  }
 
-      if (fallbackBtn) {
-        fallbackBtn.onclick =
-          () => {
-            location.hash =
-              '#/login';
-          };
-      }
+  // ---------------------------------------------------------------------------
+  // LOGIN FORM
+  // ---------------------------------------------------------------------------
 
-      return;
-    }
+  function renderLoginForm() {
+    return `
+      <form
+        id="login-form"
+        autocomplete="on"
+      >
 
-    root.innerHTML =
-      renderSignup(
-        error || null
-      );
+        <div style="margin-bottom:16px;">
+          <label
+            for="login-email"
+            style="
+              display:block;
+              margin-bottom:7px;
+              font-size:13px;
+              font-weight:700;
+            "
+          >
+            Email
+          </label>
 
-    // ---------------------------------------------------------------
-    // Back to login
-    // ---------------------------------------------------------------
+          <input
+            id="login-email"
+            name="email"
+            type="email"
+            autocomplete="email"
+            required
+            placeholder="you@company.com"
+            style="
+              width:100%;
+              box-sizing:border-box;
+              padding:13px 14px;
+              border:1px solid #d7dce3;
+              border-radius:10px;
+              font-size:15px;
+              outline:none;
+            "
+          />
+        </div>
 
-    const loginLink =
+        <div style="margin-bottom:20px;">
+          <label
+            for="login-password"
+            style="
+              display:block;
+              margin-bottom:7px;
+              font-size:13px;
+              font-weight:700;
+            "
+          >
+            Password
+          </label>
+
+          <input
+            id="login-password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            placeholder="Enter your password"
+            style="
+              width:100%;
+              box-sizing:border-box;
+              padding:13px 14px;
+              border:1px solid #d7dce3;
+              border-radius:10px;
+              font-size:15px;
+              outline:none;
+            "
+          />
+        </div>
+
+        <button
+          id="login-submit"
+          type="submit"
+          style="
+            width:100%;
+            border:0;
+            border-radius:10px;
+            padding:14px 16px;
+            font-size:15px;
+            font-weight:750;
+            cursor:pointer;
+            background:var(--ink-900,#111827);
+            color:#fff;
+          "
+        >
+          Sign in
+        </button>
+
+      </form>
+
+      <div
+        style="
+          margin-top:20px;
+          text-align:center;
+          font-size:13px;
+          color:#6b7280;
+        "
+      >
+        Sign in using your InvoiceFlow account.
+      </div>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SIGNUP FORM
+  // ---------------------------------------------------------------------------
+
+  function renderSignupForm() {
+    return `
+      <div
+        style="
+          margin-bottom:20px;
+          padding:13px 14px;
+          background:#f7f8fa;
+          border-radius:10px;
+          font-size:13px;
+          line-height:1.5;
+          color:#4b5563;
+        "
+      >
+        This is the first-time setup for InvoiceFlow.
+        Create the administrator account for your company.
+      </div>
+
+      <form
+        id="signup-form"
+        autocomplete="on"
+      >
+
+        <div style="margin-bottom:16px;">
+          <label
+            for="signup-name"
+            style="
+              display:block;
+              margin-bottom:7px;
+              font-size:13px;
+              font-weight:700;
+            "
+          >
+            Full name
+          </label>
+
+          <input
+            id="signup-name"
+            name="name"
+            type="text"
+            autocomplete="name"
+            required
+            placeholder="Your full name"
+            style="
+              width:100%;
+              box-sizing:border-box;
+              padding:13px 14px;
+              border:1px solid #d7dce3;
+              border-radius:10px;
+              font-size:15px;
+            "
+          />
+        </div>
+
+        <div style="margin-bottom:16px;">
+          <label
+            for="signup-company"
+            style="
+              display:block;
+              margin-bottom:7px;
+              font-size:13px;
+              font-weight:700;
+            "
+          >
+            Company name
+          </label>
+
+          <input
+            id="signup-company"
+            name="company_name"
+            type="text"
+            autocomplete="organization"
+            required
+            placeholder="Your company"
+            style="
+              width:100%;
+              box-sizing:border-box;
+              padding:13px 14px;
+              border:1px solid #d7dce3;
+              border-radius:10px;
+              font-size:15px;
+            "
+          />
+        </div>
+
+        <div style="margin-bottom:16px;">
+          <label
+            for="signup-email"
+            style="
+              display:block;
+              margin-bottom:7px;
+              font-size:13px;
+              font-weight:700;
+            "
+          >
+            Email
+          </label>
+
+          <input
+            id="signup-email"
+            name="email"
+            type="email"
+            autocomplete="email"
+            required
+            placeholder="you@company.com"
+            style="
+              width:100%;
+              box-sizing:border-box;
+              padding:13px 14px;
+              border:1px solid #d7dce3;
+              border-radius:10px;
+              font-size:15px;
+            "
+          />
+        </div>
+
+        <div style="margin-bottom:16px;">
+          <label
+            for="signup-password"
+            style="
+              display:block;
+              margin-bottom:7px;
+              font-size:13px;
+              font-weight:700;
+            "
+          >
+            Password
+          </label>
+
+          <input
+            id="signup-password"
+            name="password"
+            type="password"
+            autocomplete="new-password"
+            required
+            minlength="8"
+            placeholder="Minimum 8 characters"
+            style="
+              width:100%;
+              box-sizing:border-box;
+              padding:13px 14px;
+              border:1px solid #d7dce3;
+              border-radius:10px;
+              font-size:15px;
+            "
+          />
+        </div>
+
+        <div style="margin-bottom:20px;">
+          <label
+            for="signup-password-confirm"
+            style="
+              display:block;
+              margin-bottom:7px;
+              font-size:13px;
+              font-weight:700;
+            "
+          >
+            Confirm password
+          </label>
+
+          <input
+            id="signup-password-confirm"
+            name="password_confirm"
+            type="password"
+            autocomplete="new-password"
+            required
+            minlength="8"
+            placeholder="Repeat your password"
+            style="
+              width:100%;
+              box-sizing:border-box;
+              padding:13px 14px;
+              border:1px solid #d7dce3;
+              border-radius:10px;
+              font-size:15px;
+            "
+          />
+        </div>
+
+        <button
+          id="signup-submit"
+          type="submit"
+          style="
+            width:100%;
+            border:0;
+            border-radius:10px;
+            padding:14px 16px;
+            font-size:15px;
+            font-weight:750;
+            cursor:pointer;
+            background:var(--ink-900,#111827);
+            color:#fff;
+          "
+        >
+          Create administrator account
+        </button>
+
+      </form>
+
+      <div
+        style="
+          margin-top:18px;
+          text-align:center;
+          font-size:12px;
+          color:#8a919c;
+        "
+      >
+        The first account automatically becomes the administrator.
+      </div>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // AUTH EVENT BINDING
+  // ---------------------------------------------------------------------------
+
+  function bindAuthEvents() {
+    const loginForm =
       document.getElementById(
-        'signup-login-link'
+        'login-form'
       );
 
-    if (loginLink) {
-      loginLink.onclick =
-        () => {
-          location.hash =
-            '#/login';
-        };
+    if (loginForm) {
+      loginForm.onsubmit =
+        handleLoginSubmit;
     }
-
-    // ---------------------------------------------------------------
-    // Signup form
-    // ---------------------------------------------------------------
 
     const signupForm =
       document.getElementById(
         'signup-form'
       );
 
-    if (!signupForm) {
-      console.error(
-        '[Signup] #signup-form was not found.'
+    if (signupForm) {
+      signupForm.onsubmit =
+        handleSignupSubmit;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOGIN
+  // ---------------------------------------------------------------------------
+
+  async function handleLoginSubmit(
+    event
+  ) {
+    event.preventDefault();
+
+    const loginForm =
+      event.currentTarget;
+
+    const submitBtn =
+      document.getElementById(
+        'login-submit'
+      );
+
+    const form =
+      new FormData(
+        loginForm
+      );
+
+    const email =
+      String(
+        form.get('email') ||
+        ''
+      ).trim();
+
+    const password =
+      String(
+        form.get('password') ||
+        ''
+      );
+
+    if (!email || !password) {
+      renderLoginPage(
+        'Please enter your email and password.'
       );
 
       return;
     }
 
-    signupForm.onsubmit =
-      async (event) => {
-        event.preventDefault();
+    if (submitBtn) {
+      submitBtn.disabled =
+        true;
 
-        const submitBtn =
-          signupForm.querySelector(
-            'button[type="submit"]'
-          );
+      submitBtn.textContent =
+        'Signing in…';
+    }
 
-        const form =
-          new FormData(
-            signupForm
-          );
+    try {
+      console.log(
+        '[Login] Attempting login:',
+        email
+      );
 
-        const name =
-          String(
-            form.get('name') ||
-            ''
-          ).trim();
+      const response =
+        await API.login(
+          email,
+          password
+        );
 
-        const email =
-          String(
-            form.get('email') ||
-            ''
-          ).trim()
-            .toLowerCase();
+      if (!response?.token) {
+        throw new Error(
+          'The server did not return an authentication token.'
+        );
+      }
 
-        const password =
-          String(
-            form.get('password') ||
-            ''
-          );
+      if (!response?.user) {
+        throw new Error(
+          'The server did not return your user profile.'
+        );
+      }
 
-        const confirmPassword =
-          String(
-            form.get('confirmPassword') ||
-            ''
-          );
+      setLoggedIn(
+        response.token,
+        response.user
+      );
 
-        // -----------------------------------------------------------
-        // Validation
-        // -----------------------------------------------------------
+      AppState.sessionError =
+        null;
 
-        if (
-          !name ||
-          !email ||
-          !password ||
-          !confirmPassword
-        ) {
-          renderSignup(
-            'Please complete all fields.'
-          );
+      console.log(
+        '[Login] Login successful:',
+        response.user.email
+      );
 
-          return;
+      location.hash =
+        '#/dashboard';
+
+    } catch (error) {
+      console.error(
+        '[Login] Login failed:',
+        error
+      );
+
+      if (submitBtn) {
+        submitBtn.disabled =
+          false;
+
+        submitBtn.textContent =
+          'Sign in';
+      }
+
+      renderLoginPage(
+        error?.message ||
+        'Unable to sign in.'
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // SIGNUP
+  // ---------------------------------------------------------------------------
+
+  async function handleSignupSubmit(
+    event
+  ) {
+    event.preventDefault();
+
+    const signupForm =
+      event.currentTarget;
+
+    const submitBtn =
+      document.getElementById(
+        'signup-submit'
+      );
+
+    const form =
+      new FormData(
+        signupForm
+      );
+
+    const name =
+      String(
+        form.get('name') ||
+        ''
+      ).trim();
+
+    const companyName =
+      String(
+        form.get('company_name') ||
+        ''
+      ).trim();
+
+    const email =
+      String(
+        form.get('email') ||
+        ''
+      ).trim()
+      .toLowerCase();
+
+    const password =
+      String(
+        form.get('password') ||
+        ''
+      );
+
+    const passwordConfirm =
+      String(
+        form.get('password_confirm') ||
+        ''
+      );
+
+    // ---------------------------------------------------------------
+    // Frontend validation
+    // ---------------------------------------------------------------
+
+    if (
+      !name ||
+      !companyName ||
+      !email ||
+      !password ||
+      !passwordConfirm
+    ) {
+      renderSignupPage(
+        'Please complete all fields.'
+      );
+
+      return;
+    }
+
+    if (password.length < 8) {
+      renderSignupPage(
+        'Password must be at least 8 characters.'
+      );
+
+      return;
+    }
+
+    if (password !== passwordConfirm) {
+      renderSignupPage(
+        'The passwords do not match.'
+      );
+
+      return;
+    }
+
+    // ---------------------------------------------------------------
+    // Disable button
+    // ---------------------------------------------------------------
+
+    if (submitBtn) {
+      submitBtn.disabled =
+        true;
+
+      submitBtn.textContent =
+        'Creating account…';
+    }
+
+    try {
+      console.log(
+        '[Signup] Creating first administrator account:',
+        {
+          name,
+          email,
+          company_name:
+            companyName,
         }
+      );
 
-        if (
-          !email.includes('@') ||
-          !email.includes('.')
-        ) {
-          renderSignup(
-            'Please enter a valid email address.'
-          );
-
-          return;
-        }
-
-        if (
-          password.length < 8
-        ) {
-          renderSignup(
-            'Your password must be at least 8 characters.'
-          );
-
-          return;
-        }
-
-        if (
-          password !==
-          confirmPassword
-        ) {
-          renderSignup(
-            'Your passwords do not match.'
-          );
-
-          return;
-        }
-
-        // -----------------------------------------------------------
-        // API availability
-        // -----------------------------------------------------------
-
-        if (
-          !hasAPI() ||
-          !hasFunction(
-            API,
-            'register'
-          )
-        ) {
-          renderSignup(
-            'Signup is not available because the registration API is missing.'
-          );
-
-          console.error(
-            '[Signup] API.register() is not available.'
-          );
-
-          return;
-        }
-
-        // -----------------------------------------------------------
-        // Submit
-        // -----------------------------------------------------------
-
-        if (submitBtn) {
-          submitBtn.disabled =
-            true;
-
-          submitBtn.textContent =
-            'Creating account…';
-        }
-
-        try {
-          console.log(
-            '[Signup] Creating account:',
-            {
-              name,
-              email,
-            }
-          );
-
-          const response =
-            await API.register({
-              name,
-              email,
-              password,
-            });
-
-          console.log(
-            '[Signup] Registration successful:',
-            response
-          );
-
-          if (
-            !response ||
-            response.success === false
-          ) {
-            throw new Error(
-              response?.message ||
-              response?.error ||
-              'The server could not create your account.'
-            );
+      const response =
+        await API.register(
+          {
+            name,
+            email,
+            password,
+            company_name:
+              companyName,
           }
+        );
 
-          // ---------------------------------------------------------
-          // Some backends automatically log the user in.
-          // If a token is returned, use it immediately.
-          // Otherwise send them to login.
-          // ---------------------------------------------------------
+      // ---------------------------------------------------------------
+      // Validate response
+      // ---------------------------------------------------------------
 
-          if (
-            response.token &&
-            response.user
-          ) {
-            setLoggedIn(
-              response.token,
-              response.user
-            );
+      if (!response?.token) {
+        throw new Error(
+          'Account was created but the server did not return a session token.'
+        );
+      }
 
-            toast(
-              'Account created successfully.',
-              'success'
-            );
+      if (!response?.user) {
+        throw new Error(
+          'Account was created but the server did not return the user profile.'
+        );
+      }
 
-            location.hash =
-              '#/dashboard';
+      // ---------------------------------------------------------------
+      // Store session
+      // ---------------------------------------------------------------
 
-            return;
-          }
+      setLoggedIn(
+        response.token,
+        response.user
+      );
 
-          toast(
-            'Account created successfully. Please sign in.',
-            'success'
-          );
+      AppState.setupRequired =
+        false;
 
-          location.hash =
-            '#/login';
+      AppState.setupChecked =
+        true;
 
-        } catch (error) {
-          console.error(
-            '[Signup] Signup failed:',
-            error
-          );
+      AppState.sessionError =
+        null;
 
-          if (submitBtn) {
-            submitBtn.disabled =
-              false;
+      console.log(
+        '[Signup] Administrator account created successfully:',
+        response.user.email
+      );
 
-            submitBtn.textContent =
-              'Create account';
-          }
+      toast(
+        'Administrator account created successfully.',
+        'success'
+      );
 
-          renderSignup(
-            error?.message ||
-            'Unable to create your account.'
-          );
-        }
-      };
+      // ---------------------------------------------------------------
+      // Go directly to dashboard
+      // ---------------------------------------------------------------
+
+      location.hash =
+        '#/dashboard';
+
+    } catch (error) {
+      console.error(
+        '[Signup] Registration failed:',
+        error
+      );
+
+      if (submitBtn) {
+        submitBtn.disabled =
+          false;
+
+        submitBtn.textContent =
+          'Create administrator account';
+      }
+
+      renderSignupPage(
+        error?.message ||
+        'Unable to create your account.'
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOGIN PAGE
+  // ---------------------------------------------------------------------------
+
+  async function renderLoginPage(
+    error
+  ) {
+    // ---------------------------------------------------------------
+    // If a token exists, don't display authentication UI.
+    // The router will take the user to dashboard.
+    // ---------------------------------------------------------------
+
+    const existingToken =
+      hasFunction(API, 'token')
+        ? API.token()
+        : null;
+
+    if (existingToken) {
+      location.hash =
+        '#/dashboard';
+
+      return;
+    }
+
+    // ---------------------------------------------------------------
+    // Always refresh setup status before displaying auth screen.
+    // ---------------------------------------------------------------
+
+    await checkSetupStatus();
+
+    renderAuthPage(
+      error ||
+      AppState.sessionError ||
+      null
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // SIGNUP PAGE
+  // ---------------------------------------------------------------------------
+
+  async function renderSignupPage(
+    error
+  ) {
+    // ---------------------------------------------------------------
+    // Check again before showing signup.
+    //
+    // This prevents a second browser from showing signup after another
+    // browser has already created the first account.
+    // ---------------------------------------------------------------
+
+    await checkSetupStatus();
+
+    if (!AppState.setupRequired) {
+      renderLoginPage(
+        'Account setup has already been completed. Please sign in.'
+      );
+
+      return;
+    }
+
+    renderAuthPage(
+      error ||
+      AppState.sessionError ||
+      null
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // HTML ESCAPING
+  // ---------------------------------------------------------------------------
+
+  function escapeHtml(value) {
+    return String(
+      value ?? ''
+    )
+      .replace(
+        /&/g,
+        '&amp;'
+      )
+      .replace(
+        /</g,
+        '&lt;'
+      )
+      .replace(
+        />/g,
+        '&gt;'
+      )
+      .replace(
+        /"/g,
+        '&quot;'
+      )
+      .replace(
+        /'/g,
+        '&#039;'
+      );
   }
 
   // ---------------------------------------------------------------------------
@@ -1760,6 +2088,10 @@
 
     bindShellEvents();
 
+    // ---------------------------------------------------------------
+    // Document preview
+    // ---------------------------------------------------------------
+
     const docImgWrap =
       document.getElementById(
         'review-doc-image'
@@ -1825,6 +2157,10 @@
         }
       }
     }
+
+    // ---------------------------------------------------------------
+    // Editable fields
+    // ---------------------------------------------------------------
 
     document
       .querySelectorAll(
@@ -1904,6 +2240,10 @@
         );
       });
 
+    // ---------------------------------------------------------------
+    // APPROVE
+    // ---------------------------------------------------------------
+
     const approveBtn =
       document.getElementById(
         'btn-approve'
@@ -1961,6 +2301,10 @@
         };
     }
 
+    // ---------------------------------------------------------------
+    // REJECT
+    // ---------------------------------------------------------------
+
     const rejectBtn =
       document.getElementById(
         'btn-reject'
@@ -1973,6 +2317,10 @@
             invoice.id
           );
     }
+
+    // ---------------------------------------------------------------
+    // RETAKE / RETRY
+    // ---------------------------------------------------------------
 
     const retakeBtn =
       document.getElementById(
@@ -2362,6 +2710,10 @@
           };
       });
 
+    // ---------------------------------------------------------------
+    // Export all
+    // ---------------------------------------------------------------
+
     const exportAllBtn =
       document.getElementById(
         'btn-export-all'
@@ -2396,6 +2748,10 @@
           }
         };
     }
+
+    // ---------------------------------------------------------------
+    // Export selected
+    // ---------------------------------------------------------------
 
     const exportSelectedBtn =
       document.getElementById(
@@ -2785,7 +3141,7 @@
   );
 
   // ---------------------------------------------------------------------------
-  // EXPOSE STATE FOR OTHER FRONTEND MODULES
+  // EXPOSE STATE / APP
   // ---------------------------------------------------------------------------
 
   window.AppState =
@@ -2797,6 +3153,7 @@
     toast,
     handleSessionExpired,
     runCapture,
+    checkSetupStatus,
   };
 
 })();
