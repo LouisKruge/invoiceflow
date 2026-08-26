@@ -1,3 +1,8 @@
+// ============================================================================
+// InvoiceFlow — Invoice Routes
+// PostgreSQL / Neon version
+// ============================================================================
+
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
@@ -5,8 +10,16 @@ const fs = require('fs');
 const { v4: uuid } = require('uuid');
 
 const db = require('../db');
-const { requireAuth, requireRole } = require('../middleware/auth');
-const { extractInvoice } = require('../services/aiExtraction');
+
+const {
+  requireAuth,
+  requireRole
+} = require('../middleware/auth');
+
+const {
+  extractInvoice
+} = require('../services/aiExtraction');
+
 const {
   validateInvoice,
   overallStatus,
@@ -15,9 +28,9 @@ const {
 
 const router = express.Router();
 
-// ---------------------------------------------------------------------------
+// ============================================================================
 // UPLOAD CONFIGURATION
-// ---------------------------------------------------------------------------
+// ============================================================================
 
 const UPLOAD_DIR = path.join(
   __dirname,
@@ -53,6 +66,7 @@ const upload = multer({
   },
 
   fileFilter: (req, file, cb) => {
+
     const allowedTypes = [
       'image/jpeg',
       'image/png',
@@ -74,18 +88,20 @@ const upload = multer({
   }
 });
 
-// ---------------------------------------------------------------------------
-// PROCESSING LOG
-// ---------------------------------------------------------------------------
+// ============================================================================
+// HELPERS
+// ============================================================================
 
-function log(
+async function log(
   invoiceId,
   stage,
   actorId,
   detail
 ) {
-  db.prepare(`
-    INSERT INTO invoice_processing_logs
+
+  await db.run(
+    `
+      INSERT INTO invoice_processing_logs
       (
         id,
         invoice_id,
@@ -93,44 +109,51 @@ function log(
         actor_id,
         detail
       )
-    VALUES
-      (?, ?, ?, ?, ?)
-  `).run(
-    uuid(),
-    invoiceId,
-    stage,
-    actorId || null,
-    detail
-      ? JSON.stringify(detail)
-      : null
+      VALUES
+      ($1, $2, $3, $4, $5)
+    `,
+    [
+      uuid(),
+      invoiceId,
+      stage,
+      actorId || null,
+      detail
+        ? JSON.stringify(detail)
+        : null
+    ]
   );
 }
 
-// ---------------------------------------------------------------------------
+// ============================================================================
 // SUPPLIER
-// ---------------------------------------------------------------------------
+// ============================================================================
 
-function findOrCreateSupplier(
+async function findOrCreateSupplier(
   name,
   vat,
   address,
   contact
 ) {
+
   if (!name) {
     return null;
   }
 
   const key =
-    `${name.trim().toLowerCase()}|${(vat || '')
+    `${String(name).trim().toLowerCase()}|${String(vat || '')
       .trim()
       .toLowerCase()}`;
 
   const existing =
-    db.prepare(`
-      SELECT *
-      FROM suppliers
-      WHERE normalized_key = ?
-    `).get(key);
+    await db.get(
+      `
+        SELECT *
+        FROM suppliers
+        WHERE normalized_key = $1
+        LIMIT 1
+      `,
+      [key]
+    );
 
   if (existing) {
     return existing.id;
@@ -138,8 +161,9 @@ function findOrCreateSupplier(
 
   const id = uuid();
 
-  db.prepare(`
-    INSERT INTO suppliers
+  await db.run(
+    `
+      INSERT INTO suppliers
       (
         id,
         name,
@@ -148,522 +172,25 @@ function findOrCreateSupplier(
         contact,
         normalized_key
       )
-    VALUES
-      (?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    name,
-    vat,
-    address,
-    contact,
-    key
+      VALUES
+      ($1, $2, $3, $4, $5, $6)
+    `,
+    [
+      id,
+      name,
+      vat || null,
+      address || null,
+      contact || null,
+      key
+    ]
   );
 
   return id;
 }
 
-// ===========================================================================
-// POST /api/invoices/capture
-//
-// Upload invoice
-//      ↓
-// Validate authenticated user
-//      ↓
-// Save invoice
-//      ↓
-// Gemini / Claude / Mock
-//      ↓
-// Validate extraction
-//      ↓
-// Save results
-// ===========================================================================
-
-router.post(
-  '/capture',
-  requireAuth,
-  upload.single('file'),
-  async (req, res) => {
-
-    // -----------------------------------------------------------------------
-    // FILE CHECK
-    // -----------------------------------------------------------------------
-
-    if (!req.file) {
-      return res.status(400).json({
-        error: 'No file uploaded'
-      });
-    }
-
-    // -----------------------------------------------------------------------
-    // USER CHECK
-    //
-    // This prevents the previous SQLite FOREIGN KEY crash.
-    // The JWT can contain a user ID that doesn't exist in this database.
-    // -----------------------------------------------------------------------
-
-    const user =
-      db.prepare(`
-        SELECT id, name, role
-        FROM users
-        WHERE id = ?
-      `).get(req.user.id);
-
-    if (!user) {
-
-      console.error(
-        '[capture] Authenticated user does not exist in backend database:',
-        req.user.id
-      );
-
-      return res.status(401).json({
-        error:
-          'Your login session is no longer valid. Please log out and log in again.'
-      });
-    }
-
-    console.log(
-      `[capture] Authenticated user: ${user.name} (${user.id})`
-    );
-
-    // -----------------------------------------------------------------------
-    // CREATE INVOICE
-    // -----------------------------------------------------------------------
-
-    const invoiceId = uuid();
-    const filePath = req.file.path;
-
-    try {
-
-      db.prepare(`
-        INSERT INTO invoices
-          (
-            id,
-            status,
-            created_by
-          )
-        VALUES
-          (?, ?, ?)
-      `).run(
-        invoiceId,
-        'processing',
-        user.id
-      );
-
-      db.prepare(`
-        INSERT INTO invoice_documents
-          (
-            id,
-            invoice_id,
-            file_path,
-            original_filename,
-            mime_type
-          )
-        VALUES
-          (?, ?, ?, ?, ?)
-      `).run(
-        uuid(),
-        invoiceId,
-        path.relative(
-          path.join(__dirname, '..'),
-          filePath
-        ),
-        req.file.originalname,
-        req.file.mimetype
-      );
-
-    } catch (error) {
-
-      console.error(
-        '[capture] Failed to create invoice record:',
-        error
-      );
-
-      return res.status(500).json({
-        error:
-          `Failed to create invoice record: ${error.message}`
-      });
-    }
-
-    // -----------------------------------------------------------------------
-    // PROCESS INVOICE
-    // -----------------------------------------------------------------------
-
-    try {
-
-      log(
-        invoiceId,
-        'uploaded',
-        user.id,
-        {
-          filename:
-            req.file.originalname,
-
-          mime_type:
-            req.file.mimetype,
-
-          file_size:
-            req.file.size
-        }
-      );
-
-      console.log(
-        `[capture] Starting AI extraction for invoice ${invoiceId}`
-      );
-
-      // ---------------------------------------------------------------------
-      // AI EXTRACTION
-      // ---------------------------------------------------------------------
-
-      const extraction =
-        await extractInvoice(
-          filePath,
-          req.file.mimetype
-        );
-
-      console.log(
-        `[capture] AI extraction completed using provider: ${extraction.provider}`
-      );
-
-      if (extraction.error) {
-        console.warn(
-          `[capture] AI provider returned with warning: ${extraction.error}`
-        );
-      }
-
-      log(
-        invoiceId,
-        'ai_extracted',
-        null,
-        {
-          provider:
-            extraction.provider,
-
-          error:
-            extraction.error || null
-        }
-      );
-
-      // ---------------------------------------------------------------------
-      // EXISTING INVOICES FOR DUPLICATE CHECK
-      // ---------------------------------------------------------------------
-
-      const existing =
-        db.prepare(`
-          SELECT
-            id,
-            invoice_number,
-            supplier_name,
-            total_amount
-          FROM invoices
-          WHERE id != ?
-        `).all(invoiceId);
-
-      // ---------------------------------------------------------------------
-      // VALIDATION
-      // ---------------------------------------------------------------------
-
-      const validationResults =
-        validateInvoice(
-          extraction.fields,
-          existing
-        );
-
-      const status =
-        overallStatus(
-          validationResults,
-          extraction.confidence
-        );
-
-      console.log(
-        `[capture] Invoice validation completed. Status: ${status}`
-      );
-
-      log(
-        invoiceId,
-        'validated',
-        null,
-        {
-          status
-        }
-      );
-
-      // ---------------------------------------------------------------------
-      // SUPPLIER
-      // ---------------------------------------------------------------------
-
-      const supplierId =
-        findOrCreateSupplier(
-          extraction.fields.supplier_name,
-          extraction.fields.supplier_vat_number,
-          extraction.fields.supplier_address,
-          extraction.fields.supplier_contact
-        );
-
-      // ---------------------------------------------------------------------
-      // SAVE EXTRACTED INVOICE
-      // ---------------------------------------------------------------------
-
-      const f =
-        extraction.fields;
-
-      db.prepare(`
-        UPDATE invoices SET
-
-          invoice_number=?,
-          supplier_id=?,
-          supplier_name=?,
-          supplier_vat_number=?,
-          supplier_address=?,
-          supplier_contact=?,
-
-          invoice_date=?,
-          due_date=?,
-          purchase_order_number=?,
-
-          subtotal=?,
-          vat_amount=?,
-          total_amount=?,
-
-          currency=?,
-          payment_terms=?,
-
-          status=?,
-          overall_confidence=?,
-          field_confidence=?,
-          ai_raw_response=?,
-
-          updated_at=datetime('now')
-
-        WHERE id=?
-      `).run(
-
-        f.invoice_number,
-
-        supplierId,
-
-        f.supplier_name,
-
-        f.supplier_vat_number,
-
-        f.supplier_address,
-
-        f.supplier_contact,
-
-        f.invoice_date,
-
-        f.due_date,
-
-        f.purchase_order_number,
-
-        f.subtotal,
-
-        f.vat_amount,
-
-        f.total_amount,
-
-        f.currency,
-
-        f.payment_terms,
-
-        status,
-
-        avgConfidence(
-          extraction.confidence
-        ),
-
-        JSON.stringify(
-          extraction.confidence
-        ),
-
-        JSON.stringify({
-          provider:
-            extraction.provider,
-
-          error:
-            extraction.error || null
-        }),
-
-        invoiceId
-      );
-
-      // ---------------------------------------------------------------------
-      // LINE ITEMS
-      // ---------------------------------------------------------------------
-
-      for (
-        const li of extraction.lineItems
-      ) {
-
-        db.prepare(`
-          INSERT INTO invoice_line_items
-            (
-              id,
-              invoice_id,
-              description,
-              quantity,
-              unit_price,
-              vat,
-              total
-            )
-          VALUES
-            (?, ?, ?, ?, ?, ?, ?)
-        `).run(
-
-          uuid(),
-
-          invoiceId,
-
-          li.description,
-
-          li.quantity,
-
-          li.unit_price,
-
-          li.vat,
-
-          li.total
-        );
-      }
-
-      // ---------------------------------------------------------------------
-      // VALIDATION RESULTS
-      // ---------------------------------------------------------------------
-
-      for (
-        const vr of validationResults
-      ) {
-
-        db.prepare(`
-          INSERT INTO invoice_validation_results
-            (
-              id,
-              invoice_id,
-              rule_code,
-              passed,
-              severity,
-              message
-            )
-          VALUES
-            (?, ?, ?, ?, ?, ?)
-        `).run(
-
-          uuid(),
-
-          invoiceId,
-
-          vr.rule_code,
-
-          vr.passed
-            ? 1
-            : 0,
-
-          vr.severity,
-
-          vr.message
-        );
-      }
-
-      // ---------------------------------------------------------------------
-      // SUCCESS
-      // ---------------------------------------------------------------------
-
-      console.log(
-        `[capture] Invoice ${invoiceId} successfully processed`
-      );
-
-      return res.json({
-        invoice:
-          getInvoiceFull(
-            invoiceId
-          )
-      });
-
-    } catch (err) {
-
-      // ---------------------------------------------------------------------
-      // PROCESSING ERROR
-      // ---------------------------------------------------------------------
-
-      console.error(
-        '[capture] Invoice processing failed:',
-        err
-      );
-
-      try {
-
-        db.prepare(`
-          UPDATE invoices
-          SET
-            status='exception',
-            updated_at=datetime('now')
-          WHERE id=?
-        `).run(invoiceId);
-
-        db.prepare(`
-          INSERT INTO invoice_validation_results
-            (
-              id,
-              invoice_id,
-              rule_code,
-              passed,
-              severity,
-              message
-            )
-          VALUES
-            (?, ?, ?, ?, ?, ?)
-        `).run(
-
-          uuid(),
-
-          invoiceId,
-
-          'PROCESSING_ERROR',
-
-          0,
-
-          'error',
-
-          `We couldn't confidently read this invoice: ${err.message}`
-        );
-
-        log(
-          invoiceId,
-          'error',
-          null,
-          {
-            message:
-              err.message
-          }
-        );
-
-      } catch (fallbackError) {
-
-        console.error(
-          '[capture/fallback]',
-          fallbackError
-        );
-      }
-
-      // Return 200 so the frontend can display the exception/review state
-      // rather than treating the whole request as a server crash.
-
-      return res.status(200).json({
-
-        invoice:
-          getInvoiceFull(
-            invoiceId
-          ),
-
-        warning:
-          "We couldn't confidently read this invoice. Please review and enter the details manually, or retake the photo."
-      });
-    }
-  }
-);
-
-// ===========================================================================
+// ============================================================================
 // CONFIDENCE
-// ===========================================================================
+// ============================================================================
 
 function avgConfidence(
   confidence
@@ -692,100 +219,134 @@ function avgConfidence(
   ) / 100;
 }
 
-// ===========================================================================
+// ============================================================================
 // GET FULL INVOICE
-// ===========================================================================
+// ============================================================================
 
-function getInvoiceFull(
+async function getInvoiceFull(
   id
 ) {
 
   const invoice =
-    db.prepare(`
-      SELECT *
-      FROM invoices
-      WHERE id = ?
-    `).get(id);
+    await db.get(
+      `
+        SELECT *
+        FROM invoices
+        WHERE id = $1
+      `,
+      [id]
+    );
 
   if (!invoice) {
     return null;
   }
 
   const lineItems =
-    db.prepare(`
-      SELECT *
-      FROM invoice_line_items
-      WHERE invoice_id = ?
-    `).all(id);
+    await db.all(
+      `
+        SELECT *
+        FROM invoice_line_items
+        WHERE invoice_id = $1
+        ORDER BY created_at ASC
+      `,
+      [id]
+    );
 
   const validation =
-    db.prepare(`
-      SELECT *
-      FROM invoice_validation_results
-      WHERE invoice_id = ?
-      ORDER BY created_at
-    `).all(id);
+    await db.all(
+      `
+        SELECT *
+        FROM invoice_validation_results
+        WHERE invoice_id = $1
+        ORDER BY created_at ASC
+      `,
+      [id]
+    );
 
   const documents =
-    db.prepare(`
-      SELECT *
-      FROM invoice_documents
-      WHERE invoice_id = ?
-    `).all(id);
+    await db.all(
+      `
+        SELECT *
+        FROM invoice_documents
+        WHERE invoice_id = $1
+        ORDER BY uploaded_at DESC
+      `,
+      [id]
+    );
 
   const logs =
-    db.prepare(`
-      SELECT
-        l.*,
-        u.name AS actor_name
+    await db.all(
+      `
+        SELECT
+          l.*,
+          u.name AS actor_name
+        FROM invoice_processing_logs l
+        LEFT JOIN users u
+          ON u.id = l.actor_id
+        WHERE l.invoice_id = $1
+        ORDER BY l.created_at ASC
+      `,
+      [id]
+    );
 
-      FROM invoice_processing_logs l
+  let processedBy = null;
 
-      LEFT JOIN users u
-        ON u.id = l.actor_id
+  if (invoice.processed_by) {
 
-      WHERE l.invoice_id = ?
-
-      ORDER BY l.created_at
-    `).all(id);
-
-  const processedBy =
-    invoice.processed_by
-      ? db.prepare(`
+    processedBy =
+      await db.get(
+        `
           SELECT name
           FROM users
-          WHERE id = ?
-        `).get(invoice.processed_by)
-      : null;
+          WHERE id = $1
+        `,
+        [invoice.processed_by]
+      );
+  }
 
-  const createdBy =
-    invoice.created_by
-      ? db.prepare(`
+  let createdBy = null;
+
+  if (invoice.created_by) {
+
+    createdBy =
+      await db.get(
+        `
           SELECT name
           FROM users
-          WHERE id = ?
-        `).get(invoice.created_by)
-      : null;
+          WHERE id = $1
+        `,
+        [invoice.created_by]
+      );
+  }
+
+  let fieldConfidence = {};
+
+  if (invoice.field_confidence) {
+
+    try {
+
+      fieldConfidence =
+        typeof invoice.field_confidence === 'string'
+          ? JSON.parse(invoice.field_confidence)
+          : invoice.field_confidence;
+
+    } catch (error) {
+
+      fieldConfidence = {};
+    }
+  }
 
   return {
 
     ...invoice,
 
     field_confidence:
-      invoice.field_confidence
-        ? JSON.parse(
-            invoice.field_confidence
-          )
-        : {},
+      fieldConfidence,
 
     low_confidence_fields:
-      invoice.field_confidence
-        ? lowConfidenceFields(
-            JSON.parse(
-              invoice.field_confidence
-            )
-          )
-        : [],
+      lowConfidenceFields(
+        fieldConfidence
+      ),
 
     line_items:
       lineItems,
@@ -798,16 +359,31 @@ function getInvoiceFull(
 
     processing_logs:
       logs.map(
-        l => ({
-          ...l,
+        l => {
 
-          detail:
-            l.detail
-              ? JSON.parse(
-                  l.detail
-                )
-              : null
-        })
+          let detail = null;
+
+          if (l.detail) {
+
+            try {
+
+              detail =
+                typeof l.detail === 'string'
+                  ? JSON.parse(l.detail)
+                  : l.detail;
+
+            } catch (error) {
+
+              detail =
+                l.detail;
+            }
+          }
+
+          return {
+            ...l,
+            detail
+          };
+        }
       ),
 
     processed_by_name:
@@ -822,166 +398,730 @@ function getInvoiceFull(
   };
 }
 
-// ===========================================================================
+// ============================================================================
+// POST /api/invoices/capture
+// ============================================================================
+
+router.post(
+  '/capture',
+  requireAuth,
+  upload.single('file'),
+  async (req, res) => {
+
+    if (!req.file) {
+
+      return res.status(400).json({
+        error:
+          'No file uploaded'
+      });
+    }
+
+    // ------------------------------------------------------------------------
+    // Verify authenticated user exists
+    // ------------------------------------------------------------------------
+
+    const user =
+      await db.get(
+        `
+          SELECT
+            id,
+            name,
+            role
+          FROM users
+          WHERE id = $1
+        `,
+        [req.user.id]
+      );
+
+    if (!user) {
+
+      console.error(
+        '[capture] Authenticated user does not exist:',
+        req.user.id
+      );
+
+      return res.status(401).json({
+        error:
+          'Your login session is no longer valid. Please log out and log in again.'
+      });
+    }
+
+    console.log(
+      `[capture] Authenticated user: ${user.name} (${user.id})`
+    );
+
+    const invoiceId = uuid();
+
+    const filePath =
+      req.file.path;
+
+    // ------------------------------------------------------------------------
+    // Create invoice
+    // ------------------------------------------------------------------------
+
+    try {
+
+      await db.run(
+        `
+          INSERT INTO invoices
+          (
+            id,
+            status,
+            created_by
+          )
+          VALUES
+          ($1, $2, $3)
+        `,
+        [
+          invoiceId,
+          'processing',
+          user.id
+        ]
+      );
+
+      await db.run(
+        `
+          INSERT INTO invoice_documents
+          (
+            id,
+            invoice_id,
+            file_path,
+            original_filename,
+            mime_type
+          )
+          VALUES
+          ($1, $2, $3, $4, $5)
+        `,
+        [
+          uuid(),
+
+          invoiceId,
+
+          path.relative(
+            path.join(
+              __dirname,
+              '..'
+            ),
+            filePath
+          ),
+
+          req.file.originalname,
+
+          req.file.mimetype
+        ]
+      );
+
+    } catch (error) {
+
+      console.error(
+        '[capture] Failed to create invoice record:',
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          `Failed to create invoice record: ${error.message}`
+      });
+    }
+
+    // ------------------------------------------------------------------------
+    // Process invoice
+    // ------------------------------------------------------------------------
+
+    try {
+
+      await log(
+        invoiceId,
+        'uploaded',
+        user.id,
+        {
+          filename:
+            req.file.originalname,
+
+          mime_type:
+            req.file.mimetype,
+
+          file_size:
+            req.file.size
+        }
+      );
+
+      console.log(
+        `[capture] Starting AI extraction for invoice ${invoiceId}`
+      );
+
+      const extraction =
+        await extractInvoice(
+          filePath,
+          req.file.mimetype
+        );
+
+      console.log(
+        `[capture] AI extraction completed using provider: ${extraction.provider}`
+      );
+
+      if (extraction.error) {
+
+        console.warn(
+          `[capture] AI provider warning: ${extraction.error}`
+        );
+      }
+
+      await log(
+        invoiceId,
+        'ai_extracted',
+        null,
+        {
+          provider:
+            extraction.provider,
+
+          error:
+            extraction.error || null
+        }
+      );
+
+      // ----------------------------------------------------------------------
+      // Existing invoices
+      // ----------------------------------------------------------------------
+
+      const existing =
+        await db.all(
+          `
+            SELECT
+              id,
+              invoice_number,
+              supplier_name,
+              total_amount
+            FROM invoices
+            WHERE id != $1
+          `,
+          [invoiceId]
+        );
+
+      // ----------------------------------------------------------------------
+      // Validation
+      // ----------------------------------------------------------------------
+
+      const validationResults =
+        validateInvoice(
+          extraction.fields,
+          existing
+        );
+
+      const status =
+        overallStatus(
+          validationResults,
+          extraction.confidence
+        );
+
+      await log(
+        invoiceId,
+        'validated',
+        null,
+        {
+          status
+        }
+      );
+
+      // ----------------------------------------------------------------------
+      // Supplier
+      // ----------------------------------------------------------------------
+
+      const supplierId =
+        await findOrCreateSupplier(
+          extraction.fields.supplier_name,
+          extraction.fields.supplier_vat_number,
+          extraction.fields.supplier_address,
+          extraction.fields.supplier_contact
+        );
+
+      // ----------------------------------------------------------------------
+      // Save invoice
+      // ----------------------------------------------------------------------
+
+      const f =
+        extraction.fields;
+
+      await db.run(
+        `
+          UPDATE invoices
+          SET
+
+            invoice_number = $1,
+            supplier_id = $2,
+            supplier_name = $3,
+            supplier_vat_number = $4,
+            supplier_address = $5,
+            supplier_contact = $6,
+
+            invoice_date = $7,
+            due_date = $8,
+            purchase_order_number = $9,
+
+            subtotal = $10,
+            vat_amount = $11,
+            total_amount = $12,
+
+            currency = $13,
+            payment_terms = $14,
+
+            status = $15,
+            overall_confidence = $16,
+            field_confidence = $17,
+            ai_raw_response = $18,
+
+            updated_at = NOW()
+
+          WHERE id = $19
+        `,
+        [
+
+          f.invoice_number || null,
+
+          supplierId,
+
+          f.supplier_name || null,
+
+          f.supplier_vat_number || null,
+
+          f.supplier_address || null,
+
+          f.supplier_contact || null,
+
+          f.invoice_date || null,
+
+          f.due_date || null,
+
+          f.purchase_order_number || null,
+
+          f.subtotal ?? null,
+
+          f.vat_amount ?? null,
+
+          f.total_amount ?? null,
+
+          f.currency || null,
+
+          f.payment_terms || null,
+
+          status,
+
+          avgConfidence(
+            extraction.confidence
+          ),
+
+          JSON.stringify(
+            extraction.confidence || {}
+          ),
+
+          JSON.stringify({
+            provider:
+              extraction.provider,
+
+            error:
+              extraction.error || null
+          }),
+
+          invoiceId
+        ]
+      );
+
+      // ----------------------------------------------------------------------
+      // Line items
+      // ----------------------------------------------------------------------
+
+      for (
+        const li of (
+          extraction.lineItems || []
+        )
+      ) {
+
+        await db.run(
+          `
+            INSERT INTO invoice_line_items
+            (
+              id,
+              invoice_id,
+              description,
+              quantity,
+              unit_price,
+              vat,
+              total
+            )
+            VALUES
+            ($1, $2, $3, $4, $5, $6, $7)
+          `,
+          [
+
+            uuid(),
+
+            invoiceId,
+
+            li.description || null,
+
+            li.quantity ?? null,
+
+            li.unit_price ?? null,
+
+            li.vat ?? null,
+
+            li.total ?? null
+          ]
+        );
+      }
+
+      // ----------------------------------------------------------------------
+      // Validation results
+      // ----------------------------------------------------------------------
+
+      for (
+        const vr of validationResults
+      ) {
+
+        await db.run(
+          `
+            INSERT INTO invoice_validation_results
+            (
+              id,
+              invoice_id,
+              rule_code,
+              passed,
+              severity,
+              message
+            )
+            VALUES
+            ($1, $2, $3, $4, $5, $6)
+          `,
+          [
+
+            uuid(),
+
+            invoiceId,
+
+            vr.rule_code,
+
+            vr.passed
+              ? true
+              : false,
+
+            vr.severity,
+
+            vr.message
+          ]
+        );
+      }
+
+      console.log(
+        `[capture] Invoice ${invoiceId} successfully processed`
+      );
+
+      return res.json({
+
+        invoice:
+          await getInvoiceFull(
+            invoiceId
+          )
+      });
+
+    } catch (err) {
+
+      console.error(
+        '[capture] Invoice processing failed:',
+        err
+      );
+
+      try {
+
+        await db.run(
+          `
+            UPDATE invoices
+            SET
+              status = 'exception',
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          [invoiceId]
+        );
+
+        await db.run(
+          `
+            INSERT INTO invoice_validation_results
+            (
+              id,
+              invoice_id,
+              rule_code,
+              passed,
+              severity,
+              message
+            )
+            VALUES
+            ($1, $2, $3, $4, $5, $6)
+          `,
+          [
+
+            uuid(),
+
+            invoiceId,
+
+            'PROCESSING_ERROR',
+
+            false,
+
+            'error',
+
+            `We couldn't confidently read this invoice: ${err.message}`
+          ]
+        );
+
+        await log(
+          invoiceId,
+          'error',
+          null,
+          {
+            message:
+              err.message
+          }
+        );
+
+      } catch (fallbackError) {
+
+        console.error(
+          '[capture/fallback]',
+          fallbackError
+        );
+      }
+
+      return res.status(200).json({
+
+        invoice:
+          await getInvoiceFull(
+            invoiceId
+          ),
+
+        warning:
+          "We couldn't confidently read this invoice. Please review and enter the details manually, or retake the photo."
+      });
+    }
+  }
+);
+
+// ============================================================================
 // GET /api/invoices
-// ===========================================================================
+// ============================================================================
 
 router.get(
   '/',
   requireAuth,
-  (req, res) => {
+  async (req, res) => {
 
-    const {
-      q,
-      status,
-      dateFrom,
-      dateTo
-    } = req.query;
+    try {
 
-    let sql =
-      'SELECT * FROM invoices WHERE 1=1';
-
-    const params = [];
-
-    if (
-      status &&
-      status !== 'all'
-    ) {
-
-      sql +=
-        ' AND status = ?';
-
-      params.push(
-        status
-      );
-    }
-
-    if (dateFrom) {
-
-      sql +=
-        ' AND date(invoice_date) >= date(?)';
-
-      params.push(
-        dateFrom
-      );
-    }
-
-    if (dateTo) {
-
-      sql +=
-        ' AND date(invoice_date) <= date(?)';
-
-      params.push(
+      const {
+        q,
+        status,
+        dateFrom,
         dateTo
+      } = req.query;
+
+      let sql =
+        `
+          SELECT *
+          FROM invoices
+          WHERE 1 = 1
+        `;
+
+      const params = [];
+
+      if (
+        status &&
+        status !== 'all'
+      ) {
+
+        params.push(status);
+
+        sql +=
+          ` AND status = $${params.length}`;
+      }
+
+      if (dateFrom) {
+
+        params.push(dateFrom);
+
+        sql +=
+          ` AND DATE(invoice_date) >= DATE($${params.length})`;
+      }
+
+      if (dateTo) {
+
+        params.push(dateTo);
+
+        sql +=
+          ` AND DATE(invoice_date) <= DATE($${params.length})`;
+      }
+
+      if (q) {
+
+        const search =
+          `%${q}%`;
+
+        params.push(search);
+
+        const p =
+          `$${params.length}`;
+
+        sql += `
+          AND (
+            invoice_number ILIKE ${p}
+            OR supplier_name ILIKE ${p}
+            OR supplier_vat_number ILIKE ${p}
+            OR purchase_order_number ILIKE ${p}
+            OR CAST(total_amount AS TEXT) ILIKE ${p}
+          )
+        `;
+      }
+
+      sql +=
+        `
+          ORDER BY created_at DESC
+          LIMIT 500
+        `;
+
+      const invoices =
+        await db.all(
+          sql,
+          params
+        );
+
+      return res.json({
+        invoices
+      });
+
+    } catch (error) {
+
+      console.error(
+        '[invoices/list]',
+        error
       );
+
+      return res.status(500).json({
+        error:
+          'Unable to load invoices'
+      });
     }
-
-    if (q) {
-
-      sql += `
-        AND (
-          invoice_number LIKE ?
-          OR supplier_name LIKE ?
-          OR supplier_vat_number LIKE ?
-          OR purchase_order_number LIKE ?
-          OR CAST(total_amount AS TEXT) LIKE ?
-        )
-      `;
-
-      const like =
-        `%${q}%`;
-
-      params.push(
-        like,
-        like,
-        like,
-        like,
-        like
-      );
-    }
-
-    sql +=
-      ' ORDER BY created_at DESC LIMIT 500';
-
-    const rows =
-      db.prepare(sql).all(
-        ...params
-      );
-
-    res.json({
-      invoices:
-        rows
-    });
   }
 );
 
-// ===========================================================================
+// ============================================================================
 // GET /api/invoices/:id
-// ===========================================================================
+// ============================================================================
 
 router.get(
   '/:id',
   requireAuth,
-  (req, res) => {
+  async (req, res) => {
 
-    const invoice =
-      getInvoiceFull(
-        req.params.id
+    try {
+
+      const invoice =
+        await getInvoiceFull(
+          req.params.id
+        );
+
+      if (!invoice) {
+
+        return res.status(404).json({
+          error:
+            'Invoice not found'
+        });
+      }
+
+      return res.json({
+        invoice
+      });
+
+    } catch (error) {
+
+      console.error(
+        '[invoices/get]',
+        error
       );
 
-    if (!invoice) {
-
-      return res.status(404).json({
+      return res.status(500).json({
         error:
-          'Invoice not found'
+          'Unable to load invoice'
       });
     }
-
-    res.json({
-      invoice
-    });
   }
 );
 
-// ===========================================================================
+// ============================================================================
 // GET /api/invoices/:id/document
-// ===========================================================================
+// ============================================================================
 
 router.get(
   '/:id/document',
   requireAuth,
-  (req, res) => {
+  async (req, res) => {
 
-    const doc =
-      db.prepare(`
-        SELECT *
-        FROM invoice_documents
-        WHERE invoice_id = ?
-        ORDER BY uploaded_at DESC
-        LIMIT 1
-      `).get(req.params.id);
+    try {
 
-    if (!doc) {
+      const doc =
+        await db.get(
+          `
+            SELECT *
+            FROM invoice_documents
+            WHERE invoice_id = $1
+            ORDER BY uploaded_at DESC
+            LIMIT 1
+          `,
+          [req.params.id]
+        );
 
-      return res.status(404).json({
+      if (!doc) {
+
+        return res.status(404).json({
+          error:
+            'Document not found'
+        });
+      }
+
+      const absolutePath =
+        path.join(
+          __dirname,
+          '..',
+          doc.file_path
+        );
+
+      if (!fs.existsSync(absolutePath)) {
+
+        return res.status(404).json({
+          error:
+            'Invoice document file could not be found on the server'
+        });
+      }
+
+      return res.sendFile(
+        absolutePath
+      );
+
+    } catch (error) {
+
+      console.error(
+        '[invoices/document]',
+        error
+      );
+
+      return res.status(500).json({
         error:
-          'Document not found'
+          'Unable to load invoice document'
       });
     }
-
-    res.sendFile(
-      path.join(
-        __dirname,
-        '..',
-        doc.file_path
-      )
-    );
   }
 );
 
-// ===========================================================================
-// PATCH /api/invoices/:id
-// ===========================================================================
+// ============================================================================
+// EDITABLE FIELDS
+// ============================================================================
 
 const EDITABLE_FIELDS = [
 
@@ -1010,213 +1150,274 @@ const EDITABLE_FIELDS = [
   'supplier_address',
 
   'supplier_contact'
-
 ];
+
+// ============================================================================
+// PATCH /api/invoices/:id
+// ============================================================================
 
 router.patch(
   '/:id',
   requireAuth,
-  (req, res) => {
+  async (req, res) => {
 
-    const invoice =
-      db.prepare(`
-        SELECT *
-        FROM invoices
-        WHERE id = ?
-      `).get(req.params.id);
+    try {
 
-    if (!invoice) {
+      const invoice =
+        await db.get(
+          `
+            SELECT *
+            FROM invoices
+            WHERE id = $1
+          `,
+          [req.params.id]
+        );
 
-      return res.status(404).json({
-        error:
-          'Invoice not found'
-      });
-    }
+      if (!invoice) {
 
-    const updates = {};
-    const changes = [];
+        return res.status(404).json({
+          error:
+            'Invoice not found'
+        });
+      }
 
-    for (
-      const field of EDITABLE_FIELDS
-    ) {
+      const updates = {};
+      const changes = [];
 
-      if (
-        Object.prototype.hasOwnProperty.call(
-          req.body,
-          field
-        )
+      for (
+        const field of EDITABLE_FIELDS
       ) {
 
-        const newVal =
-          req.body[field];
-
         if (
-          String(invoice[field]) !==
-          String(newVal)
+          Object.prototype.hasOwnProperty.call(
+            req.body,
+            field
+          )
         ) {
 
-          changes.push({
-            field,
+          const newVal =
+            req.body[field];
 
-            old:
-              invoice[field],
+          if (
+            String(invoice[field]) !==
+            String(newVal)
+          ) {
 
-            new:
-              newVal
-          });
+            changes.push({
+
+              field,
+
+              old:
+                invoice[field],
+
+              new:
+                newVal
+            });
+          }
+
+          updates[field] =
+            newVal;
         }
-
-        updates[field] =
-          newVal;
       }
-    }
 
-    if (
-      !Object.keys(updates).length
-    ) {
+      if (
+        !Object.keys(updates).length
+      ) {
 
-      return res.status(400).json({
+        return res.status(400).json({
+          error:
+            'No editable fields provided'
+        });
+      }
+
+      const fields =
+        Object.keys(updates);
+
+      const values =
+        Object.values(updates);
+
+      const setParts =
+        fields.map(
+          (field, index) =>
+            `${field} = $${index + 1}`
+        );
+
+      values.push(
+        req.params.id
+      );
+
+      await db.run(
+        `
+          UPDATE invoices
+          SET
+            ${setParts.join(', ')},
+            updated_at = NOW()
+          WHERE id = $${values.length}
+        `,
+        values
+      );
+
+      if (changes.length) {
+
+        await log(
+          req.params.id,
+          'field_edited',
+          req.user.id,
+          {
+            changes
+          }
+        );
+      }
+
+      // ----------------------------------------------------------------------
+      // Re-run validation
+      // ----------------------------------------------------------------------
+
+      const refreshed =
+        await db.get(
+          `
+            SELECT *
+            FROM invoices
+            WHERE id = $1
+          `,
+          [req.params.id]
+        );
+
+      const others =
+        await db.all(
+          `
+            SELECT
+              id,
+              invoice_number,
+              supplier_name,
+              total_amount
+            FROM invoices
+            WHERE id != $1
+          `,
+          [req.params.id]
+        );
+
+      const validationResults =
+        validateInvoice(
+          refreshed,
+          others
+        );
+
+      await db.run(
+        `
+          DELETE FROM invoice_validation_results
+          WHERE invoice_id = $1
+        `,
+        [req.params.id]
+      );
+
+      for (
+        const vr of validationResults
+      ) {
+
+        await db.run(
+          `
+            INSERT INTO invoice_validation_results
+            (
+              id,
+              invoice_id,
+              rule_code,
+              passed,
+              severity,
+              message
+            )
+            VALUES
+            ($1, $2, $3, $4, $5, $6)
+          `,
+          [
+
+            uuid(),
+
+            req.params.id,
+
+            vr.rule_code,
+
+            vr.passed
+              ? true
+              : false,
+
+            vr.severity,
+
+            vr.message
+          ]
+        );
+      }
+
+      let confidence = {};
+
+      if (refreshed.field_confidence) {
+
+        try {
+
+          confidence =
+            typeof refreshed.field_confidence === 'string'
+              ? JSON.parse(refreshed.field_confidence)
+              : refreshed.field_confidence;
+
+        } catch (error) {
+
+          confidence = {};
+        }
+      }
+
+      const newStatus =
+        [
+          'approved',
+          'rejected'
+        ].includes(
+          refreshed.status
+        )
+          ? refreshed.status
+          : overallStatus(
+              validationResults,
+              confidence
+            );
+
+      await db.run(
+        `
+          UPDATE invoices
+          SET
+            status = $1,
+            updated_at = NOW()
+          WHERE id = $2
+        `,
+        [
+          newStatus,
+          req.params.id
+        ]
+      );
+
+      return res.json({
+
+        invoice:
+          await getInvoiceFull(
+            req.params.id
+          )
+      });
+
+    } catch (error) {
+
+      console.error(
+        '[invoices/update]',
+        error
+      );
+
+      return res.status(500).json({
         error:
-          'No editable fields provided'
+          `Unable to update invoice: ${error.message}`
       });
     }
-
-    const setClause =
-      Object.keys(updates)
-        .map(
-          key =>
-            `${key} = ?`
-        )
-        .join(', ');
-
-    db.prepare(`
-      UPDATE invoices
-      SET
-        ${setClause},
-        updated_at=datetime('now')
-      WHERE id=?
-    `).run(
-      ...Object.values(updates),
-      req.params.id
-    );
-
-    if (changes.length) {
-
-      log(
-        req.params.id,
-        'field_edited',
-        req.user.id,
-        {
-          changes
-        }
-      );
-    }
-
-    // Re-run validation
-    const refreshed =
-      db.prepare(`
-        SELECT *
-        FROM invoices
-        WHERE id = ?
-      `).get(req.params.id);
-
-    const others =
-      db.prepare(`
-        SELECT
-          id,
-          invoice_number,
-          supplier_name,
-          total_amount
-        FROM invoices
-        WHERE id != ?
-      `).all(req.params.id);
-
-    const validationResults =
-      validateInvoice(
-        refreshed,
-        others
-      );
-
-    db.prepare(`
-      DELETE FROM invoice_validation_results
-      WHERE invoice_id = ?
-    `).run(req.params.id);
-
-    for (
-      const vr of validationResults
-    ) {
-
-      db.prepare(`
-        INSERT INTO invoice_validation_results
-          (
-            id,
-            invoice_id,
-            rule_code,
-            passed,
-            severity,
-            message
-          )
-        VALUES
-          (?, ?, ?, ?, ?, ?)
-      `).run(
-
-        uuid(),
-
-        req.params.id,
-
-        vr.rule_code,
-
-        vr.passed
-          ? 1
-          : 0,
-
-        vr.severity,
-
-        vr.message
-      );
-    }
-
-    const confidence =
-      refreshed.field_confidence
-        ? JSON.parse(
-            refreshed.field_confidence
-          )
-        : {};
-
-    const newStatus =
-      [
-        'approved',
-        'rejected'
-      ].includes(
-        refreshed.status
-      )
-        ? refreshed.status
-        : overallStatus(
-            validationResults,
-            confidence
-          );
-
-    db.prepare(`
-      UPDATE invoices
-      SET status = ?
-      WHERE id = ?
-    `).run(
-      newStatus,
-      req.params.id
-    );
-
-    res.json({
-      invoice:
-        getInvoiceFull(
-          req.params.id
-        )
-    });
   }
 );
 
-// ===========================================================================
+// ============================================================================
 // APPROVE
-// ===========================================================================
+// ============================================================================
 
 router.post(
   '/:id/approve',
@@ -1225,55 +1426,77 @@ router.post(
     'admin',
     'reviewer'
   ),
-  (req, res) => {
+  async (req, res) => {
 
-    const invoice =
-      db.prepare(`
-        SELECT *
-        FROM invoices
-        WHERE id = ?
-      `).get(req.params.id);
+    try {
 
-    if (!invoice) {
+      const invoice =
+        await db.get(
+          `
+            SELECT *
+            FROM invoices
+            WHERE id = $1
+          `,
+          [req.params.id]
+        );
 
-      return res.status(404).json({
+      if (!invoice) {
+
+        return res.status(404).json({
+          error:
+            'Invoice not found'
+        });
+      }
+
+      await db.run(
+        `
+          UPDATE invoices
+          SET
+            status = 'approved',
+            processed_by = $1,
+            processed_at = NOW(),
+            updated_at = NOW()
+          WHERE id = $2
+        `,
+        [
+          req.user.id,
+          req.params.id
+        ]
+      );
+
+      await log(
+        req.params.id,
+        'approved',
+        req.user.id,
+        null
+      );
+
+      return res.json({
+
+        invoice:
+          await getInvoiceFull(
+            req.params.id
+          )
+      });
+
+    } catch (error) {
+
+      console.error(
+        '[invoices/approve]',
+        error
+      );
+
+      return res.status(500).json({
         error:
-          'Invoice not found'
+          'Unable to approve invoice'
       });
     }
-
-    db.prepare(`
-      UPDATE invoices
-      SET
-        status='approved',
-        processed_by=?,
-        processed_at=datetime('now'),
-        updated_at=datetime('now')
-      WHERE id=?
-    `).run(
-      req.user.id,
-      req.params.id
-    );
-
-    log(
-      req.params.id,
-      'approved',
-      req.user.id,
-      null
-    );
-
-    res.json({
-      invoice:
-        getInvoiceFull(
-          req.params.id
-        )
-    });
   }
 );
 
-// ===========================================================================
+// ============================================================================
 // REJECT
-// ===========================================================================
+// ============================================================================
 
 router.post(
   '/:id/reject',
@@ -1282,58 +1505,80 @@ router.post(
     'admin',
     'reviewer'
   ),
-  (req, res) => {
+  async (req, res) => {
 
-    const invoice =
-      db.prepare(`
-        SELECT *
-        FROM invoices
-        WHERE id = ?
-      `).get(req.params.id);
+    try {
 
-    if (!invoice) {
+      const invoice =
+        await db.get(
+          `
+            SELECT *
+            FROM invoices
+            WHERE id = $1
+          `,
+          [req.params.id]
+        );
 
-      return res.status(404).json({
+      if (!invoice) {
+
+        return res.status(404).json({
+          error:
+            'Invoice not found'
+        });
+      }
+
+      await db.run(
+        `
+          UPDATE invoices
+          SET
+            status = 'rejected',
+            processed_by = $1,
+            processed_at = NOW(),
+            updated_at = NOW()
+          WHERE id = $2
+        `,
+        [
+          req.user.id,
+          req.params.id
+        ]
+      );
+
+      await log(
+        req.params.id,
+        'rejected',
+        req.user.id,
+        {
+          reason:
+            req.body?.reason || null
+        }
+      );
+
+      return res.json({
+
+        invoice:
+          await getInvoiceFull(
+            req.params.id
+          )
+      });
+
+    } catch (error) {
+
+      console.error(
+        '[invoices/reject]',
+        error
+      );
+
+      return res.status(500).json({
         error:
-          'Invoice not found'
+          'Unable to reject invoice'
       });
     }
-
-    db.prepare(`
-      UPDATE invoices
-      SET
-        status='rejected',
-        processed_by=?,
-        processed_at=datetime('now'),
-        updated_at=datetime('now')
-      WHERE id=?
-    `).run(
-      req.user.id,
-      req.params.id
-    );
-
-    log(
-      req.params.id,
-      'rejected',
-      req.user.id,
-      {
-        reason:
-          req.body?.reason || null
-      }
-    );
-
-    res.json({
-      invoice:
-        getInvoiceFull(
-          req.params.id
-        )
-    });
   }
 );
 
-// ===========================================================================
+// ============================================================================
 // RETRY
-// ===========================================================================
+// ============================================================================
 
 router.post(
   '/:id/retry',
@@ -1341,46 +1586,51 @@ router.post(
   upload.single('file'),
   async (req, res) => {
 
-    const invoice =
-      db.prepare(`
-        SELECT *
-        FROM invoices
-        WHERE id = ?
-      `).get(req.params.id);
-
-    if (!invoice) {
-
-      return res.status(404).json({
-        error:
-          'Invoice not found'
-      });
-    }
-
-    if (!req.file) {
-
-      return res.status(400).json({
-        error:
-          'No file uploaded'
-      });
-    }
-
-    // Make sure retrying user exists
-    const user =
-      db.prepare(`
-        SELECT id
-        FROM users
-        WHERE id = ?
-      `).get(req.user.id);
-
-    if (!user) {
-
-      return res.status(401).json({
-        error:
-          'Your login session is no longer valid. Please log out and log in again.'
-      });
-    }
-
     try {
+
+      const invoice =
+        await db.get(
+          `
+            SELECT *
+            FROM invoices
+            WHERE id = $1
+          `,
+          [req.params.id]
+        );
+
+      if (!invoice) {
+
+        return res.status(404).json({
+          error:
+            'Invoice not found'
+        });
+      }
+
+      if (!req.file) {
+
+        return res.status(400).json({
+          error:
+            'No file uploaded'
+        });
+      }
+
+      const user =
+        await db.get(
+          `
+            SELECT id
+            FROM users
+            WHERE id = $1
+          `,
+          [req.user.id]
+        );
+
+      if (!user) {
+
+        return res.status(401).json({
+          error:
+            'Your login session is no longer valid. Please log out and log in again.'
+        });
+      }
 
       console.log(
         `[retry] Starting AI extraction for invoice ${req.params.id}`
@@ -1397,15 +1647,18 @@ router.post(
       );
 
       const others =
-        db.prepare(`
-          SELECT
-            id,
-            invoice_number,
-            supplier_name,
-            total_amount
-          FROM invoices
-          WHERE id != ?
-        `).all(req.params.id);
+        await db.all(
+          `
+            SELECT
+              id,
+              invoice_number,
+              supplier_name,
+              total_amount
+            FROM invoices
+            WHERE id != $1
+          `,
+          [req.params.id]
+        );
 
       const validationResults =
         validateInvoice(
@@ -1423,96 +1676,109 @@ router.post(
         extraction.fields;
 
       const supplierId =
-        findOrCreateSupplier(
+        await findOrCreateSupplier(
           f.supplier_name,
           f.supplier_vat_number,
           f.supplier_address,
           f.supplier_contact
         );
 
-      db.prepare(`
-        UPDATE invoices SET
+      await db.run(
+        `
+          UPDATE invoices
+          SET
 
-          invoice_number=?,
-          supplier_id=?,
-          supplier_name=?,
-          supplier_vat_number=?,
-          supplier_address=?,
-          supplier_contact=?,
+            invoice_number = $1,
+            supplier_id = $2,
+            supplier_name = $3,
+            supplier_vat_number = $4,
+            supplier_address = $5,
+            supplier_contact = $6,
 
-          invoice_date=?,
-          due_date=?,
-          purchase_order_number=?,
+            invoice_date = $7,
+            due_date = $8,
+            purchase_order_number = $9,
 
-          subtotal=?,
-          vat_amount=?,
-          total_amount=?,
+            subtotal = $10,
+            vat_amount = $11,
+            total_amount = $12,
 
-          currency=?,
-          payment_terms=?,
+            currency = $13,
+            payment_terms = $14,
 
-          status=?,
-          overall_confidence=?,
-          field_confidence=?,
+            status = $15,
+            overall_confidence = $16,
+            field_confidence = $17,
 
-          updated_at=datetime('now')
+            updated_at = NOW()
 
-        WHERE id=?
-      `).run(
+          WHERE id = $18
+        `,
+        [
 
-        f.invoice_number,
+          f.invoice_number || null,
 
-        supplierId,
+          supplierId,
 
-        f.supplier_name,
+          f.supplier_name || null,
 
-        f.supplier_vat_number,
+          f.supplier_vat_number || null,
 
-        f.supplier_address,
+          f.supplier_address || null,
 
-        f.supplier_contact,
+          f.supplier_contact || null,
 
-        f.invoice_date,
+          f.invoice_date || null,
 
-        f.due_date,
+          f.due_date || null,
 
-        f.purchase_order_number,
+          f.purchase_order_number || null,
 
-        f.subtotal,
+          f.subtotal ?? null,
 
-        f.vat_amount,
+          f.vat_amount ?? null,
 
-        f.total_amount,
+          f.total_amount ?? null,
 
-        f.currency,
+          f.currency || null,
 
-        f.payment_terms,
+          f.payment_terms || null,
 
-        status,
+          status,
 
-        avgConfidence(
-          extraction.confidence
-        ),
+          avgConfidence(
+            extraction.confidence
+          ),
 
-        JSON.stringify(
-          extraction.confidence
-        ),
+          JSON.stringify(
+            extraction.confidence || {}
+          ),
 
-        req.params.id
+          req.params.id
+        ]
       );
 
+      // ----------------------------------------------------------------------
       // Replace line items
-      db.prepare(`
-        DELETE FROM invoice_line_items
-        WHERE invoice_id = ?
-      `).run(req.params.id);
+      // ----------------------------------------------------------------------
+
+      await db.run(
+        `
+          DELETE FROM invoice_line_items
+          WHERE invoice_id = $1
+        `,
+        [req.params.id]
+      );
 
       for (
-        const li of extraction.lineItems
+        const li of (
+          extraction.lineItems || []
+        )
       ) {
 
-        db.prepare(`
-          INSERT INTO invoice_line_items
+        await db.run(
+          `
+            INSERT INTO invoice_line_items
             (
               id,
               invoice_id,
@@ -1522,38 +1788,47 @@ router.post(
               vat,
               total
             )
-          VALUES
-            (?, ?, ?, ?, ?, ?, ?)
-        `).run(
+            VALUES
+            ($1, $2, $3, $4, $5, $6, $7)
+          `,
+          [
 
-          uuid(),
+            uuid(),
 
-          req.params.id,
+            req.params.id,
 
-          li.description,
+            li.description || null,
 
-          li.quantity,
+            li.quantity ?? null,
 
-          li.unit_price,
+            li.unit_price ?? null,
 
-          li.vat,
+            li.vat ?? null,
 
-          li.total
+            li.total ?? null
+          ]
         );
       }
 
+      // ----------------------------------------------------------------------
       // Replace validation
-      db.prepare(`
-        DELETE FROM invoice_validation_results
-        WHERE invoice_id = ?
-      `).run(req.params.id);
+      // ----------------------------------------------------------------------
+
+      await db.run(
+        `
+          DELETE FROM invoice_validation_results
+          WHERE invoice_id = $1
+        `,
+        [req.params.id]
+      );
 
       for (
         const vr of validationResults
       ) {
 
-        db.prepare(`
-          INSERT INTO invoice_validation_results
+        await db.run(
+          `
+            INSERT INTO invoice_validation_results
             (
               id,
               invoice_id,
@@ -1562,29 +1837,35 @@ router.post(
               severity,
               message
             )
-          VALUES
-            (?, ?, ?, ?, ?, ?)
-        `).run(
+            VALUES
+            ($1, $2, $3, $4, $5, $6)
+          `,
+          [
 
-          uuid(),
+            uuid(),
 
-          req.params.id,
+            req.params.id,
 
-          vr.rule_code,
+            vr.rule_code,
 
-          vr.passed
-            ? 1
-            : 0,
+            vr.passed
+              ? true
+              : false,
 
-          vr.severity,
+            vr.severity,
 
-          vr.message
+            vr.message
+          ]
         );
       }
 
+      // ----------------------------------------------------------------------
       // Save new document
-      db.prepare(`
-        INSERT INTO invoice_documents
+      // ----------------------------------------------------------------------
+
+      await db.run(
+        `
+          INSERT INTO invoice_documents
           (
             id,
             invoice_id,
@@ -1592,25 +1873,30 @@ router.post(
             original_filename,
             mime_type
           )
-        VALUES
-          (?, ?, ?, ?, ?)
-      `).run(
+          VALUES
+          ($1, $2, $3, $4, $5)
+        `,
+        [
 
-        uuid(),
+          uuid(),
 
-        req.params.id,
+          req.params.id,
 
-        path.relative(
-          path.join(__dirname, '..'),
-          req.file.path
-        ),
+          path.relative(
+            path.join(
+              __dirname,
+              '..'
+            ),
+            req.file.path
+          ),
 
-        req.file.originalname,
+          req.file.originalname,
 
-        req.file.mimetype
+          req.file.mimetype
+        ]
       );
 
-      log(
+      await log(
         req.params.id,
         'retried',
         req.user.id,
@@ -1620,9 +1906,10 @@ router.post(
         }
       );
 
-      res.json({
+      return res.json({
+
         invoice:
-          getInvoiceFull(
+          await getInvoiceFull(
             req.params.id
           )
       });
@@ -1634,7 +1921,7 @@ router.post(
         err
       );
 
-      res.status(500).json({
+      return res.status(500).json({
         error:
           `Retry failed: ${err.message}`
       });
@@ -1642,12 +1929,11 @@ router.post(
   }
 );
 
-// ===========================================================================
+// ============================================================================
 // EXPORTS
-// ===========================================================================
+// ============================================================================
 
 module.exports = {
   router,
   getInvoiceFull
 };
-
