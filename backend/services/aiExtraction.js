@@ -1,12 +1,15 @@
 // services/aiExtraction.js
 //
-// Provider-agnostic invoice extraction.
-// Supports Gemini, Claude, and Mock.
+// InvoiceFlow AI Invoice Extraction
 //
-// Gemini is the primary provider when GEMINI_API_KEY is configured.
-// Claude remains available as an optional fallback.
+// Primary provider: Gemini
+// Optional provider: Claude
+// Mock provider: ONLY when explicitly enabled.
 //
-// API keys are ONLY used on the backend.
+// IMPORTANT:
+// Gemini errors are NOT silently converted to mock data.
+// If Gemini fails, the actual error is returned so we can diagnose it.
+//
 
 const fs = require('fs');
 
@@ -14,26 +17,21 @@ const fs = require('fs');
 // PROVIDER CONFIGURATION
 // ---------------------------------------------------------------------------
 
-const PROVIDER = (process.env.AI_PROVIDER || '').toLowerCase();
+const PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
-// IMPORTANT:
-// The Gemini URL already contains /models/.
-// Therefore GEMINI_MODEL must be:
-// gemini-3.6-flash
-//
-// This also strips "models/" automatically if someone accidentally
-// puts it into the Render environment variable.
-const GEMINI_MODEL = (
-  process.env.GEMINI_MODEL || 'gemini-3.6-flash'
-).replace(/^models\//, '');
+const GEMINI_MODEL =
+  (process.env.GEMINI_MODEL || 'gemini-3.6-flash')
+    .replace(/^models\//, '')
+    .trim();
 
 const CLAUDE_API_KEY =
   process.env.ANTHROPIC_API_KEY || '';
 
 const CLAUDE_MODEL =
   process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
+
 
 // ---------------------------------------------------------------------------
 // REQUIRED FIELDS
@@ -54,6 +52,7 @@ const REQUIRED_FIELDS = [
   'supplier_address',
   'supplier_contact'
 ];
+
 
 // ---------------------------------------------------------------------------
 // EXTRACTION PROMPT
@@ -129,9 +128,10 @@ RULES:
 15. Return ONLY the JSON object.
 `;
 
-// ---------------------------------------------------------------------------
+
+// ===========================================================================
 // GEMINI
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 async function extractWithGemini(filePath, mimeType) {
 
@@ -141,8 +141,7 @@ async function extractWithGemini(filePath, mimeType) {
     );
   }
 
-  const fileBuffer =
-    fs.readFileSync(filePath);
+  const fileBuffer = fs.readFileSync(filePath);
 
   const base64 =
     fileBuffer.toString('base64');
@@ -153,6 +152,26 @@ async function extractWithGemini(filePath, mimeType) {
   console.log(
     `[aiExtraction] Gemini model: ${GEMINI_MODEL}`
   );
+
+  console.log(
+    `[aiExtraction] Gemini MIME type: ${effectiveMimeType}`
+  );
+
+  // IMPORTANT:
+  // The model must NOT contain "models/".
+  //
+  // We explicitly strip it above.
+  //
+  // Result:
+  //
+  // gemini-3.6-flash
+  //
+  // NOT:
+  //
+  // models/gemini-3.6-flash
+
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 
   const body = {
     contents: [
@@ -178,26 +197,8 @@ async function extractWithGemini(filePath, mimeType) {
     }
   };
 
-  // IMPORTANT:
-  // Do NOT add "models/" to GEMINI_MODEL here.
-  //
-  // The URL is:
-  // /v1beta/models/{MODEL}:generateContent
-  //
-  // Therefore:
-  // gemini-3.6-flash
-  //
-  // becomes:
-  // /v1beta/models/gemini-3.6-flash:generateContent
-
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/` +
-    `${encodeURIComponent(GEMINI_MODEL)}` +
-    `:generateContent?key=` +
-    `${encodeURIComponent(GEMINI_API_KEY)}`;
-
   console.log(
-    `[aiExtraction] Calling Gemini API with model ${GEMINI_MODEL}`
+    '[aiExtraction] Sending invoice to Gemini...'
   );
 
   const response = await fetch(
@@ -213,20 +214,29 @@ async function extractWithGemini(filePath, mimeType) {
     }
   );
 
+  const responseText =
+    await response.text();
+
   if (!response.ok) {
 
-    const errorText =
-      await response
-        .text()
-        .catch(() => '');
-
     throw new Error(
-      `Gemini API error ${response.status}: ${errorText}`
+      `Gemini API error ${response.status}: ${responseText}`
     );
   }
 
-  const data =
-    await response.json();
+  let data;
+
+  try {
+
+    data =
+      JSON.parse(responseText);
+
+  } catch (error) {
+
+    throw new Error(
+      `Gemini returned invalid API JSON: ${error.message}`
+    );
+  }
 
   const candidates =
     data.candidates || [];
@@ -243,7 +253,7 @@ async function extractWithGemini(filePath, mimeType) {
 
   const text =
     parts
-      .map(part => part.text || '')
+      .map(part => part?.text || '')
       .join('')
       .trim();
 
@@ -253,6 +263,10 @@ async function extractWithGemini(filePath, mimeType) {
       'Gemini API returned no extraction text'
     );
   }
+
+  console.log(
+    '[aiExtraction] Gemini returned extraction data'
+  );
 
   const cleaned =
     text
@@ -270,8 +284,13 @@ async function extractWithGemini(filePath, mimeType) {
 
   } catch (error) {
 
+    console.error(
+      '[aiExtraction] Gemini raw response:',
+      text
+    );
+
     throw new Error(
-      `Gemini returned invalid JSON: ${error.message}`
+      `Gemini returned invalid extraction JSON: ${error.message}`
     );
   }
 
@@ -281,9 +300,10 @@ async function extractWithGemini(filePath, mimeType) {
   );
 }
 
-// ---------------------------------------------------------------------------
+
+// ===========================================================================
 // CLAUDE
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 async function extractWithClaude(
   filePath,
@@ -357,25 +377,35 @@ async function extractWithClaude(
       }
     );
 
+  const responseText =
+    await response.text();
+
   if (!response.ok) {
 
-    const errorText =
-      await response
-        .text()
-        .catch(() => '');
-
     throw new Error(
-      `Claude API error ${response.status}: ${errorText}`
+      `Claude API error ${response.status}: ${responseText}`
     );
   }
 
-  const data =
-    await response.json();
+  let data;
+
+  try {
+
+    data =
+      JSON.parse(responseText);
+
+  } catch (error) {
+
+    throw new Error(
+      `Claude returned invalid API JSON: ${error.message}`
+    );
+  }
 
   const textBlock =
     (data.content || [])
       .find(
-        block => block.type === 'text'
+        block =>
+          block.type === 'text'
       );
 
   if (!textBlock) {
@@ -400,7 +430,7 @@ async function extractWithClaude(
   } catch (error) {
 
     throw new Error(
-      `Claude returned invalid JSON: ${error.message}`
+      `Claude returned invalid extraction JSON: ${error.message}`
     );
   }
 
@@ -410,26 +440,43 @@ async function extractWithClaude(
   );
 }
 
-// ---------------------------------------------------------------------------
+
+// ===========================================================================
 // MOCK
-// ---------------------------------------------------------------------------
+//
+// IMPORTANT:
+//
+// This is retained for development/testing ONLY.
+//
+// Gemini failures will NOT automatically fall back to mock.
+// ===========================================================================
 
 const SAMPLE_SUPPLIERS = [
 
   {
-    name: 'ABC Industrial Supplies',
-    vat: '4123456789',
+    name:
+      'ABC Industrial Supplies',
+
+    vat:
+      '4123456789',
+
     address:
       '12 Bergman Street, Wynberg, Johannesburg, 2090',
+
     contact:
       'accounts@abcindustrial.co.za'
   },
 
   {
-    name: 'XYZ Parts & Fasteners',
-    vat: '4987654321',
+    name:
+      'XYZ Parts & Fasteners',
+
+    vat:
+      '4987654321',
+
     address:
       '45 Voortrekker Rd, Bellville, Cape Town, 7530',
+
     contact:
       '021 555 0132'
   },
@@ -437,9 +484,13 @@ const SAMPLE_SUPPLIERS = [
   {
     name:
       'Highveld Electrical Wholesalers',
-    vat: '4650912837',
+
+    vat:
+      '4650912837',
+
     address:
       'Unit 7, Longmeadow Business Estate, Edenvale, 1609',
+
     contact:
       'sales@highveldelec.co.za'
   },
@@ -447,14 +498,19 @@ const SAMPLE_SUPPLIERS = [
   {
     name:
       'Coastal Packaging Solutions',
-    vat: '4712398456',
+
+    vat:
+      '4712398456',
+
     address:
       '8 Umgeni Rd, Durban, 4001',
+
     contact:
       'orders@coastalpack.co.za'
   }
 
 ];
+
 
 function pick(arr) {
 
@@ -466,11 +522,13 @@ function pick(arr) {
 
 }
 
+
 function round2(n) {
 
   return Math.round(n * 100) / 100;
 
 }
+
 
 function generateMockExtraction() {
 
@@ -534,9 +592,7 @@ function generateMockExtraction() {
 
       total:
         lineTotal
-
     });
-
   }
 
   subtotal =
@@ -567,14 +623,12 @@ function generateMockExtraction() {
   const dueDate =
     new Date(
       invoiceDate.getTime() +
-      30 *
-      86400000
+      30 * 86400000
     );
 
   const formatDate =
     date =>
-      date
-        .toISOString()
+      date.toISOString()
         .slice(0, 10);
 
   const messy =
@@ -583,12 +637,7 @@ function generateMockExtraction() {
   const fields = {
 
     invoice_number:
-      `INV-${
-        40000 +
-        Math.floor(
-          Math.random() * 9999
-        )
-      }`,
+      `INV-${40000 + Math.floor(Math.random() * 9999)}`,
 
     supplier_name:
       supplier.name,
@@ -604,12 +653,7 @@ function generateMockExtraction() {
 
     purchase_order_number:
       Math.random() < 0.7
-        ? `PO-${
-            1000 +
-            Math.floor(
-              Math.random() * 999
-            )
-          }`
+        ? `PO-${1000 + Math.floor(Math.random() * 999)}`
         : null,
 
     subtotal,
@@ -619,9 +663,7 @@ function generateMockExtraction() {
 
     total_amount:
       messy
-        ? round2(
-            total + 0.5
-          )
+        ? round2(total + 0.5)
         : total,
 
     currency:
@@ -642,7 +684,6 @@ function generateMockExtraction() {
 
     line_items:
       lineItems
-
   };
 
   const confidence = {};
@@ -662,9 +703,7 @@ function generateMockExtraction() {
           Math.random() * 0.2
         );
 
-    }
-
-    else if (
+    } else if (
       messy &&
       [
         'total_amount',
@@ -679,18 +718,14 @@ function generateMockExtraction() {
           Math.random() * 0.2
         );
 
-    }
-
-    else {
+    } else {
 
       confidence[field] =
         round2(
           0.9 +
           Math.random() * 0.09
         );
-
     }
-
   }
 
   if (
@@ -702,20 +737,16 @@ function generateMockExtraction() {
         0.2 +
         Math.random() * 0.2
       );
-
   }
 
   return {
     ...fields,
     confidence
   };
-
 }
 
-async function extractWithMock(
-  filePath,
-  mimeType
-) {
+
+async function extractWithMock() {
 
   await new Promise(
     resolve =>
@@ -728,14 +759,16 @@ async function extractWithMock(
 
   return normalizeExtraction(
     generateMockExtraction(),
-    { mock: true }
+    {
+      mock: true
+    }
   );
-
 }
 
-// ---------------------------------------------------------------------------
+
+// ===========================================================================
 // NORMALIZATION
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 function normalizeExtraction(
   parsed,
@@ -753,14 +786,12 @@ function normalizeExtraction(
       parsed[field] !== undefined
         ? parsed[field]
         : null;
-
   }
 
   const lineItems =
     Array.isArray(
       parsed?.line_items
     )
-
       ? parsed.line_items.map(
           item => ({
 
@@ -786,7 +817,6 @@ function normalizeExtraction(
 
           })
         )
-
       : [];
 
   const confidence = {};
@@ -800,7 +830,6 @@ function normalizeExtraction(
 
     confidence[field] =
       typeof value === 'number'
-
         ? Math.max(
             0,
             Math.min(
@@ -808,9 +837,7 @@ function normalizeExtraction(
               value
             )
           )
-
         : null;
-
   }
 
   return {
@@ -822,34 +849,32 @@ function normalizeExtraction(
     confidence,
 
     raw
-
   };
-
 }
 
-// ---------------------------------------------------------------------------
-// MAIN EXTRACTION FUNCTION
-// ---------------------------------------------------------------------------
+
+// ===========================================================================
+// MAIN EXTRACTION
+// ===========================================================================
 
 async function extractInvoice(
   filePath,
   mimeType
 ) {
 
-  // ---------------------------------------------------------
-  // MOCK MODE
-  // ---------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // MOCK
+  // -------------------------------------------------------------------------
 
   if (
     PROVIDER === 'mock'
   ) {
 
-    console.log(
-      '[aiExtraction] Explicit mock mode enabled'
+    console.warn(
+      '[aiExtraction] MOCK MODE ENABLED'
     );
 
     return {
-
       ...(await extractWithMock(
         filePath,
         mimeType
@@ -857,14 +882,13 @@ async function extractInvoice(
 
       provider:
         'mock'
-
     };
-
   }
 
-  // ---------------------------------------------------------
-  // GEMINI MODE
-  // ---------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // GEMINI
+  // -------------------------------------------------------------------------
 
   if (
     PROVIDER === 'gemini'
@@ -873,18 +897,17 @@ async function extractInvoice(
     if (!GEMINI_API_KEY) {
 
       throw new Error(
-        'AI_PROVIDER is set to gemini but GEMINI_API_KEY is missing'
+        'AI_PROVIDER=gemini but GEMINI_API_KEY is missing'
       );
-
     }
+
+    console.log(
+      `[aiExtraction] Using Gemini ${GEMINI_MODEL}`
+    );
 
     try {
 
-      console.log(
-        `[aiExtraction] Using Gemini ${GEMINI_MODEL}`
-      );
-
-      const result =
+      const extraction =
         await extractWithGemini(
           filePath,
           mimeType
@@ -896,92 +919,34 @@ async function extractInvoice(
 
       return {
 
-        ...result,
+        ...extraction,
 
         provider:
           'gemini'
-
       };
 
-    }
-
-    catch (error) {
+    } catch (error) {
 
       console.error(
         '[aiExtraction] Gemini extraction failed:',
         error.message
       );
 
-      // Claude fallback if configured.
-      if (
-        CLAUDE_API_KEY
-      ) {
-
-        try {
-
-          console.log(
-            `[aiExtraction] Falling back to Claude ${CLAUDE_MODEL}`
-          );
-
-          const result =
-            await extractWithClaude(
-              filePath,
-              mimeType
-            );
-
-          return {
-
-            ...result,
-
-            provider:
-              'claude-fallback',
-
-            error:
-              error.message
-
-          };
-
-        }
-
-        catch (claudeError) {
-
-          console.error(
-            '[aiExtraction] Claude fallback failed:',
-            claudeError.message
-          );
-
-        }
-
-      }
-
-      // IMPORTANT:
-      // We are keeping mock fallback because your current
-      // application expects an extraction result.
+      // DO NOT FALL BACK TO MOCK.
       //
-      // The returned provider will clearly say mock-fallback.
+      // This is deliberate.
+      //
+      // Previously this was hiding the actual Gemini problem
+      // by generating fake invoice data.
 
-      return {
-
-        ...(await extractWithMock(
-          filePath,
-          mimeType
-        )),
-
-        provider:
-          'mock-fallback',
-
-        error:
-          error.message
-
-      };
-
+      throw error;
     }
-
   }
 
-  // ---------------------------------------------------------
-  // CLAUDE MODE
-  // ---------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // CLAUDE
+  // -------------------------------------------------------------------------
 
   if (
     PROVIDER === 'claude'
@@ -990,106 +955,17 @@ async function extractInvoice(
     if (!CLAUDE_API_KEY) {
 
       throw new Error(
-        'AI_PROVIDER is set to claude but ANTHROPIC_API_KEY is missing'
+        'AI_PROVIDER=claude but ANTHROPIC_API_KEY is missing'
       );
-
     }
+
+    console.log(
+      `[aiExtraction] Using Claude ${CLAUDE_MODEL}`
+    );
 
     try {
 
-      return {
-
-        ...(await extractWithClaude(
-          filePath,
-          mimeType
-        )),
-
-        provider:
-          'claude'
-
-      };
-
-    }
-
-    catch (error) {
-
-      console.error(
-        '[aiExtraction] Claude extraction failed:',
-        error.message
-      );
-
-      return {
-
-        ...(await extractWithMock(
-          filePath,
-          mimeType
-        )),
-
-        provider:
-          'mock-fallback',
-
-        error:
-          error.message
-
-      };
-
-    }
-
-  }
-
-  // ---------------------------------------------------------
-  // AUTOMATIC PROVIDER SELECTION
-  // ---------------------------------------------------------
-
-  if (
-    GEMINI_API_KEY
-  ) {
-
-    try {
-
-      console.log(
-        `[aiExtraction] Automatically using Gemini ${GEMINI_MODEL}`
-      );
-
-      const result =
-        await extractWithGemini(
-          filePath,
-          mimeType
-        );
-
-      return {
-
-        ...result,
-
-        provider:
-          'gemini'
-
-      };
-
-    }
-
-    catch (error) {
-
-      console.error(
-        '[aiExtraction] Gemini failed:',
-        error.message
-      );
-
-    }
-
-  }
-
-  if (
-    CLAUDE_API_KEY
-  ) {
-
-    try {
-
-      console.log(
-        `[aiExtraction] Automatically using Claude ${CLAUDE_MODEL}`
-      );
-
-      const result =
+      const extraction =
         await extractWithClaude(
           filePath,
           mimeType
@@ -1097,51 +973,44 @@ async function extractInvoice(
 
       return {
 
-        ...result,
+        ...extraction,
 
         provider:
           'claude'
-
       };
 
-    }
-
-    catch (error) {
+    } catch (error) {
 
       console.error(
-        '[aiExtraction] Claude failed:',
+        '[aiExtraction] Claude extraction failed:',
         error.message
       );
 
+      throw error;
     }
-
   }
 
-  console.warn(
-    '[aiExtraction] No working AI provider found — using mock extraction'
+
+  // -------------------------------------------------------------------------
+  // UNKNOWN PROVIDER
+  // -------------------------------------------------------------------------
+
+  throw new Error(
+    `Unsupported AI_PROVIDER: "${PROVIDER}". Use "gemini", "claude", or "mock".`
   );
-
-  return {
-
-    ...(await extractWithMock(
-      filePath,
-      mimeType
-    )),
-
-    provider:
-      'mock'
-
-  };
-
 }
 
-// ---------------------------------------------------------------------------
+
+// ===========================================================================
 // EXPORTS
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 module.exports = {
+
   extractInvoice,
+
   REQUIRED_FIELDS
+
 };
 
 
