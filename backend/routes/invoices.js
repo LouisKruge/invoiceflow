@@ -230,6 +230,25 @@ function avgConfidence(
 }
 
 // ============================================================================
+// VALIDATION PASSED VALUE
+// ============================================================================
+// IMPORTANT:
+// PostgreSQL schema uses INTEGER for invoice_validation_results.passed.
+//
+// Therefore:
+//   true  -> 1
+//   false -> 0
+//
+// Never insert JavaScript booleans into this column.
+// ============================================================================
+
+function validationPassedValue(value) {
+
+  return value ? 1 : 0;
+
+}
+
+// ============================================================================
 // GET FULL INVOICE
 // ============================================================================
 
@@ -842,6 +861,9 @@ router.post(
 
       // ----------------------------------------------------------------------
       // VALIDATION RESULTS
+      // IMPORTANT:
+      // passed is INTEGER in PostgreSQL.
+      // Use 1 / 0 instead of true / false.
       // ----------------------------------------------------------------------
 
       for (
@@ -870,9 +892,9 @@ router.post(
 
             vr.rule_code,
 
-            vr.passed
-              ? true
-              : false,
+            validationPassedValue(
+              vr.passed
+            ),
 
             vr.severity,
 
@@ -938,6 +960,8 @@ router.post(
 
       // ----------------------------------------------------------------------
       // FALLBACK VALIDATION RECORD
+      // IMPORTANT:
+      // passed is INTEGER -> use 0.
       // ----------------------------------------------------------------------
 
       try {
@@ -964,7 +988,7 @@ router.post(
 
             'PROCESSING_ERROR',
 
-            false,
+            0,
 
             'error',
 
@@ -1513,6 +1537,8 @@ router.patch(
 
       // ----------------------------------------------------------------------
       // SAVE NEW VALIDATION
+      // IMPORTANT:
+      // passed is INTEGER -> use 1 / 0.
       // ----------------------------------------------------------------------
 
       for (
@@ -1541,9 +1567,9 @@ router.patch(
 
             vr.rule_code,
 
-            vr.passed
-              ? true
-              : false,
+            validationPassedValue(
+              vr.passed
+            ),
 
             vr.severity,
 
@@ -2077,6 +2103,8 @@ router.post(
 
       // ----------------------------------------------------------------------
       // REPLACE VALIDATION
+      // IMPORTANT:
+      // passed is INTEGER -> use 1 / 0.
       // ----------------------------------------------------------------------
 
       await db.run(
@@ -2113,9 +2141,9 @@ router.post(
 
             vr.rule_code,
 
-            vr.passed
-              ? true
-              : false,
+            validationPassedValue(
+              vr.passed
+            ),
 
             vr.severity,
 
