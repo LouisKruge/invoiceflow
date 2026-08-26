@@ -46,19 +46,24 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 }
 
 const storage = multer.diskStorage({
+
   destination: (req, file, cb) => {
     cb(null, UPLOAD_DIR);
   },
 
   filename: (req, file, cb) => {
+
     cb(
       null,
       `${uuid()}${path.extname(file.originalname) || '.jpg'}`
     );
+
   }
+
 });
 
 const upload = multer({
+
   storage,
 
   limits: {
@@ -85,7 +90,9 @@ const upload = multer({
           ),
       allowed
     );
+
   }
+
 });
 
 // ============================================================================
@@ -122,6 +129,7 @@ async function log(
         : null
     ]
   );
+
 }
 
 // ============================================================================
@@ -186,6 +194,7 @@ async function findOrCreateSupplier(
   );
 
   return id;
+
 }
 
 // ============================================================================
@@ -217,6 +226,7 @@ function avgConfidence(
       values.length
     ) * 100
   ) / 100;
+
 }
 
 // ============================================================================
@@ -241,16 +251,29 @@ async function getInvoiceFull(
     return null;
   }
 
+  // --------------------------------------------------------------------------
+  // LINE ITEMS
+  // IMPORTANT:
+  // Do NOT use created_at here.
+  // The current database schema does not contain created_at on this table.
+  // --------------------------------------------------------------------------
+
   const lineItems =
     await db.all(
       `
         SELECT *
         FROM invoice_line_items
         WHERE invoice_id = $1
-        ORDER BY created_at ASC
+        ORDER BY id ASC
       `,
       [id]
     );
+
+  // --------------------------------------------------------------------------
+  // VALIDATION RESULTS
+  // IMPORTANT:
+  // Do NOT use created_at here.
+  // --------------------------------------------------------------------------
 
   const validation =
     await db.all(
@@ -258,10 +281,15 @@ async function getInvoiceFull(
         SELECT *
         FROM invoice_validation_results
         WHERE invoice_id = $1
-        ORDER BY created_at ASC
+        ORDER BY id ASC
       `,
       [id]
     );
+
+  // --------------------------------------------------------------------------
+  // DOCUMENTS
+  // uploaded_at is used because this table has uploaded_at.
+  // --------------------------------------------------------------------------
 
   const documents =
     await db.all(
@@ -274,6 +302,12 @@ async function getInvoiceFull(
       [id]
     );
 
+  // --------------------------------------------------------------------------
+  // PROCESSING LOGS
+  // IMPORTANT:
+  // Do NOT use created_at here.
+  // --------------------------------------------------------------------------
+
   const logs =
     await db.all(
       `
@@ -284,10 +318,14 @@ async function getInvoiceFull(
         LEFT JOIN users u
           ON u.id = l.actor_id
         WHERE l.invoice_id = $1
-        ORDER BY l.created_at ASC
+        ORDER BY l.id ASC
       `,
       [id]
     );
+
+  // --------------------------------------------------------------------------
+  // PROCESSED BY
+  // --------------------------------------------------------------------------
 
   let processedBy = null;
 
@@ -302,7 +340,12 @@ async function getInvoiceFull(
         `,
         [invoice.processed_by]
       );
+
   }
+
+  // --------------------------------------------------------------------------
+  // CREATED BY
+  // --------------------------------------------------------------------------
 
   let createdBy = null;
 
@@ -317,7 +360,12 @@ async function getInvoiceFull(
         `,
         [invoice.created_by]
       );
+
   }
+
+  // --------------------------------------------------------------------------
+  // FIELD CONFIDENCE
+  // --------------------------------------------------------------------------
 
   let fieldConfidence = {};
 
@@ -333,8 +381,14 @@ async function getInvoiceFull(
     } catch (error) {
 
       fieldConfidence = {};
+
     }
+
   }
+
+  // --------------------------------------------------------------------------
+  // RETURN COMPLETE INVOICE
+  // --------------------------------------------------------------------------
 
   return {
 
@@ -376,13 +430,16 @@ async function getInvoiceFull(
 
               detail =
                 l.detail;
+
             }
+
           }
 
           return {
             ...l,
             detail
           };
+
         }
       ),
 
@@ -395,7 +452,9 @@ async function getInvoiceFull(
       createdBy
         ? createdBy.name
         : null
+
   };
+
 }
 
 // ============================================================================
@@ -408,16 +467,21 @@ router.post(
   upload.single('file'),
   async (req, res) => {
 
+    // ------------------------------------------------------------------------
+    // FILE CHECK
+    // ------------------------------------------------------------------------
+
     if (!req.file) {
 
       return res.status(400).json({
         error:
           'No file uploaded'
       });
+
     }
 
     // ------------------------------------------------------------------------
-    // Verify authenticated user exists
+    // VERIFY AUTHENTICATED USER
     // ------------------------------------------------------------------------
 
     const user =
@@ -444,6 +508,7 @@ router.post(
         error:
           'Your login session is no longer valid. Please log out and log in again.'
       });
+
     }
 
     console.log(
@@ -456,7 +521,7 @@ router.post(
       req.file.path;
 
     // ------------------------------------------------------------------------
-    // Create invoice
+    // CREATE INVOICE
     // ------------------------------------------------------------------------
 
     try {
@@ -522,10 +587,11 @@ router.post(
         error:
           `Failed to create invoice record: ${error.message}`
       });
+
     }
 
     // ------------------------------------------------------------------------
-    // Process invoice
+    // PROCESS INVOICE
     // ------------------------------------------------------------------------
 
     try {
@@ -565,6 +631,7 @@ router.post(
         console.warn(
           `[capture] AI provider warning: ${extraction.error}`
         );
+
       }
 
       await log(
@@ -581,7 +648,7 @@ router.post(
       );
 
       // ----------------------------------------------------------------------
-      // Existing invoices
+      // EXISTING INVOICES
       // ----------------------------------------------------------------------
 
       const existing =
@@ -599,7 +666,7 @@ router.post(
         );
 
       // ----------------------------------------------------------------------
-      // Validation
+      // VALIDATION
       // ----------------------------------------------------------------------
 
       const validationResults =
@@ -624,7 +691,7 @@ router.post(
       );
 
       // ----------------------------------------------------------------------
-      // Supplier
+      // SUPPLIER
       // ----------------------------------------------------------------------
 
       const supplierId =
@@ -636,7 +703,7 @@ router.post(
         );
 
       // ----------------------------------------------------------------------
-      // Save invoice
+      // SAVE INVOICE
       // ----------------------------------------------------------------------
 
       const f =
@@ -723,11 +790,12 @@ router.post(
           }),
 
           invoiceId
+
         ]
       );
 
       // ----------------------------------------------------------------------
-      // Line items
+      // LINE ITEMS
       // ----------------------------------------------------------------------
 
       for (
@@ -766,12 +834,14 @@ router.post(
             li.vat ?? null,
 
             li.total ?? null
+
           ]
         );
+
       }
 
       // ----------------------------------------------------------------------
-      // Validation results
+      // VALIDATION RESULTS
       // ----------------------------------------------------------------------
 
       for (
@@ -807,20 +877,30 @@ router.post(
             vr.severity,
 
             vr.message
+
           ]
         );
+
       }
+
+      // ----------------------------------------------------------------------
+      // SUCCESS
+      // ----------------------------------------------------------------------
 
       console.log(
         `[capture] Invoice ${invoiceId} successfully processed`
       );
 
+      const completeInvoice =
+        await getInvoiceFull(
+          invoiceId
+        );
+
       return res.json({
 
         invoice:
-          await getInvoiceFull(
-            invoiceId
-          )
+          completeInvoice
+
       });
 
     } catch (err) {
@@ -829,6 +909,10 @@ router.post(
         '[capture] Invoice processing failed:',
         err
       );
+
+      // ----------------------------------------------------------------------
+      // FALLBACK STATUS UPDATE
+      // ----------------------------------------------------------------------
 
       try {
 
@@ -842,6 +926,21 @@ router.post(
           `,
           [invoiceId]
         );
+
+      } catch (fallbackError) {
+
+        console.error(
+          '[capture/status-fallback]',
+          fallbackError
+        );
+
+      }
+
+      // ----------------------------------------------------------------------
+      // FALLBACK VALIDATION RECORD
+      // ----------------------------------------------------------------------
+
+      try {
 
         await db.run(
           `
@@ -870,8 +969,24 @@ router.post(
             'error',
 
             `We couldn't confidently read this invoice: ${err.message}`
+
           ]
         );
+
+      } catch (fallbackError) {
+
+        console.error(
+          '[capture/validation-fallback]',
+          fallbackError
+        );
+
+      }
+
+      // ----------------------------------------------------------------------
+      // FALLBACK LOG
+      // ----------------------------------------------------------------------
+
+      try {
 
         await log(
           invoiceId,
@@ -886,22 +1001,51 @@ router.post(
       } catch (fallbackError) {
 
         console.error(
-          '[capture/fallback]',
+          '[capture/log-fallback]',
           fallbackError
         );
+
       }
 
-      return res.status(200).json({
+      // ----------------------------------------------------------------------
+      // TRY TO RETURN THE INVOICE
+      // ----------------------------------------------------------------------
 
-        invoice:
+      try {
+
+        const failedInvoice =
           await getInvoiceFull(
             invoiceId
-          ),
+          );
 
-        warning:
-          "We couldn't confidently read this invoice. Please review and enter the details manually, or retake the photo."
-      });
+        return res.status(200).json({
+
+          invoice:
+            failedInvoice,
+
+          warning:
+            "We couldn't confidently read this invoice. Please review and enter the details manually, or retake the photo."
+
+        });
+
+      } catch (finalError) {
+
+        console.error(
+          '[capture/final-response]',
+          finalError
+        );
+
+        return res.status(500).json({
+
+          error:
+            `Invoice processing failed: ${err.message}`
+
+        });
+
+      }
+
     }
+
   }
 );
 
@@ -932,6 +1076,10 @@ router.get(
 
       const params = [];
 
+      // ----------------------------------------------------------------------
+      // STATUS
+      // ----------------------------------------------------------------------
+
       if (
         status &&
         status !== 'all'
@@ -941,7 +1089,12 @@ router.get(
 
         sql +=
           ` AND status = $${params.length}`;
+
       }
+
+      // ----------------------------------------------------------------------
+      // DATE FROM
+      // ----------------------------------------------------------------------
 
       if (dateFrom) {
 
@@ -949,7 +1102,12 @@ router.get(
 
         sql +=
           ` AND DATE(invoice_date) >= DATE($${params.length})`;
+
       }
+
+      // ----------------------------------------------------------------------
+      // DATE TO
+      // ----------------------------------------------------------------------
 
       if (dateTo) {
 
@@ -957,7 +1115,12 @@ router.get(
 
         sql +=
           ` AND DATE(invoice_date) <= DATE($${params.length})`;
+
       }
+
+      // ----------------------------------------------------------------------
+      // SEARCH
+      // ----------------------------------------------------------------------
 
       if (q) {
 
@@ -978,11 +1141,19 @@ router.get(
             OR CAST(total_amount AS TEXT) ILIKE ${p}
           )
         `;
+
       }
+
+      // ----------------------------------------------------------------------
+      // IMPORTANT:
+      // created_at DOES NOT EXIST.
+      //
+      // updated_at is used instead.
+      // ----------------------------------------------------------------------
 
       sql +=
         `
-          ORDER BY created_at DESC
+          ORDER BY updated_at DESC NULLS LAST
           LIMIT 500
         `;
 
@@ -1005,9 +1176,11 @@ router.get(
 
       return res.status(500).json({
         error:
-          'Unable to load invoices'
+          `Unable to load invoices: ${error.message}`
       });
+
     }
+
   }
 );
 
@@ -1033,6 +1206,7 @@ router.get(
           error:
             'Invoice not found'
         });
+
       }
 
       return res.json({
@@ -1048,9 +1222,11 @@ router.get(
 
       return res.status(500).json({
         error:
-          'Unable to load invoice'
+          `Unable to load invoice: ${error.message}`
       });
+
     }
+
   }
 );
 
@@ -1083,6 +1259,7 @@ router.get(
           error:
             'Document not found'
         });
+
       }
 
       const absolutePath =
@@ -1098,6 +1275,7 @@ router.get(
           error:
             'Invoice document file could not be found on the server'
         });
+
       }
 
       return res.sendFile(
@@ -1113,9 +1291,11 @@ router.get(
 
       return res.status(500).json({
         error:
-          'Unable to load invoice document'
+          `Unable to load invoice document: ${error.message}`
       });
+
     }
+
   }
 );
 
@@ -1150,6 +1330,7 @@ const EDITABLE_FIELDS = [
   'supplier_address',
 
   'supplier_contact'
+
 ];
 
 // ============================================================================
@@ -1179,10 +1360,15 @@ router.patch(
           error:
             'Invoice not found'
         });
+
       }
 
       const updates = {};
       const changes = [];
+
+      // ----------------------------------------------------------------------
+      // COLLECT EDITS
+      // ----------------------------------------------------------------------
 
       for (
         const field of EDITABLE_FIELDS
@@ -1212,12 +1398,16 @@ router.patch(
 
               new:
                 newVal
+
             });
+
           }
 
           updates[field] =
             newVal;
+
         }
+
       }
 
       if (
@@ -1228,6 +1418,7 @@ router.patch(
           error:
             'No editable fields provided'
         });
+
       }
 
       const fields =
@@ -1257,6 +1448,10 @@ router.patch(
         values
       );
 
+      // ----------------------------------------------------------------------
+      // LOG FIELD CHANGES
+      // ----------------------------------------------------------------------
+
       if (changes.length) {
 
         await log(
@@ -1267,10 +1462,11 @@ router.patch(
             changes
           }
         );
+
       }
 
       // ----------------------------------------------------------------------
-      // Re-run validation
+      // RE-RUN VALIDATION
       // ----------------------------------------------------------------------
 
       const refreshed =
@@ -1303,6 +1499,10 @@ router.patch(
           others
         );
 
+      // ----------------------------------------------------------------------
+      // DELETE OLD VALIDATION
+      // ----------------------------------------------------------------------
+
       await db.run(
         `
           DELETE FROM invoice_validation_results
@@ -1310,6 +1510,10 @@ router.patch(
         `,
         [req.params.id]
       );
+
+      // ----------------------------------------------------------------------
+      // SAVE NEW VALIDATION
+      // ----------------------------------------------------------------------
 
       for (
         const vr of validationResults
@@ -1344,9 +1548,15 @@ router.patch(
             vr.severity,
 
             vr.message
+
           ]
         );
+
       }
+
+      // ----------------------------------------------------------------------
+      // CONFIDENCE
+      // ----------------------------------------------------------------------
 
       let confidence = {};
 
@@ -1362,8 +1572,14 @@ router.patch(
         } catch (error) {
 
           confidence = {};
+
         }
+
       }
+
+      // ----------------------------------------------------------------------
+      // STATUS
+      // ----------------------------------------------------------------------
 
       const newStatus =
         [
@@ -1398,6 +1614,7 @@ router.patch(
           await getInvoiceFull(
             req.params.id
           )
+
       });
 
     } catch (error) {
@@ -1411,7 +1628,9 @@ router.patch(
         error:
           `Unable to update invoice: ${error.message}`
       });
+
     }
+
   }
 );
 
@@ -1446,6 +1665,7 @@ router.post(
           error:
             'Invoice not found'
         });
+
       }
 
       await db.run(
@@ -1477,6 +1697,7 @@ router.post(
           await getInvoiceFull(
             req.params.id
           )
+
       });
 
     } catch (error) {
@@ -1488,9 +1709,11 @@ router.post(
 
       return res.status(500).json({
         error:
-          'Unable to approve invoice'
+          `Unable to approve invoice: ${error.message}`
       });
+
     }
+
   }
 );
 
@@ -1525,6 +1748,7 @@ router.post(
           error:
             'Invoice not found'
         });
+
       }
 
       await db.run(
@@ -1559,6 +1783,7 @@ router.post(
           await getInvoiceFull(
             req.params.id
           )
+
       });
 
     } catch (error) {
@@ -1570,9 +1795,11 @@ router.post(
 
       return res.status(500).json({
         error:
-          'Unable to reject invoice'
+          `Unable to reject invoice: ${error.message}`
       });
+
     }
+
   }
 );
 
@@ -1587,6 +1814,10 @@ router.post(
   async (req, res) => {
 
     try {
+
+      // ----------------------------------------------------------------------
+      // FIND INVOICE
+      // ----------------------------------------------------------------------
 
       const invoice =
         await db.get(
@@ -1604,7 +1835,12 @@ router.post(
           error:
             'Invoice not found'
         });
+
       }
+
+      // ----------------------------------------------------------------------
+      // FILE CHECK
+      // ----------------------------------------------------------------------
 
       if (!req.file) {
 
@@ -1612,7 +1848,12 @@ router.post(
           error:
             'No file uploaded'
         });
+
       }
+
+      // ----------------------------------------------------------------------
+      // VERIFY USER
+      // ----------------------------------------------------------------------
 
       const user =
         await db.get(
@@ -1630,7 +1871,12 @@ router.post(
           error:
             'Your login session is no longer valid. Please log out and log in again.'
         });
+
       }
+
+      // ----------------------------------------------------------------------
+      // AI EXTRACTION
+      // ----------------------------------------------------------------------
 
       console.log(
         `[retry] Starting AI extraction for invoice ${req.params.id}`
@@ -1646,6 +1892,10 @@ router.post(
         `[retry] AI extraction completed using provider: ${extraction.provider}`
       );
 
+      // ----------------------------------------------------------------------
+      // EXISTING INVOICES
+      // ----------------------------------------------------------------------
+
       const others =
         await db.all(
           `
@@ -1659,6 +1909,10 @@ router.post(
           `,
           [req.params.id]
         );
+
+      // ----------------------------------------------------------------------
+      // VALIDATION
+      // ----------------------------------------------------------------------
 
       const validationResults =
         validateInvoice(
@@ -1675,6 +1929,10 @@ router.post(
       const f =
         extraction.fields;
 
+      // ----------------------------------------------------------------------
+      // SUPPLIER
+      // ----------------------------------------------------------------------
+
       const supplierId =
         await findOrCreateSupplier(
           f.supplier_name,
@@ -1682,6 +1940,10 @@ router.post(
           f.supplier_address,
           f.supplier_contact
         );
+
+      // ----------------------------------------------------------------------
+      // UPDATE INVOICE
+      // ----------------------------------------------------------------------
 
       await db.run(
         `
@@ -1755,11 +2017,12 @@ router.post(
           ),
 
           req.params.id
+
         ]
       );
 
       // ----------------------------------------------------------------------
-      // Replace line items
+      // REPLACE LINE ITEMS
       // ----------------------------------------------------------------------
 
       await db.run(
@@ -1806,12 +2069,14 @@ router.post(
             li.vat ?? null,
 
             li.total ?? null
+
           ]
         );
+
       }
 
       // ----------------------------------------------------------------------
-      // Replace validation
+      // REPLACE VALIDATION
       // ----------------------------------------------------------------------
 
       await db.run(
@@ -1855,12 +2120,14 @@ router.post(
             vr.severity,
 
             vr.message
+
           ]
         );
+
       }
 
       // ----------------------------------------------------------------------
-      // Save new document
+      // SAVE NEW DOCUMENT
       // ----------------------------------------------------------------------
 
       await db.run(
@@ -1893,8 +2160,13 @@ router.post(
           req.file.originalname,
 
           req.file.mimetype
+
         ]
       );
+
+      // ----------------------------------------------------------------------
+      // LOG RETRY
+      // ----------------------------------------------------------------------
 
       await log(
         req.params.id,
@@ -1906,12 +2178,17 @@ router.post(
         }
       );
 
+      // ----------------------------------------------------------------------
+      // RETURN
+      // ----------------------------------------------------------------------
+
       return res.json({
 
         invoice:
           await getInvoiceFull(
             req.params.id
           )
+
       });
 
     } catch (err) {
@@ -1925,7 +2202,9 @@ router.post(
         error:
           `Retry failed: ${err.message}`
       });
+
     }
+
   }
 );
 
