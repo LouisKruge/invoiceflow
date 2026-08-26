@@ -99,7 +99,23 @@
       response.status === 401 ||
       response.status === 403
     ) {
-      invalidateSession();
+      /*
+       * IMPORTANT:
+       *
+       * Do not automatically destroy a saved session for failed
+       * login/register requests.
+       *
+       * A 401 during login simply means the supplied credentials
+       * are invalid. Clearing an existing token here can create
+       * confusing behaviour.
+       */
+
+      if (
+        !path.startsWith('/auth/login') &&
+        !path.startsWith('/auth/register')
+      ) {
+        invalidateSession();
+      }
 
       let message =
         'Your session has expired. Please sign in again.';
@@ -120,7 +136,8 @@
         response.status;
 
       error.sessionExpired =
-        true;
+        !path.startsWith('/auth/login') &&
+        !path.startsWith('/auth/register');
 
       throw error;
     }
@@ -170,7 +187,7 @@
   }
 
   // ===========================================================================
-  // AUTH
+  // AUTH — LOGIN
   // ===========================================================================
 
   async function login(email, password) {
@@ -192,10 +209,69 @@
       );
     }
 
+    /*
+     * Save token immediately.
+     *
+     * This means:
+     * - refreshing the page keeps the user logged in
+     * - closing/reopening the browser keeps the session
+     * - API.me() can restore the user on application startup
+     */
+
     setToken(data.token);
 
     return data;
   }
+
+  // ===========================================================================
+  // AUTH — REGISTER
+  // ===========================================================================
+
+  async function register(
+    name,
+    email,
+    password
+  ) {
+    const data =
+      await request(
+        '/auth/register',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            name,
+            email,
+            password
+          })
+        }
+      );
+
+    /*
+     * The preferred backend behaviour is to return a token
+     * immediately after creating the account.
+     *
+     * That gives us:
+     *
+     * Sign Up
+     *   ↓
+     * Account created
+     *   ↓
+     * JWT returned
+     *   ↓
+     * User automatically logged in
+     *   ↓
+     * Dashboard
+     */
+
+    if (data?.token) {
+      setToken(data.token);
+    }
+
+    return data;
+  }
+
+  // ===========================================================================
+  // AUTH — CURRENT USER
+  // ===========================================================================
 
   async function me() {
     return request('/auth/me');
@@ -677,6 +753,7 @@
   const API = {
     // Auth
     login,
+    register,
     me,
 
     // Health
@@ -720,11 +797,11 @@
   };
 
   // ===========================================================================
-  // IMPORTANT:
-  // Expose API globally so app.js can access window.API.
+  // GLOBAL API
   // ===========================================================================
 
-  window.API = API;
+  window.API =
+    API;
 
   console.log(
     '[InvoiceFlow] API module loaded successfully.'
