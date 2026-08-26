@@ -1,36 +1,30 @@
 // services/aiExtraction.js
 //
-// InvoiceFlow AI Invoice Extraction
+// InvoiceFlow — Production AI Invoice Extraction
 //
-// Primary provider: Gemini
-// Optional provider: Claude
-// Mock provider: ONLY when explicitly enabled.
+// PROVIDER: Google Gemini ONLY
 //
 // IMPORTANT:
-// Gemini errors are NOT silently converted to mock data.
-// If Gemini fails, the actual error is returned so we can diagnose it.
+// - No mock extraction.
+// - No fake invoice data.
+// - No Claude fallback.
+// - Gemini failures are thrown to the caller.
+// - Never silently invent invoice information.
 //
 
 const fs = require('fs');
 
 // ---------------------------------------------------------------------------
-// PROVIDER CONFIGURATION
+// GEMINI CONFIGURATION
 // ---------------------------------------------------------------------------
 
-const PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_API_KEY =
+  process.env.GEMINI_API_KEY || '';
 
 const GEMINI_MODEL =
   (process.env.GEMINI_MODEL || 'gemini-3.6-flash')
     .replace(/^models\//, '')
     .trim();
-
-const CLAUDE_API_KEY =
-  process.env.ANTHROPIC_API_KEY || '';
-
-const CLAUDE_MODEL =
-  process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
 
 
 // ---------------------------------------------------------------------------
@@ -63,7 +57,7 @@ You are an invoice data extraction engine for a South African accounts-payable s
 
 You will be given an image or PDF of an invoice.
 
-Extract the invoice information accurately.
+Extract the invoice information accurately from the document.
 
 Return ONLY valid JSON.
 
@@ -111,26 +105,29 @@ The JSON must have this exact structure:
 
 RULES:
 
-1. Never invent or guess information.
-2. If a field is not visible or cannot be read confidently, return null.
-3. Confidence values must be between 0.0 and 1.0.
-4. Confidence represents how clearly and reliably the value was read.
-5. Dates must use YYYY-MM-DD where possible.
-6. Numbers must be plain numbers without currency symbols or thousands separators.
-7. Do not assume a VAT rate.
-8. Only report VAT if printed or unambiguously derivable.
-9. Currency should use ISO 4217 codes such as ZAR, USD, GBP or EUR.
-10. For a South African invoice with clear R/ZAR indicators, use ZAR.
-11. Extract every visible invoice line item.
-12. Do not create line items that are not present.
-13. Preserve supplier names and invoice numbers as printed where possible.
-14. Extract purchase/order numbers into purchase_order_number.
-15. Return ONLY the JSON object.
+1. Never invent information.
+2. Never guess missing information.
+3. If a field is not visible or cannot be read reliably, return null.
+4. Confidence values must be between 0.0 and 1.0.
+5. Confidence represents how clearly and reliably the value was read from the document.
+6. Dates must use YYYY-MM-DD where possible.
+7. Numbers must be plain numbers without currency symbols or thousands separators.
+8. Do not assume a VAT rate.
+9. Only report VAT if it is printed or unambiguously derivable from the invoice.
+10. Currency must use ISO 4217 codes such as ZAR, USD, GBP or EUR.
+11. For South African invoices with clear R/ZAR indicators, use ZAR.
+12. Extract every visible invoice line item.
+13. Do not create line items that are not present.
+14. Preserve supplier names and invoice numbers as printed where possible.
+15. Extract purchase/order numbers into purchase_order_number.
+16. Do not substitute information from another invoice or external knowledge.
+17. If information is unclear, use null rather than guessing.
+18. Return ONLY the JSON object.
 `;
 
 
 // ===========================================================================
-// GEMINI
+// GEMINI EXTRACTION
 // ===========================================================================
 
 async function extractWithGemini(filePath, mimeType) {
@@ -141,7 +138,26 @@ async function extractWithGemini(filePath, mimeType) {
     );
   }
 
-  const fileBuffer = fs.readFileSync(filePath);
+  if (!filePath) {
+    throw new Error(
+      'Invoice file path is missing'
+    );
+  }
+
+  if (!fs.existsSync(filePath)) {
+    throw new Error(
+      `Invoice file does not exist: ${filePath}`
+    );
+  }
+
+  const fileBuffer =
+    fs.readFileSync(filePath);
+
+  if (!fileBuffer || fileBuffer.length === 0) {
+    throw new Error(
+      'Invoice file is empty'
+    );
+  }
 
   const base64 =
     fileBuffer.toString('base64');
@@ -157,17 +173,12 @@ async function extractWithGemini(filePath, mimeType) {
     `[aiExtraction] Gemini MIME type: ${effectiveMimeType}`
   );
 
-  // IMPORTANT:
-  // The model must NOT contain "models/".
+  // Gemini expects the model name without "models/".
   //
-  // We explicitly strip it above.
-  //
-  // Result:
-  //
+  // Correct:
   // gemini-3.6-flash
   //
-  // NOT:
-  //
+  // Incorrect:
   // models/gemini-3.6-flash
 
   const url =
@@ -177,16 +188,20 @@ async function extractWithGemini(filePath, mimeType) {
     contents: [
       {
         role: 'user',
+
         parts: [
+
           {
             inline_data: {
               mime_type: effectiveMimeType,
               data: base64
             }
           },
+
           {
             text: EXTRACTION_SYSTEM_PROMPT
           }
+
         ]
       }
     ],
@@ -201,18 +216,29 @@ async function extractWithGemini(filePath, mimeType) {
     '[aiExtraction] Sending invoice to Gemini...'
   );
 
-  const response = await fetch(
-    url,
-    {
-      method: 'POST',
+  let response;
 
-      headers: {
-        'Content-Type': 'application/json'
-      },
+  try {
 
-      body: JSON.stringify(body)
-    }
-  );
+    response = await fetch(
+      url,
+      {
+        method: 'POST',
+
+        headers: {
+          'Content-Type': 'application/json'
+        },
+
+        body: JSON.stringify(body)
+      }
+    );
+
+  } catch (error) {
+
+    throw new Error(
+      `Unable to connect to Gemini API: ${error.message}`
+    );
+  }
 
   const responseText =
     await response.text();
@@ -234,22 +260,47 @@ async function extractWithGemini(filePath, mimeType) {
   } catch (error) {
 
     throw new Error(
-      `Gemini returned invalid API JSON: ${error.message}`
+      `Gemini returned invalid API response JSON: ${error.message}`
     );
   }
 
   const candidates =
-    data.candidates || [];
+    Array.isArray(data.candidates)
+      ? data.candidates
+      : [];
 
   if (!candidates.length) {
+
+    const blockReason =
+      data?.promptFeedback?.blockReason;
+
+    if (blockReason) {
+
+      throw new Error(
+        `Gemini blocked the invoice request: ${blockReason}`
+      );
+    }
 
     throw new Error(
       'Gemini API returned no candidates'
     );
   }
 
+  const candidate =
+    candidates[0];
+
+  if (
+    candidate?.finishReason &&
+    candidate.finishReason !== 'STOP'
+  ) {
+
+    console.warn(
+      `[aiExtraction] Gemini finish reason: ${candidate.finishReason}`
+    );
+  }
+
   const parts =
-    candidates[0]?.content?.parts || [];
+    candidate?.content?.parts || [];
 
   const text =
     parts
@@ -268,6 +319,10 @@ async function extractWithGemini(filePath, mimeType) {
     '[aiExtraction] Gemini returned extraction data'
   );
 
+  // Gemini should return JSON directly because responseMimeType
+  // is application/json. This cleanup simply protects against
+  // accidental markdown fences.
+
   const cleaned =
     text
       .replace(/^```json\s*/i, '')
@@ -285,7 +340,7 @@ async function extractWithGemini(filePath, mimeType) {
   } catch (error) {
 
     console.error(
-      '[aiExtraction] Gemini raw response:',
+      '[aiExtraction] Gemini raw extraction response:',
       text
     );
 
@@ -296,471 +351,9 @@ async function extractWithGemini(filePath, mimeType) {
 
   return normalizeExtraction(
     parsed,
-    data
-  );
-}
-
-
-// ===========================================================================
-// CLAUDE
-// ===========================================================================
-
-async function extractWithClaude(
-  filePath,
-  mimeType
-) {
-
-  if (!CLAUDE_API_KEY) {
-
-    throw new Error(
-      'ANTHROPIC_API_KEY is not configured'
-    );
-  }
-
-  const imageBuffer =
-    fs.readFileSync(filePath);
-
-  const base64 =
-    imageBuffer.toString('base64');
-
-  const body = {
-
-    model: CLAUDE_MODEL,
-
-    max_tokens: 3000,
-
-    system:
-      EXTRACTION_SYSTEM_PROMPT,
-
-    messages: [
-      {
-        role: 'user',
-
-        content: [
-
-          {
-            type: 'image',
-
-            source: {
-              type: 'base64',
-              media_type: mimeType,
-              data: base64
-            }
-          },
-
-          {
-            type: 'text',
-
-            text:
-              'Extract this invoice as the specified JSON object. Return only JSON.'
-          }
-
-        ]
-      }
-    ]
-  };
-
-  const response =
-    await fetch(
-      'https://api.anthropic.com/v1/messages',
-      {
-        method: 'POST',
-
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': CLAUDE_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-
-        body:
-          JSON.stringify(body)
-      }
-    );
-
-  const responseText =
-    await response.text();
-
-  if (!response.ok) {
-
-    throw new Error(
-      `Claude API error ${response.status}: ${responseText}`
-    );
-  }
-
-  let data;
-
-  try {
-
-    data =
-      JSON.parse(responseText);
-
-  } catch (error) {
-
-    throw new Error(
-      `Claude returned invalid API JSON: ${error.message}`
-    );
-  }
-
-  const textBlock =
-    (data.content || [])
-      .find(
-        block =>
-          block.type === 'text'
-      );
-
-  if (!textBlock) {
-
-    throw new Error(
-      'Claude API returned no text block'
-    );
-  }
-
-  const cleaned =
-    textBlock.text
-      .replace(/```json|```/g, '')
-      .trim();
-
-  let parsed;
-
-  try {
-
-    parsed =
-      JSON.parse(cleaned);
-
-  } catch (error) {
-
-    throw new Error(
-      `Claude returned invalid extraction JSON: ${error.message}`
-    );
-  }
-
-  return normalizeExtraction(
-    parsed,
-    data
-  );
-}
-
-
-// ===========================================================================
-// MOCK
-//
-// IMPORTANT:
-//
-// This is retained for development/testing ONLY.
-//
-// Gemini failures will NOT automatically fall back to mock.
-// ===========================================================================
-
-const SAMPLE_SUPPLIERS = [
-
-  {
-    name:
-      'ABC Industrial Supplies',
-
-    vat:
-      '4123456789',
-
-    address:
-      '12 Bergman Street, Wynberg, Johannesburg, 2090',
-
-    contact:
-      'accounts@abcindustrial.co.za'
-  },
-
-  {
-    name:
-      'XYZ Parts & Fasteners',
-
-    vat:
-      '4987654321',
-
-    address:
-      '45 Voortrekker Rd, Bellville, Cape Town, 7530',
-
-    contact:
-      '021 555 0132'
-  },
-
-  {
-    name:
-      'Highveld Electrical Wholesalers',
-
-    vat:
-      '4650912837',
-
-    address:
-      'Unit 7, Longmeadow Business Estate, Edenvale, 1609',
-
-    contact:
-      'sales@highveldelec.co.za'
-  },
-
-  {
-    name:
-      'Coastal Packaging Solutions',
-
-    vat:
-      '4712398456',
-
-    address:
-      '8 Umgeni Rd, Durban, 4001',
-
-    contact:
-      'orders@coastalpack.co.za'
-  }
-
-];
-
-
-function pick(arr) {
-
-  return arr[
-    Math.floor(
-      Math.random() * arr.length
-    )
-  ];
-
-}
-
-
-function round2(n) {
-
-  return Math.round(n * 100) / 100;
-
-}
-
-
-function generateMockExtraction() {
-
-  const supplier =
-    pick(SAMPLE_SUPPLIERS);
-
-  const lineCount =
-    1 +
-    Math.floor(
-      Math.random() * 3
-    );
-
-  const lineItems = [];
-
-  let subtotal = 0;
-
-  for (
-    let i = 0;
-    i < lineCount;
-    i++
-  ) {
-
-    const quantity =
-      1 +
-      Math.floor(
-        Math.random() * 10
-      );
-
-    const unitPrice =
-      round2(
-        50 +
-        Math.random() * 950
-      );
-
-    const lineTotal =
-      round2(
-        quantity * unitPrice
-      );
-
-    subtotal += lineTotal;
-
-    lineItems.push({
-
-      description:
-        pick([
-          'Steel brackets 50mm',
-          'Cable ties (pack of 100)',
-          'Safety gloves (pair)',
-          'M8 bolts (box of 200)',
-          'Cardboard cartons (bundle)',
-          'LED floodlight 50W'
-        ]),
-
-      quantity,
-
-      unit_price:
-        unitPrice,
-
-      vat:
-        null,
-
-      total:
-        lineTotal
-    });
-  }
-
-  subtotal =
-    round2(subtotal);
-
-  const vatAmount =
-    round2(
-      subtotal * 0.15
-    );
-
-  const total =
-    round2(
-      subtotal + vatAmount
-    );
-
-  const today =
-    new Date();
-
-  const invoiceDate =
-    new Date(
-      today.getTime() -
-      Math.floor(
-        Math.random() * 5
-      ) *
-      86400000
-    );
-
-  const dueDate =
-    new Date(
-      invoiceDate.getTime() +
-      30 * 86400000
-    );
-
-  const formatDate =
-    date =>
-      date.toISOString()
-        .slice(0, 10);
-
-  const messy =
-    Math.random() < 0.3;
-
-  const fields = {
-
-    invoice_number:
-      `INV-${40000 + Math.floor(Math.random() * 9999)}`,
-
-    supplier_name:
-      supplier.name,
-
-    supplier_vat_number:
-      supplier.vat,
-
-    invoice_date:
-      formatDate(invoiceDate),
-
-    due_date:
-      formatDate(dueDate),
-
-    purchase_order_number:
-      Math.random() < 0.7
-        ? `PO-${1000 + Math.floor(Math.random() * 999)}`
-        : null,
-
-    subtotal,
-
-    vat_amount:
-      vatAmount,
-
-    total_amount:
-      messy
-        ? round2(total + 0.5)
-        : total,
-
-    currency:
-      'ZAR',
-
-    payment_terms:
-      pick([
-        '30 days from invoice date',
-        '7 days strictly nett',
-        '60 days from statement'
-      ]),
-
-    supplier_address:
-      supplier.address,
-
-    supplier_contact:
-      supplier.contact,
-
-    line_items:
-      lineItems
-  };
-
-  const confidence = {};
-
-  for (
-    const field of REQUIRED_FIELDS
-  ) {
-
-    if (
-      fields[field] === null ||
-      fields[field] === undefined
-    ) {
-
-      confidence[field] =
-        round2(
-          0.3 +
-          Math.random() * 0.2
-        );
-
-    } else if (
-      messy &&
-      [
-        'total_amount',
-        'vat_amount',
-        'purchase_order_number'
-      ].includes(field)
-    ) {
-
-      confidence[field] =
-        round2(
-          0.55 +
-          Math.random() * 0.2
-        );
-
-    } else {
-
-      confidence[field] =
-        round2(
-          0.9 +
-          Math.random() * 0.09
-        );
-    }
-  }
-
-  if (
-    !fields.purchase_order_number
-  ) {
-
-    confidence.purchase_order_number =
-      round2(
-        0.2 +
-        Math.random() * 0.2
-      );
-  }
-
-  return {
-    ...fields,
-    confidence
-  };
-}
-
-
-async function extractWithMock() {
-
-  await new Promise(
-    resolve =>
-      setTimeout(
-        resolve,
-        400 +
-        Math.random() * 400
-      )
-  );
-
-  return normalizeExtraction(
-    generateMockExtraction(),
     {
-      mock: true
+      provider: 'gemini',
+      model: GEMINI_MODEL
     }
   );
 }
@@ -775,6 +368,17 @@ function normalizeExtraction(
   raw
 ) {
 
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed)
+  ) {
+
+    throw new Error(
+      'Gemini extraction result is not a valid JSON object'
+    );
+  }
+
   const fields = {};
 
   for (
@@ -782,42 +386,71 @@ function normalizeExtraction(
   ) {
 
     fields[field] =
-      parsed &&
       parsed[field] !== undefined
         ? parsed[field]
         : null;
   }
 
+
+  // -------------------------------------------------------------------------
+  // NORMALIZE LINE ITEMS
+  // -------------------------------------------------------------------------
+
   const lineItems =
-    Array.isArray(
-      parsed?.line_items
-    )
-      ? parsed.line_items.map(
-          item => ({
+    Array.isArray(parsed.line_items)
+      ? parsed.line_items.map(item => ({
 
-            description:
-              item?.description ??
-              null,
+          description:
+            item?.description ??
+            null,
 
-            quantity:
-              item?.quantity ??
-              null,
+          quantity:
+            normalizeNumber(
+              item?.quantity
+            ),
 
-            unit_price:
-              item?.unit_price ??
-              null,
+          unit_price:
+            normalizeNumber(
+              item?.unit_price
+            ),
 
-            vat:
-              item?.vat ??
-              null,
+          vat:
+            normalizeNumber(
+              item?.vat
+            ),
 
-            total:
-              item?.total ??
-              null
+          total:
+            normalizeNumber(
+              item?.total
+            )
 
-          })
-        )
+        }))
       : [];
+
+
+  // -------------------------------------------------------------------------
+  // NORMALIZE NUMERIC FIELDS
+  // -------------------------------------------------------------------------
+
+  fields.subtotal =
+    normalizeNumber(
+      fields.subtotal
+    );
+
+  fields.vat_amount =
+    normalizeNumber(
+      fields.vat_amount
+    );
+
+  fields.total_amount =
+    normalizeNumber(
+      fields.total_amount
+    );
+
+
+  // -------------------------------------------------------------------------
+  // NORMALIZE CONFIDENCE
+  // -------------------------------------------------------------------------
 
   const confidence = {};
 
@@ -840,6 +473,11 @@ function normalizeExtraction(
         : null;
   }
 
+
+  // -------------------------------------------------------------------------
+  // RETURN NORMALIZED EXTRACTION
+  // -------------------------------------------------------------------------
+
   return {
 
     fields,
@@ -854,6 +492,55 @@ function normalizeExtraction(
 
 
 // ===========================================================================
+// NUMBER NORMALIZATION
+// ===========================================================================
+
+function normalizeNumber(value) {
+
+  if (
+    value === null ||
+    value === undefined ||
+    value === ''
+  ) {
+    return null;
+  }
+
+  if (
+    typeof value === 'number'
+  ) {
+
+    return Number.isFinite(value)
+      ? value
+      : null;
+  }
+
+  if (
+    typeof value === 'string'
+  ) {
+
+    const cleaned =
+      value
+        .replace(/,/g, '')
+        .replace(/[^\d.-]/g, '')
+        .trim();
+
+    if (!cleaned) {
+      return null;
+    }
+
+    const parsed =
+      Number(cleaned);
+
+    return Number.isFinite(parsed)
+      ? parsed
+      : null;
+  }
+
+  return null;
+}
+
+
+// ===========================================================================
 // MAIN EXTRACTION
 // ===========================================================================
 
@@ -862,142 +549,69 @@ async function extractInvoice(
   mimeType
 ) {
 
+  console.log(
+    '[aiExtraction] Starting production Gemini extraction'
+  );
+
+  console.log(
+    `[aiExtraction] Model: ${GEMINI_MODEL}`
+  );
+
   // -------------------------------------------------------------------------
-  // MOCK
+  // GEMINI ONLY
   // -------------------------------------------------------------------------
 
-  if (
-    PROVIDER === 'mock'
-  ) {
+  if (!GEMINI_API_KEY) {
 
-    console.warn(
-      '[aiExtraction] MOCK MODE ENABLED'
+    throw new Error(
+      'Gemini extraction unavailable: GEMINI_API_KEY is missing'
+    );
+  }
+
+  try {
+
+    const extraction =
+      await extractWithGemini(
+        filePath,
+        mimeType
+      );
+
+    console.log(
+      '[aiExtraction] Gemini extraction successful'
     );
 
     return {
-      ...(await extractWithMock(
-        filePath,
-        mimeType
-      )),
+
+      ...extraction,
 
       provider:
-        'mock'
+        'gemini',
+
+      model:
+        GEMINI_MODEL
     };
-  }
 
+  } catch (error) {
 
-  // -------------------------------------------------------------------------
-  // GEMINI
-  // -------------------------------------------------------------------------
-
-  if (
-    PROVIDER === 'gemini'
-  ) {
-
-    if (!GEMINI_API_KEY) {
-
-      throw new Error(
-        'AI_PROVIDER=gemini but GEMINI_API_KEY is missing'
-      );
-    }
-
-    console.log(
-      `[aiExtraction] Using Gemini ${GEMINI_MODEL}`
+    console.error(
+      '[aiExtraction] Gemini extraction failed:',
+      error.message
     );
 
-    try {
+    // IMPORTANT:
+    //
+    // There is intentionally NO fallback here.
+    //
+    // We do NOT generate fake invoice data.
+    // We do NOT call Claude.
+    // We do NOT call a mock provider.
+    //
+    // The real Gemini error is propagated to the invoice
+    // processing route so the invoice can be marked as failed
+    // rather than populated with fake information.
 
-      const extraction =
-        await extractWithGemini(
-          filePath,
-          mimeType
-        );
-
-      console.log(
-        '[aiExtraction] Gemini extraction successful'
-      );
-
-      return {
-
-        ...extraction,
-
-        provider:
-          'gemini'
-      };
-
-    } catch (error) {
-
-      console.error(
-        '[aiExtraction] Gemini extraction failed:',
-        error.message
-      );
-
-      // DO NOT FALL BACK TO MOCK.
-      //
-      // This is deliberate.
-      //
-      // Previously this was hiding the actual Gemini problem
-      // by generating fake invoice data.
-
-      throw error;
-    }
+    throw error;
   }
-
-
-  // -------------------------------------------------------------------------
-  // CLAUDE
-  // -------------------------------------------------------------------------
-
-  if (
-    PROVIDER === 'claude'
-  ) {
-
-    if (!CLAUDE_API_KEY) {
-
-      throw new Error(
-        'AI_PROVIDER=claude but ANTHROPIC_API_KEY is missing'
-      );
-    }
-
-    console.log(
-      `[aiExtraction] Using Claude ${CLAUDE_MODEL}`
-    );
-
-    try {
-
-      const extraction =
-        await extractWithClaude(
-          filePath,
-          mimeType
-        );
-
-      return {
-
-        ...extraction,
-
-        provider:
-          'claude'
-      };
-
-    } catch (error) {
-
-      console.error(
-        '[aiExtraction] Claude extraction failed:',
-        error.message
-      );
-
-      throw error;
-    }
-  }
-
-
-  // -------------------------------------------------------------------------
-  // UNKNOWN PROVIDER
-  // -------------------------------------------------------------------------
-
-  throw new Error(
-    `Unsupported AI_PROVIDER: "${PROVIDER}". Use "gemini", "claude", or "mock".`
-  );
 }
 
 
@@ -1012,6 +626,5 @@ module.exports = {
   REQUIRED_FIELDS
 
 };
-
 
 
