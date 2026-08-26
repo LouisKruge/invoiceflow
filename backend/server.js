@@ -7,50 +7,16 @@ const path = require('path');
 const db = require('./db');
 
 // ---------------------------------------------------------------------------
-// FIRST BOOT
-// ---------------------------------------------------------------------------
-
-const userCount =
-  db.prepare(
-    'SELECT COUNT(*) c FROM users'
-  ).get().c;
-
-if (userCount === 0) {
-  console.log(
-    'No users found — running first-boot seed (demo users + sample invoices)...'
-  );
-
-  require('./seed').runSeed();
-}
-
-// ---------------------------------------------------------------------------
-// ROUTES
-// ---------------------------------------------------------------------------
-
-const authRoutes =
-  require('./routes/auth');
-
-const {
-  router: invoiceRoutes
-} = require('./routes/invoices');
-
-const dashboardRoutes =
-  require('./routes/dashboard');
-
-const supplierRoutes =
-  require('./routes/suppliers');
-
-const exportRoutes =
-  require('./routes/export');
-
-// ---------------------------------------------------------------------------
 // APP
 // ---------------------------------------------------------------------------
 
 const app = express();
 
-const PORT =
-  process.env.PORT || 4000;
+const PORT = process.env.PORT || 4000;
+
+// ---------------------------------------------------------------------------
+// MIDDLEWARE
+// ---------------------------------------------------------------------------
 
 app.use(cors());
 
@@ -61,202 +27,326 @@ app.use(
 );
 
 // ---------------------------------------------------------------------------
-// API ROUTES
+// DATABASE INITIALIZATION
 // ---------------------------------------------------------------------------
 
-app.use(
-  '/api/auth',
-  authRoutes
-);
+async function startServer() {
+  try {
+    console.log('[server] Initializing database...');
 
-app.use(
-  '/api/invoices',
-  invoiceRoutes
-);
+    // Test PostgreSQL connection
+    await db.testConnection();
 
-app.use(
-  '/api/dashboard',
-  dashboardRoutes
-);
+    // Create tables/indexes if they don't exist
+    await db.initializeDatabase();
 
-app.use(
-  '/api/suppliers',
-  supplierRoutes
-);
+    console.log('[server] Database initialization complete.');
 
-app.use(
-  '/api/export',
-  exportRoutes
-);
+    // -----------------------------------------------------------------------
+    // FIRST BOOT / ADMIN SETUP
+    // -----------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// HEALTH CHECK
-// ---------------------------------------------------------------------------
+    const userCount = await db.get(
+      'SELECT COUNT(*)::int AS count FROM users'
+    );
 
-app.get(
-  '/api/health',
-  (req, res) => {
-
-    const geminiConfigured =
-      Boolean(
-        process.env.GEMINI_API_KEY
+    if (userCount.count === 0) {
+      console.log(
+        'No users found — running first-boot administrator setup...'
       );
 
-    const claudeConfigured =
-      Boolean(
-        process.env.ANTHROPIC_API_KEY
-      );
+      try {
+        const seed = require('./seed');
 
-    let provider =
-      process.env.AI_PROVIDER ||
-      null;
+        if (typeof seed.runSeed === 'function') {
+          await seed.runSeed();
+        } else {
+          console.log(
+            '[server] seed.runSeed() is not available. Skipping seed.'
+          );
+        }
+      } catch (seedError) {
+        console.error(
+          '[server] First-boot seed failed:',
+          seedError
+        );
 
-    if (!provider) {
-      if (geminiConfigured) {
-        provider = 'gemini';
-      } else if (claudeConfigured) {
-        provider = 'claude';
-      } else {
-        provider = 'mock';
+        // Do not crash the server because of optional seed data.
+        console.log(
+          '[server] Server will continue without seed data.'
+        );
       }
+    } else {
+      console.log(
+        `[server] Existing users found: ${userCount.count}`
+      );
     }
 
-    res.json({
-      status: 'ok',
+    // -----------------------------------------------------------------------
+    // ROUTES
+    // -----------------------------------------------------------------------
 
-      ai_provider:
-        provider,
+    const authRoutes =
+      require('./routes/auth');
 
-      ai_configured:
-        geminiConfigured ||
-        claudeConfigured,
+    const {
+      router: invoiceRoutes
+    } = require('./routes/invoices');
 
-      gemini_configured:
-        geminiConfigured,
+    const dashboardRoutes =
+      require('./routes/dashboard');
 
-      claude_configured:
-        claudeConfigured,
+    const supplierRoutes =
+      require('./routes/suppliers');
 
-      gemini_model:
-        process.env.GEMINI_MODEL ||
-        'gemini-2.5-flash'
-    });
-  }
-);
+    const exportRoutes =
+      require('./routes/export');
 
-// ---------------------------------------------------------------------------
-// FRONTEND
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // API ROUTES
+    // -----------------------------------------------------------------------
 
-const FRONTEND_DIR =
-  path.join(
-    __dirname,
-    '..',
-    'frontend'
-  );
+    app.use(
+      '/api/auth',
+      authRoutes
+    );
 
-app.use(
-  express.static(
-    FRONTEND_DIR
-  )
-);
+    app.use(
+      '/api/invoices',
+      invoiceRoutes
+    );
 
-app.get(
-  '*',
-  (req, res, next) => {
+    app.use(
+      '/api/dashboard',
+      dashboardRoutes
+    );
 
-    if (
-      req.path.startsWith('/api/')
-    ) {
-      return next();
-    }
+    app.use(
+      '/api/suppliers',
+      supplierRoutes
+    );
 
-    res.sendFile(
+    app.use(
+      '/api/export',
+      exportRoutes
+    );
+
+    // -----------------------------------------------------------------------
+    // HEALTH CHECK
+    // -----------------------------------------------------------------------
+
+    app.get(
+      '/api/health',
+      (req, res) => {
+        const geminiConfigured =
+          Boolean(
+            process.env.GEMINI_API_KEY
+          );
+
+        const claudeConfigured =
+          Boolean(
+            process.env.ANTHROPIC_API_KEY
+          );
+
+        let provider =
+          process.env.AI_PROVIDER ||
+          null;
+
+        if (!provider) {
+          if (geminiConfigured) {
+            provider = 'gemini';
+          } else if (claudeConfigured) {
+            provider = 'claude';
+          } else {
+            provider = 'mock';
+          }
+        }
+
+        res.json({
+          status: 'ok',
+
+          database:
+            'postgresql',
+
+          ai_provider:
+            provider,
+
+          ai_configured:
+            geminiConfigured ||
+            claudeConfigured,
+
+          gemini_configured:
+            geminiConfigured,
+
+          claude_configured:
+            claudeConfigured,
+
+          gemini_model:
+            process.env.GEMINI_MODEL ||
+            'gemini-2.5-flash'
+        });
+      }
+    );
+
+    // -----------------------------------------------------------------------
+    // FRONTEND
+    // -----------------------------------------------------------------------
+
+    const FRONTEND_DIR =
       path.join(
-        FRONTEND_DIR,
-        'index.html'
+        __dirname,
+        '..',
+        'frontend'
+      );
+
+    app.use(
+      express.static(
+        FRONTEND_DIR
       )
     );
-  }
-);
 
-// ---------------------------------------------------------------------------
-// ERROR HANDLER
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // FRONTEND FALLBACK
+    // -----------------------------------------------------------------------
 
-app.use(
-  (err, req, res, next) => {
+    app.get(
+      '*',
+      (req, res, next) => {
+        if (
+          req.path.startsWith('/api/')
+        ) {
+          return next();
+        }
+
+        res.sendFile(
+          path.join(
+            FRONTEND_DIR,
+            'index.html'
+          )
+        );
+      }
+    );
+
+    // -----------------------------------------------------------------------
+    // ERROR HANDLER
+    // -----------------------------------------------------------------------
+
+    app.use(
+      (err, req, res, next) => {
+        console.error(
+          '[unhandled]',
+          err
+        );
+
+        res.status(
+          err.status || 500
+        ).json({
+          error:
+            err.message ||
+            'Something went wrong. Please try again.'
+        });
+      }
+    );
+
+    // -----------------------------------------------------------------------
+    // START SERVER
+    // -----------------------------------------------------------------------
+
+    app.listen(
+      PORT,
+      () => {
+        const geminiConfigured =
+          Boolean(
+            process.env.GEMINI_API_KEY
+          );
+
+        const claudeConfigured =
+          Boolean(
+            process.env.ANTHROPIC_API_KEY
+          );
+
+        let provider =
+          process.env.AI_PROVIDER ||
+          null;
+
+        if (!provider) {
+          if (geminiConfigured) {
+            provider = 'gemini';
+          } else if (claudeConfigured) {
+            provider = 'claude';
+          } else {
+            provider = 'mock';
+          }
+        }
+
+        console.log(
+          '================================================='
+        );
+
+        console.log(
+          'InvoiceFlow backend'
+        );
+
+        console.log(
+          '================================================='
+        );
+
+        console.log(
+          `Listening on port ${PORT}`
+        );
+
+        console.log(
+          'Database: PostgreSQL / Neon'
+        );
+
+        console.log(
+          `AI provider: ${provider}`
+        );
+
+        console.log(
+          `Gemini configured: ${geminiConfigured}`
+        );
+
+        console.log(
+          `Claude configured: ${claudeConfigured}`
+        );
+
+        if (provider === 'gemini') {
+          console.log(
+            `Gemini model: ${
+              process.env.GEMINI_MODEL ||
+              'gemini-2.5-flash'
+            }`
+          );
+        }
+
+        console.log(
+          '================================================='
+        );
+      }
+    );
+
+  } catch (error) {
+    console.error(
+      '================================================='
+    );
 
     console.error(
-      '[unhandled]',
-      err
+      '[server] FATAL STARTUP ERROR'
     );
 
-    res.status(
-      err.status || 500
-    ).json({
-      error:
-        err.message ||
-        'Something went wrong. Please try again.'
-    });
+    console.error(
+      '================================================='
+    );
+
+    console.error(error);
+
+    process.exit(1);
   }
-);
+}
 
 // ---------------------------------------------------------------------------
-// START SERVER
+// START
 // ---------------------------------------------------------------------------
 
-app.listen(
-  PORT,
-  () => {
-
-    const geminiConfigured =
-      Boolean(
-        process.env.GEMINI_API_KEY
-      );
-
-    const claudeConfigured =
-      Boolean(
-        process.env.ANTHROPIC_API_KEY
-      );
-
-    let provider =
-      process.env.AI_PROVIDER ||
-      null;
-
-    if (!provider) {
-      if (geminiConfigured) {
-        provider = 'gemini';
-      } else if (claudeConfigured) {
-        provider = 'claude';
-      } else {
-        provider = 'mock';
-      }
-    }
-
-    console.log(
-      `InvoiceFlow backend listening on port ${PORT}`
-    );
-
-    console.log(
-      `AI provider: ${provider}`
-    );
-
-    console.log(
-      `Gemini configured: ${geminiConfigured}`
-    );
-
-    console.log(
-      `Claude configured: ${claudeConfigured}`
-    );
-
-    if (provider === 'gemini') {
-      console.log(
-        `Gemini model: ${
-          process.env.GEMINI_MODEL ||
-          'gemini-2.5-flash'
-        }`
-      );
-    }
-  }
-);
+startServer();
