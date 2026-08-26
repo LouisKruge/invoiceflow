@@ -10,53 +10,14 @@ const {
 
 const router = express.Router();
 
-// =============================================================================
-// HELPERS
-// =============================================================================
-
-function createToken(user) {
-  return jwt.sign(
-    {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      company_name: user.company_name
-    },
-    JWT_SECRET,
-    {
-      expiresIn: '12h'
-    }
-  );
-}
-
-function publicUser(user) {
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    company_name: user.company_name
-  };
-}
-
-// =============================================================================
+// ---------------------------------------------------------------------------
 // POST /api/auth/register
 //
-// Creates a new InvoiceFlow account.
+// FIRST-BOOT ACCOUNT CREATION
 //
-// Expected body:
-//
-// {
-//   "name": "John Smith",
-//   "email": "john@company.com",
-//   "password": "password123",
-//   "company_name": "ABC Engineering"
-// }
-//
-// The first registered user becomes administrator.
-// All subsequent users become users.
-// =============================================================================
+// Registration is only allowed when there are ZERO users in the database.
+// Once the first account is created, this endpoint is automatically disabled.
+// ---------------------------------------------------------------------------
 
 router.post('/register', async (req, res) => {
   try {
@@ -65,13 +26,18 @@ router.post('/register', async (req, res) => {
       email,
       password,
       company_name
-    } = req.body || {};
+    } = req.body;
 
-    // -------------------------------------------------------------------------
-    // VALIDATION
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // Validate input
+    // ---------------------------------------------------------------
 
-    if (!name || !email || !password || !company_name) {
+    if (
+      !name ||
+      !email ||
+      !password ||
+      !company_name
+    ) {
       return res.status(400).json({
         error:
           'Name, email, password and company name are required'
@@ -82,170 +48,121 @@ router.post('/register', async (req, res) => {
       String(name).trim();
 
     const normalizedEmail =
-      String(email).trim().toLowerCase();
+      String(email)
+        .trim()
+        .toLowerCase();
 
     const normalizedCompany =
       String(company_name).trim();
 
-    const plainPassword =
-      String(password);
-
     if (
-      normalizedName.length < 2
+      !normalizedName ||
+      !normalizedEmail ||
+      !normalizedCompany
     ) {
       return res.status(400).json({
         error:
-          'Please enter your full name'
+          'All fields are required'
       });
     }
 
-    if (
-      normalizedEmail.length < 5 ||
-      !normalizedEmail.includes('@')
-    ) {
-      return res.status(400).json({
-        error:
-          'Please enter a valid email address'
-      });
-    }
-
-    if (
-      normalizedCompany.length < 2
-    ) {
-      return res.status(400).json({
-        error:
-          'Please enter your company name'
-      });
-    }
-
-    if (
-      plainPassword.length < 8
-    ) {
+    if (password.length < 8) {
       return res.status(400).json({
         error:
           'Password must be at least 8 characters'
       });
     }
 
-    // -------------------------------------------------------------------------
-    // CHECK IF EMAIL ALREADY EXISTS
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // Check whether a user already exists
+    // ---------------------------------------------------------------
 
-    const existingUser =
-      await db.get(
-        `
-          SELECT id
-          FROM users
-          WHERE email = $1
-        `,
-        [normalizedEmail]
-      );
+    const userCount = await db.get(
+      `
+        SELECT COUNT(*)::int AS count
+        FROM users
+      `
+    );
 
-    if (existingUser) {
-      return res.status(409).json({
+    if (Number(userCount.count) > 0) {
+      return res.status(403).json({
         error:
-          'An account with this email already exists'
+          'Account registration is closed. An administrator account already exists.'
       });
     }
 
-    // -------------------------------------------------------------------------
-    // DETERMINE ROLE
-    //
-    // If there are currently no users, this is the first account.
-    // The first account becomes administrator.
-    // -------------------------------------------------------------------------
-
-    const userCount =
-      await db.get(
-        `
-          SELECT COUNT(*)::int AS count
-          FROM users
-        `
-      );
-
-    const isFirstUser =
-      Number(userCount?.count || 0) === 0;
-
-    const role =
-      isFirstUser
-        ? 'admin'
-        : 'user';
-
-    // -------------------------------------------------------------------------
-    // HASH PASSWORD
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // Hash password
+    // ---------------------------------------------------------------
 
     const passwordHash =
       await bcrypt.hash(
-        plainPassword,
+        password,
         12
       );
 
-    // -------------------------------------------------------------------------
-    // CREATE USER
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // Create first administrator
+    // ---------------------------------------------------------------
 
-    const user =
-      await db.get(
-        `
-          INSERT INTO users (
-            name,
-            email,
-            password_hash,
-            role,
-            company_name
-          )
-          VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5
-          )
-          RETURNING
-            id,
-            name,
-            email,
-            role,
-            company_name,
-            created_at
-        `,
-        [
-          normalizedName,
-          normalizedEmail,
-          passwordHash,
+    const user = await db.get(
+      `
+        INSERT INTO users (
+          name,
+          email,
+          password_hash,
           role,
-          normalizedCompany
-        ]
-      );
+          company_name
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5
+        )
+        RETURNING
+          id,
+          name,
+          email,
+          role,
+          company_name,
+          created_at
+      `,
+      [
+        normalizedName,
+        normalizedEmail,
+        passwordHash,
+        'admin',
+        normalizedCompany
+      ]
+    );
 
-    if (!user) {
-      throw new Error(
-        'User was not created'
-      );
-    }
+    // ---------------------------------------------------------------
+    // Automatically log the new user in
+    // ---------------------------------------------------------------
 
-    // -------------------------------------------------------------------------
-    // CREATE LOGIN TOKEN
-    // -------------------------------------------------------------------------
-
-    const token =
-      createToken(user);
-
-    // -------------------------------------------------------------------------
-    // RESPONSE
-    // -------------------------------------------------------------------------
+    const token = jwt.sign(
+      {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        company_name: user.company_name
+      },
+      JWT_SECRET,
+      {
+        expiresIn: '12h'
+      }
+    );
 
     return res.status(201).json({
+      message:
+        'Administrator account created successfully',
+
       token,
 
-      user:
-        publicUser(user),
-
-      message:
-        isFirstUser
-          ? 'Administrator account created successfully'
-          : 'Account created successfully'
+      user
     });
 
   } catch (error) {
@@ -254,49 +171,86 @@ router.post('/register', async (req, res) => {
       error
     );
 
-    // PostgreSQL unique constraint protection.
+    // Handle duplicate email gracefully
     if (
-      error &&
       error.code === '23505'
     ) {
       return res.status(409).json({
         error:
-          'An account with this email already exists'
+          'An account with that email already exists'
       });
     }
 
     return res.status(500).json({
       error:
-        'Account creation failed'
+        'Unable to create account'
     });
   }
 });
 
-// =============================================================================
-// POST /api/auth/login
-// =============================================================================
+// ---------------------------------------------------------------------------
+// GET /api/auth/setup-status
+//
+// Frontend uses this to determine whether the initial account needs to be
+// created.
+// ---------------------------------------------------------------------------
 
-router.post('/login', async (req, res) => {
-  try {
-    const {
-      email,
-      password
-    } = req.body || {};
+router.get(
+  '/setup-status',
+  async (req, res) => {
+    try {
+      const userCount = await db.get(
+        `
+          SELECT COUNT(*)::int AS count
+          FROM users
+        `
+      );
 
-    if (!email || !password) {
-      return res.status(400).json({
+      const hasUsers =
+        Number(userCount.count) > 0;
+
+      return res.json({
+        setup_required: !hasUsers
+      });
+
+    } catch (error) {
+      console.error(
+        '[auth/setup-status]',
+        error
+      );
+
+      return res.status(500).json({
         error:
-          'Email and password are required'
+          'Unable to check account setup status'
       });
     }
+  }
+);
 
-    const normalizedEmail =
-      String(email)
-        .trim()
-        .toLowerCase();
+// ---------------------------------------------------------------------------
+// POST /api/auth/login
+// ---------------------------------------------------------------------------
 
-    const user =
-      await db.get(
+router.post(
+  '/login',
+  async (req, res) => {
+    try {
+      const {
+        email,
+        password
+      } = req.body;
+
+      if (!email || !password) {
+        return res.status(400).json({
+          error:
+            'Email and password are required'
+        });
+      }
+
+      const normalizedEmail =
+        email.trim().toLowerCase();
+
+      const user = await db.get(
         `
           SELECT *
           FROM users
@@ -305,66 +259,84 @@ router.post('/login', async (req, res) => {
         [normalizedEmail]
       );
 
-    if (
-      !user ||
-      !(await bcrypt.compare(
-        String(password),
-        user.password_hash
-      ))
-    ) {
-      return res.status(401).json({
+      if (
+        !user ||
+        !(await bcrypt.compare(
+          password,
+          user.password_hash
+        ))
+      ) {
+        return res.status(401).json({
+          error:
+            'Invalid email or password'
+        });
+      }
+
+      const token = jwt.sign(
+        {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          company_name:
+            user.company_name
+        },
+        JWT_SECRET,
+        {
+          expiresIn: '12h'
+        }
+      );
+
+      return res.json({
+        token,
+
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          company_name:
+            user.company_name
+        }
+      });
+
+    } catch (error) {
+      console.error(
+        '[auth/login]',
+        error
+      );
+
+      return res.status(500).json({
         error:
-          'Invalid email or password'
+          'Login failed'
       });
     }
-
-    const token =
-      createToken(user);
-
-    return res.json({
-      token,
-
-      user:
-        publicUser(user)
-    });
-
-  } catch (error) {
-    console.error(
-      '[auth/login]',
-      error
-    );
-
-    return res.status(500).json({
-      error:
-        'Login failed'
-    });
   }
-});
+);
 
-// =============================================================================
+// ---------------------------------------------------------------------------
 // GET /api/auth/me
-// =============================================================================
+// ---------------------------------------------------------------------------
 
 router.get(
   '/me',
   requireAuth,
   async (req, res) => {
     try {
-      const user =
-        await db.get(
-          `
-            SELECT
-              id,
-              name,
-              email,
-              role,
-              company_name,
-              created_at
-            FROM users
-            WHERE id = $1
-          `,
-          [req.user.id]
-        );
+      const user = await db.get(
+        `
+          SELECT
+            id,
+            name,
+            email,
+            role,
+            company_name,
+            created_at
+          FROM users
+          WHERE id = $1
+        `,
+        [req.user.id]
+      );
 
       if (!user) {
         return res.status(401).json({
@@ -390,9 +362,5 @@ router.get(
     }
   }
 );
-
-// =============================================================================
-// EXPORT
-// =============================================================================
 
 module.exports = router;
