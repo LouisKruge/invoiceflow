@@ -1,15 +1,3 @@
-// server/app.js
-//
-// InvoiceFlow production backend
-//
-// - PostgreSQL database
-// - No SQLite
-// - No automatic demo users
-// - No automatic sample invoices
-// - No mock invoice seeding
-// - Database connection comes from DATABASE_URL
-//
-
 require('dotenv').config();
 
 const express = require('express');
@@ -109,12 +97,8 @@ app.get(
       );
 
     let provider =
-      (
-        process.env.AI_PROVIDER ||
-        ''
-      )
-        .toLowerCase()
-        .trim();
+      process.env.AI_PROVIDER ||
+      null;
 
     if (!provider) {
 
@@ -125,31 +109,33 @@ app.get(
         provider = 'claude';
 
       } else {
-        provider = 'none';
+        provider = 'mock';
       }
     }
 
-    let database;
+    let database = 'unknown';
 
     try {
 
-      database =
-        await db.healthCheck();
+      await db.query(
+        'SELECT 1'
+      );
+
+      database = 'postgresql';
 
     } catch (error) {
 
-      database = {
-        connected: false,
-        error: error.message
-      };
+      console.error(
+        '[health] Database check failed:',
+        error.message
+      );
+
+      database = 'error';
     }
 
     res.json({
 
-      status:
-        database.connected
-          ? 'ok'
-          : 'degraded',
+      status: 'ok',
 
       database,
 
@@ -168,12 +154,7 @@ app.get(
 
       gemini_model:
         process.env.GEMINI_MODEL ||
-        'gemini-3.6-flash',
-
-      claude_model:
-        process.env.CLAUDE_MODEL ||
-        'claude-sonnet-4-6'
-
+        'gemini-2.5-flash'
     });
   }
 );
@@ -194,10 +175,6 @@ app.use(
     FRONTEND_DIR
   )
 );
-
-// ---------------------------------------------------------------------------
-// SPA FALLBACK
-// ---------------------------------------------------------------------------
 
 app.get(
   '*',
@@ -237,7 +214,6 @@ app.use(
       error:
         err.message ||
         'Something went wrong. Please try again.'
-
     });
   }
 );
@@ -250,82 +226,47 @@ async function startServer() {
 
   try {
 
-    // -----------------------------------------------------------------------
-    // DATABASE
-    //
-    // IMPORTANT:
-    // This only creates/updates the database schema.
-    //
-    // It DOES NOT create demo users.
-    // It DOES NOT create sample invoices.
-    // It DOES NOT reset existing data.
-    // -----------------------------------------------------------------------
-
-    console.log(
-      '[startup] Initializing PostgreSQL database...'
-    );
-
     await db.initializeDatabase();
 
-    console.log(
-      '[startup] PostgreSQL database ready.'
-    );
-
-    // -----------------------------------------------------------------------
-    // AI CONFIGURATION
-    // -----------------------------------------------------------------------
-
-    const geminiConfigured =
-      Boolean(
-        process.env.GEMINI_API_KEY
-      );
-
-    const claudeConfigured =
-      Boolean(
-        process.env.ANTHROPIC_API_KEY
-      );
-
-    let provider =
-      (
-        process.env.AI_PROVIDER ||
-        ''
-      )
-        .toLowerCase()
-        .trim();
-
-    if (!provider) {
-
-      if (geminiConfigured) {
-
-        provider =
-          'gemini';
-
-      } else if (claudeConfigured) {
-
-        provider =
-          'claude';
-
-      } else {
-
-        provider =
-          'none';
-      }
-    }
-
-    // -----------------------------------------------------------------------
-    // SERVER
-    // -----------------------------------------------------------------------
+    await db.testConnection();
 
     app.listen(
       PORT,
       () => {
 
-        console.log(
-          '--------------------------------------------------'
-        );
+        const geminiConfigured =
+          Boolean(
+            process.env.GEMINI_API_KEY
+          );
+
+        const claudeConfigured =
+          Boolean(
+            process.env.ANTHROPIC_API_KEY
+          );
+
+        let provider =
+          process.env.AI_PROVIDER ||
+          null;
+
+        if (!provider) {
+
+          if (geminiConfigured) {
+            provider = 'gemini';
+
+          } else if (claudeConfigured) {
+            provider = 'claude';
+
+          } else {
+            provider = 'mock';
+          }
+        }
 
         console.log(
           `InvoiceFlow backend listening on port ${PORT}`
+        );
+
+        console.log(
+          `Database: PostgreSQL / Neon`
         );
 
         console.log(
@@ -340,74 +281,29 @@ async function startServer() {
           `Claude configured: ${claudeConfigured}`
         );
 
-        if (
-          provider === 'gemini'
-        ) {
+        if (provider === 'gemini') {
 
           console.log(
             `Gemini model: ${
               process.env.GEMINI_MODEL ||
-              'gemini-3.6-flash'
+              'gemini-2.5-flash'
             }`
           );
         }
-
-        if (
-          provider === 'claude'
-        ) {
-
-          console.log(
-            `Claude model: ${
-              process.env.CLAUDE_MODEL ||
-              'claude-sonnet-4-6'
-            }`
-          );
-        }
-
-        console.log(
-          'Demo/sample database seeding: DISABLED'
-        );
-
-        console.log(
-          '--------------------------------------------------'
-        );
       }
     );
 
   } catch (error) {
 
     console.error(
-      '--------------------------------------------------'
-    );
-
-    console.error(
-      '[startup] InvoiceFlow failed to start.'
-    );
-
-    console.error(
-      '[startup] Database initialization error:'
-    );
-
-    console.error(
+      '[startup] Failed to start InvoiceFlow:',
       error
-    );
-
-    console.error(
-      '--------------------------------------------------'
     );
 
     process.exit(1);
   }
 }
 
-// ---------------------------------------------------------------------------
-// START
-// ---------------------------------------------------------------------------
-
 startServer();
-
-// ---------------------------------------------------------------------------
-// EXPORT
-// ---------------------------------------------------------------------------
 
 module.exports = app;
