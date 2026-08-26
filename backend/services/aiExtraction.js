@@ -1,30 +1,38 @@
 // services/aiExtraction.js
 //
-// InvoiceFlow — Production AI Invoice Extraction
+// InvoiceFlow AI Invoice Extraction
 //
-// PROVIDER: Google Gemini ONLY
+// Primary provider: Gemini
+// Optional provider: Claude
 //
 // IMPORTANT:
-// - No mock extraction.
-// - No fake invoice data.
-// - No Claude fallback.
-// - Gemini failures are thrown to the caller.
-// - Never silently invent invoice information.
+// - No mock data.
+// - No fake invoices.
+// - No fake suppliers.
+// - Gemini failures are NOT converted into fake data.
+// - If AI extraction fails, the actual error is returned.
 //
 
 const fs = require('fs');
 
 // ---------------------------------------------------------------------------
-// GEMINI CONFIGURATION
+// PROVIDER CONFIGURATION
 // ---------------------------------------------------------------------------
 
-const GEMINI_API_KEY =
-  process.env.GEMINI_API_KEY || '';
+const PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
 const GEMINI_MODEL =
   (process.env.GEMINI_MODEL || 'gemini-3.6-flash')
     .replace(/^models\//, '')
     .trim();
+
+const CLAUDE_API_KEY =
+  process.env.ANTHROPIC_API_KEY || '';
+
+const CLAUDE_MODEL =
+  (process.env.CLAUDE_MODEL || 'claude-sonnet-4-6').trim();
 
 
 // ---------------------------------------------------------------------------
@@ -57,7 +65,7 @@ You are an invoice data extraction engine for a South African accounts-payable s
 
 You will be given an image or PDF of an invoice.
 
-Extract the invoice information accurately from the document.
+Extract the invoice information accurately.
 
 Return ONLY valid JSON.
 
@@ -105,29 +113,27 @@ The JSON must have this exact structure:
 
 RULES:
 
-1. Never invent information.
-2. Never guess missing information.
-3. If a field is not visible or cannot be read reliably, return null.
-4. Confidence values must be between 0.0 and 1.0.
-5. Confidence represents how clearly and reliably the value was read from the document.
-6. Dates must use YYYY-MM-DD where possible.
-7. Numbers must be plain numbers without currency symbols or thousands separators.
-8. Do not assume a VAT rate.
-9. Only report VAT if it is printed or unambiguously derivable from the invoice.
-10. Currency must use ISO 4217 codes such as ZAR, USD, GBP or EUR.
-11. For South African invoices with clear R/ZAR indicators, use ZAR.
-12. Extract every visible invoice line item.
-13. Do not create line items that are not present.
-14. Preserve supplier names and invoice numbers as printed where possible.
-15. Extract purchase/order numbers into purchase_order_number.
-16. Do not substitute information from another invoice or external knowledge.
-17. If information is unclear, use null rather than guessing.
-18. Return ONLY the JSON object.
+1. Never invent or guess information.
+2. If a field is not visible or cannot be read confidently, return null.
+3. Confidence values must be between 0.0 and 1.0.
+4. Confidence represents how clearly and reliably the value was read.
+5. Dates must use YYYY-MM-DD where possible.
+6. Numbers must be plain numbers without currency symbols or thousands separators.
+7. Do not assume a VAT rate.
+8. Only report VAT if printed or unambiguously derivable.
+9. Currency should use ISO 4217 codes such as ZAR, USD, GBP or EUR.
+10. For a South African invoice with clear R/ZAR indicators, use ZAR.
+11. Extract every visible invoice line item.
+12. Do not create line items that are not present.
+13. Preserve supplier names and invoice numbers as printed where possible.
+14. Extract purchase/order numbers into purchase_order_number.
+15. If information is unreadable, return null rather than guessing.
+16. Return ONLY the JSON object.
 `;
 
 
 // ===========================================================================
-// GEMINI EXTRACTION
+// GEMINI
 // ===========================================================================
 
 async function extractWithGemini(filePath, mimeType) {
@@ -138,29 +144,15 @@ async function extractWithGemini(filePath, mimeType) {
     );
   }
 
-  if (!filePath) {
-    throw new Error(
-      'Invoice file path is missing'
-    );
-  }
-
-  if (!fs.existsSync(filePath)) {
+  if (!filePath || !fs.existsSync(filePath)) {
     throw new Error(
       `Invoice file does not exist: ${filePath}`
     );
   }
 
-  const fileBuffer =
-    fs.readFileSync(filePath);
+  const fileBuffer = fs.readFileSync(filePath);
 
-  if (!fileBuffer || fileBuffer.length === 0) {
-    throw new Error(
-      'Invoice file is empty'
-    );
-  }
-
-  const base64 =
-    fileBuffer.toString('base64');
+  const base64 = fileBuffer.toString('base64');
 
   const effectiveMimeType =
     mimeType || 'application/octet-stream';
@@ -173,14 +165,6 @@ async function extractWithGemini(filePath, mimeType) {
     `[aiExtraction] Gemini MIME type: ${effectiveMimeType}`
   );
 
-  // Gemini expects the model name without "models/".
-  //
-  // Correct:
-  // gemini-3.6-flash
-  //
-  // Incorrect:
-  // models/gemini-3.6-flash
-
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 
@@ -190,7 +174,6 @@ async function extractWithGemini(filePath, mimeType) {
         role: 'user',
 
         parts: [
-
           {
             inline_data: {
               mime_type: effectiveMimeType,
@@ -201,7 +184,6 @@ async function extractWithGemini(filePath, mimeType) {
           {
             text: EXTRACTION_SYSTEM_PROMPT
           }
-
         ]
       }
     ],
@@ -236,7 +218,7 @@ async function extractWithGemini(filePath, mimeType) {
   } catch (error) {
 
     throw new Error(
-      `Unable to connect to Gemini API: ${error.message}`
+      `Gemini network error: ${error.message}`
     );
   }
 
@@ -254,53 +236,30 @@ async function extractWithGemini(filePath, mimeType) {
 
   try {
 
-    data =
-      JSON.parse(responseText);
+    data = JSON.parse(responseText);
 
   } catch (error) {
 
     throw new Error(
-      `Gemini returned invalid API response JSON: ${error.message}`
+      `Gemini returned invalid API JSON: ${error.message}`
     );
   }
 
   const candidates =
-    Array.isArray(data.candidates)
-      ? data.candidates
-      : [];
+    data.candidates || [];
 
   if (!candidates.length) {
 
-    const blockReason =
-      data?.promptFeedback?.blockReason;
-
-    if (blockReason) {
-
-      throw new Error(
-        `Gemini blocked the invoice request: ${blockReason}`
-      );
-    }
+    const finishReason =
+      data.candidates?.[0]?.finishReason;
 
     throw new Error(
-      'Gemini API returned no candidates'
-    );
-  }
-
-  const candidate =
-    candidates[0];
-
-  if (
-    candidate?.finishReason &&
-    candidate.finishReason !== 'STOP'
-  ) {
-
-    console.warn(
-      `[aiExtraction] Gemini finish reason: ${candidate.finishReason}`
+      `Gemini API returned no candidates${finishReason ? ` (${finishReason})` : ''}`
     );
   }
 
   const parts =
-    candidate?.content?.parts || [];
+    candidates[0]?.content?.parts || [];
 
   const text =
     parts
@@ -319,9 +278,194 @@ async function extractWithGemini(filePath, mimeType) {
     '[aiExtraction] Gemini returned extraction data'
   );
 
-  // Gemini should return JSON directly because responseMimeType
-  // is application/json. This cleanup simply protects against
-  // accidental markdown fences.
+  const cleaned =
+    text
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+
+  let parsed;
+
+  try {
+
+    parsed = JSON.parse(cleaned);
+
+  } catch (error) {
+
+    console.error(
+      '[aiExtraction] Gemini raw response:',
+      text
+    );
+
+    throw new Error(
+      `Gemini returned invalid extraction JSON: ${error.message}`
+    );
+  }
+
+  return normalizeExtraction(
+    parsed,
+    {
+      provider: 'gemini',
+      model: GEMINI_MODEL,
+      usageMetadata: data.usageMetadata || null
+    }
+  );
+}
+
+
+// ===========================================================================
+// CLAUDE
+// ===========================================================================
+
+async function extractWithClaude(
+  filePath,
+  mimeType
+) {
+
+  if (!CLAUDE_API_KEY) {
+
+    throw new Error(
+      'ANTHROPIC_API_KEY is not configured'
+    );
+  }
+
+  if (!filePath || !fs.existsSync(filePath)) {
+
+    throw new Error(
+      `Invoice file does not exist: ${filePath}`
+    );
+  }
+
+  if (!mimeType) {
+
+    throw new Error(
+      'MIME type is required for Claude extraction'
+    );
+  }
+
+  const fileBuffer =
+    fs.readFileSync(filePath);
+
+  const base64 =
+    fileBuffer.toString('base64');
+
+  const body = {
+
+    model: CLAUDE_MODEL,
+
+    max_tokens: 4000,
+
+    system:
+      EXTRACTION_SYSTEM_PROMPT,
+
+    messages: [
+      {
+        role: 'user',
+
+        content: [
+
+          {
+            type: 'image',
+
+            source: {
+              type: 'base64',
+              media_type: mimeType,
+              data: base64
+            }
+          },
+
+          {
+            type: 'text',
+
+            text:
+              'Extract this invoice as the specified JSON object. Return only JSON.'
+          }
+
+        ]
+      }
+    ]
+  };
+
+  console.log(
+    `[aiExtraction] Claude model: ${CLAUDE_MODEL}`
+  );
+
+  console.log(
+    `[aiExtraction] Claude MIME type: ${mimeType}`
+  );
+
+  let response;
+
+  try {
+
+    response =
+      await fetch(
+        'https://api.anthropic.com/v1/messages',
+        {
+          method: 'POST',
+
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': CLAUDE_API_KEY,
+            'anthropic-version': '2023-06-01'
+          },
+
+          body:
+            JSON.stringify(body)
+        }
+      );
+
+  } catch (error) {
+
+    throw new Error(
+      `Claude network error: ${error.message}`
+    );
+  }
+
+  const responseText =
+    await response.text();
+
+  if (!response.ok) {
+
+    throw new Error(
+      `Claude API error ${response.status}: ${responseText}`
+    );
+  }
+
+  let data;
+
+  try {
+
+    data =
+      JSON.parse(responseText);
+
+  } catch (error) {
+
+    throw new Error(
+      `Claude returned invalid API JSON: ${error.message}`
+    );
+  }
+
+  const text =
+    (data.content || [])
+      .filter(
+        block =>
+          block.type === 'text'
+      )
+      .map(
+        block =>
+          block.text || ''
+      )
+      .join('')
+      .trim();
+
+  if (!text) {
+
+    throw new Error(
+      'Claude API returned no extraction text'
+    );
+  }
 
   const cleaned =
     text
@@ -340,20 +484,21 @@ async function extractWithGemini(filePath, mimeType) {
   } catch (error) {
 
     console.error(
-      '[aiExtraction] Gemini raw extraction response:',
+      '[aiExtraction] Claude raw response:',
       text
     );
 
     throw new Error(
-      `Gemini returned invalid extraction JSON: ${error.message}`
+      `Claude returned invalid extraction JSON: ${error.message}`
     );
   }
 
   return normalizeExtraction(
     parsed,
     {
-      provider: 'gemini',
-      model: GEMINI_MODEL
+      provider: 'claude',
+      model: CLAUDE_MODEL,
+      usage: data.usage || null
     }
   );
 }
@@ -370,12 +515,11 @@ function normalizeExtraction(
 
   if (
     !parsed ||
-    typeof parsed !== 'object' ||
-    Array.isArray(parsed)
+    typeof parsed !== 'object'
   ) {
 
     throw new Error(
-      'Gemini extraction result is not a valid JSON object'
+      'AI returned an invalid extraction object'
     );
   }
 
@@ -391,66 +535,40 @@ function normalizeExtraction(
         : null;
   }
 
-
-  // -------------------------------------------------------------------------
-  // NORMALIZE LINE ITEMS
-  // -------------------------------------------------------------------------
-
   const lineItems =
-    Array.isArray(parsed.line_items)
-      ? parsed.line_items.map(item => ({
+    Array.isArray(
+      parsed.line_items
+    )
+      ? parsed.line_items.map(
+          item => ({
 
-          description:
-            item?.description ??
-            null,
+            description:
+              item?.description ??
+              null,
 
-          quantity:
-            normalizeNumber(
-              item?.quantity
-            ),
+            quantity:
+              normalizeNumber(
+                item?.quantity
+              ),
 
-          unit_price:
-            normalizeNumber(
-              item?.unit_price
-            ),
+            unit_price:
+              normalizeNumber(
+                item?.unit_price
+              ),
 
-          vat:
-            normalizeNumber(
-              item?.vat
-            ),
+            vat:
+              normalizeNumber(
+                item?.vat
+              ),
 
-          total:
-            normalizeNumber(
-              item?.total
-            )
+            total:
+              normalizeNumber(
+                item?.total
+              )
 
-        }))
+          })
+        )
       : [];
-
-
-  // -------------------------------------------------------------------------
-  // NORMALIZE NUMERIC FIELDS
-  // -------------------------------------------------------------------------
-
-  fields.subtotal =
-    normalizeNumber(
-      fields.subtotal
-    );
-
-  fields.vat_amount =
-    normalizeNumber(
-      fields.vat_amount
-    );
-
-  fields.total_amount =
-    normalizeNumber(
-      fields.total_amount
-    );
-
-
-  // -------------------------------------------------------------------------
-  // NORMALIZE CONFIDENCE
-  // -------------------------------------------------------------------------
 
   const confidence = {};
 
@@ -472,11 +590,6 @@ function normalizeExtraction(
           )
         : null;
   }
-
-
-  // -------------------------------------------------------------------------
-  // RETURN NORMALIZED EXTRACTION
-  // -------------------------------------------------------------------------
 
   return {
 
@@ -502,6 +615,7 @@ function normalizeNumber(value) {
     value === undefined ||
     value === ''
   ) {
+
     return null;
   }
 
@@ -514,29 +628,16 @@ function normalizeNumber(value) {
       : null;
   }
 
-  if (
-    typeof value === 'string'
-  ) {
-
-    const cleaned =
-      value
+  const parsed =
+    Number(
+      String(value)
         .replace(/,/g, '')
-        .replace(/[^\d.-]/g, '')
-        .trim();
+        .trim()
+    );
 
-    if (!cleaned) {
-      return null;
-    }
-
-    const parsed =
-      Number(cleaned);
-
-    return Number.isFinite(parsed)
-      ? parsed
-      : null;
-  }
-
-  return null;
+  return Number.isFinite(parsed)
+    ? parsed
+    : null;
 }
 
 
@@ -550,68 +651,126 @@ async function extractInvoice(
 ) {
 
   console.log(
-    '[aiExtraction] Starting production Gemini extraction'
+    `[aiExtraction] Provider selected: ${PROVIDER}`
   );
 
-  console.log(
-    `[aiExtraction] Model: ${GEMINI_MODEL}`
-  );
 
   // -------------------------------------------------------------------------
-  // GEMINI ONLY
+  // GEMINI
   // -------------------------------------------------------------------------
 
-  if (!GEMINI_API_KEY) {
+  if (
+    PROVIDER === 'gemini'
+  ) {
 
-    throw new Error(
-      'Gemini extraction unavailable: GEMINI_API_KEY is missing'
-    );
-  }
+    if (!GEMINI_API_KEY) {
 
-  try {
-
-    const extraction =
-      await extractWithGemini(
-        filePath,
-        mimeType
+      throw new Error(
+        'AI_PROVIDER=gemini but GEMINI_API_KEY is missing'
       );
+    }
 
     console.log(
-      '[aiExtraction] Gemini extraction successful'
+      `[aiExtraction] Using Gemini ${GEMINI_MODEL}`
     );
 
-    return {
+    try {
 
-      ...extraction,
+      const extraction =
+        await extractWithGemini(
+          filePath,
+          mimeType
+        );
 
-      provider:
-        'gemini',
+      console.log(
+        '[aiExtraction] Gemini extraction successful'
+      );
 
-      model:
-        GEMINI_MODEL
-    };
+      return {
 
-  } catch (error) {
+        ...extraction,
 
-    console.error(
-      '[aiExtraction] Gemini extraction failed:',
-      error.message
-    );
+        provider:
+          'gemini'
+      };
 
-    // IMPORTANT:
-    //
-    // There is intentionally NO fallback here.
-    //
-    // We do NOT generate fake invoice data.
-    // We do NOT call Claude.
-    // We do NOT call a mock provider.
-    //
-    // The real Gemini error is propagated to the invoice
-    // processing route so the invoice can be marked as failed
-    // rather than populated with fake information.
+    } catch (error) {
 
-    throw error;
+      console.error(
+        '[aiExtraction] Gemini extraction failed:',
+        error.message
+      );
+
+      // IMPORTANT:
+      // Never create fake invoice data.
+      // Never fall back to mock data.
+
+      throw error;
+    }
   }
+
+
+  // -------------------------------------------------------------------------
+  // CLAUDE
+  // -------------------------------------------------------------------------
+
+  if (
+    PROVIDER === 'claude'
+  ) {
+
+    if (!CLAUDE_API_KEY) {
+
+      throw new Error(
+        'AI_PROVIDER=claude but ANTHROPIC_API_KEY is missing'
+      );
+    }
+
+    console.log(
+      `[aiExtraction] Using Claude ${CLAUDE_MODEL}`
+    );
+
+    try {
+
+      const extraction =
+        await extractWithClaude(
+          filePath,
+          mimeType
+        );
+
+      console.log(
+        '[aiExtraction] Claude extraction successful'
+      );
+
+      return {
+
+        ...extraction,
+
+        provider:
+          'claude'
+      };
+
+    } catch (error) {
+
+      console.error(
+        '[aiExtraction] Claude extraction failed:',
+        error.message
+      );
+
+      // IMPORTANT:
+      // Never create fake invoice data.
+
+      throw error;
+    }
+  }
+
+
+  // -------------------------------------------------------------------------
+  // UNSUPPORTED PROVIDER
+  // -------------------------------------------------------------------------
+
+  throw new Error(
+    `Unsupported AI_PROVIDER: "${PROVIDER}". Use "gemini" or "claude".`
+  );
 }
 
 
@@ -626,5 +785,3 @@ module.exports = {
   REQUIRED_FIELDS
 
 };
-
-
