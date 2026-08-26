@@ -2,9 +2,9 @@
   "name": "invoiceflow",
   "version": "1.0.0",
   "description": "AI-powered invoice processing and management system",
-  "main": "backend/server.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node backend/server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
