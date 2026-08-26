@@ -1,3 +1,4 @@
+```javascript
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -10,207 +11,311 @@ const {
 
 const router = express.Router();
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+function normalizeEmail(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeText(value) {
+  return String(value || '').trim();
+}
+
+function createToken(user) {
+  return jwt.sign(
+    {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      company_name: user.company_name
+    },
+    JWT_SECRET,
+    {
+      expiresIn: '12h'
+    }
+  );
+}
+
+function publicUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    company_name: user.company_name,
+    created_at: user.created_at
+  };
+}
+
+// ===========================================================================
 // POST /api/auth/register
 //
-// FIRST-BOOT ACCOUNT CREATION
+// CREATE A NEW INVOICEFLOW USER
 //
-// Registration is only allowed when there are ZERO users in the database.
-// Once the first account is created, this endpoint is automatically disabled.
-// ---------------------------------------------------------------------------
+// The first registered user becomes an administrator.
+// All users registered afterwards become normal users.
+//
+// Every account is permanently saved in PostgreSQL.
+// ===========================================================================
 
-router.post('/register', async (req, res) => {
-  try {
-    const {
-      name,
-      email,
-      password,
-      company_name
-    } = req.body;
-
-    // ---------------------------------------------------------------
-    // Validate input
-    // ---------------------------------------------------------------
-
-    if (
-      !name ||
-      !email ||
-      !password ||
-      !company_name
-    ) {
-      return res.status(400).json({
-        error:
-          'Name, email, password and company name are required'
-      });
-    }
-
-    const normalizedName =
-      String(name).trim();
-
-    const normalizedEmail =
-      String(email)
-        .trim()
-        .toLowerCase();
-
-    const normalizedCompany =
-      String(company_name).trim();
-
-    if (
-      !normalizedName ||
-      !normalizedEmail ||
-      !normalizedCompany
-    ) {
-      return res.status(400).json({
-        error:
-          'All fields are required'
-      });
-    }
-
-    if (password.length < 8) {
-      return res.status(400).json({
-        error:
-          'Password must be at least 8 characters'
-      });
-    }
-
-    // ---------------------------------------------------------------
-    // Check whether a user already exists
-    // ---------------------------------------------------------------
-
-    const userCount = await db.get(
-      `
-        SELECT COUNT(*)::int AS count
-        FROM users
-      `
-    );
-
-    if (Number(userCount.count) > 0) {
-      return res.status(403).json({
-        error:
-          'Account registration is closed. An administrator account already exists.'
-      });
-    }
-
-    // ---------------------------------------------------------------
-    // Hash password
-    // ---------------------------------------------------------------
-
-    const passwordHash =
-      await bcrypt.hash(
+router.post(
+  '/register',
+  async (req, res) => {
+    try {
+      const {
+        name,
+        email,
         password,
-        12
+        company_name
+      } = req.body || {};
+
+      // ---------------------------------------------------------------------
+      // Validate required fields
+      // ---------------------------------------------------------------------
+
+      if (
+        !name ||
+        !email ||
+        !password ||
+        !company_name
+      ) {
+        return res.status(400).json({
+          error:
+            'Name, email, password and company name are required'
+        });
+      }
+
+      const normalizedName =
+        normalizeText(name);
+
+      const normalizedEmail =
+        normalizeEmail(email);
+
+      const normalizedCompany =
+        normalizeText(company_name);
+
+      const normalizedPassword =
+        String(password);
+
+      if (
+        !normalizedName ||
+        !normalizedEmail ||
+        !normalizedCompany ||
+        !normalizedPassword
+      ) {
+        return res.status(400).json({
+          error:
+            'All fields are required'
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // Basic validation
+      // ---------------------------------------------------------------------
+
+      if (normalizedName.length < 2) {
+        return res.status(400).json({
+          error:
+            'Please enter a valid name'
+        });
+      }
+
+      if (
+        !normalizedEmail.includes('@') ||
+        !normalizedEmail.includes('.')
+      ) {
+        return res.status(400).json({
+          error:
+            'Please enter a valid email address'
+        });
+      }
+
+      if (normalizedPassword.length < 8) {
+        return res.status(400).json({
+          error:
+            'Password must be at least 8 characters'
+        });
+      }
+
+      if (normalizedCompany.length < 2) {
+        return res.status(400).json({
+          error:
+            'Please enter a valid company name'
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // Check whether this email already exists
+      // ---------------------------------------------------------------------
+
+      const existingUser =
+        await db.get(
+          `
+            SELECT
+              id
+            FROM users
+            WHERE email = $1
+            LIMIT 1
+          `,
+          [
+            normalizedEmail
+          ]
+        );
+
+      if (existingUser) {
+        return res.status(409).json({
+          error:
+            'An account with that email already exists'
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // Determine role
+      //
+      // First account = admin
+      // Every account after that = user
+      // ---------------------------------------------------------------------
+
+      const userCount =
+        await db.get(
+          `
+            SELECT
+              COUNT(*)::int AS count
+            FROM users
+          `
+        );
+
+      const role =
+        Number(userCount?.count || 0) === 0
+          ? 'admin'
+          : 'user';
+
+      // ---------------------------------------------------------------------
+      // Hash password
+      // ---------------------------------------------------------------------
+
+      const passwordHash =
+        await bcrypt.hash(
+          normalizedPassword,
+          12
+        );
+
+      // ---------------------------------------------------------------------
+      // Create user
+      // ---------------------------------------------------------------------
+
+      const user =
+        await db.get(
+          `
+            INSERT INTO users (
+              name,
+              email,
+              password_hash,
+              role,
+              company_name
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5
+            )
+            RETURNING
+              id,
+              name,
+              email,
+              role,
+              company_name,
+              created_at
+          `,
+          [
+            normalizedName,
+            normalizedEmail,
+            passwordHash,
+            role,
+            normalizedCompany
+          ]
+        );
+
+      // ---------------------------------------------------------------------
+      // Automatically log the new user in
+      // ---------------------------------------------------------------------
+
+      const token =
+        createToken(user);
+
+      console.log(
+        `[auth/register] New ${role} account created: ${user.email}`
       );
 
-    // ---------------------------------------------------------------
-    // Create first administrator
-    // ---------------------------------------------------------------
+      return res.status(201).json({
+        message:
+          'Account created successfully',
 
-    const user = await db.get(
-      `
-        INSERT INTO users (
-          name,
-          email,
-          password_hash,
-          role,
-          company_name
-        )
-        VALUES (
-          $1,
-          $2,
-          $3,
-          $4,
-          $5
-        )
-        RETURNING
-          id,
-          name,
-          email,
-          role,
-          company_name,
-          created_at
-      `,
-      [
-        normalizedName,
-        normalizedEmail,
-        passwordHash,
-        'admin',
-        normalizedCompany
-      ]
-    );
+        token,
 
-    // ---------------------------------------------------------------
-    // Automatically log the new user in
-    // ---------------------------------------------------------------
+        user:
+          publicUser(user)
+      });
 
-    const token = jwt.sign(
-      {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        company_name: user.company_name
-      },
-      JWT_SECRET,
-      {
-        expiresIn: '12h'
+    } catch (error) {
+      console.error(
+        '[auth/register]',
+        error
+      );
+
+      // ---------------------------------------------------------------------
+      // PostgreSQL duplicate email protection
+      // ---------------------------------------------------------------------
+
+      if (
+        error &&
+        error.code === '23505'
+      ) {
+        return res.status(409).json({
+          error:
+            'An account with that email already exists'
+        });
       }
-    );
 
-    return res.status(201).json({
-      message:
-        'Administrator account created successfully',
-
-      token,
-
-      user
-    });
-
-  } catch (error) {
-    console.error(
-      '[auth/register]',
-      error
-    );
-
-    // Handle duplicate email gracefully
-    if (
-      error.code === '23505'
-    ) {
-      return res.status(409).json({
+      return res.status(500).json({
         error:
-          'An account with that email already exists'
+          'Unable to create account'
       });
     }
-
-    return res.status(500).json({
-      error:
-        'Unable to create account'
-    });
   }
-});
+);
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // GET /api/auth/setup-status
 //
-// Frontend uses this to determine whether the initial account needs to be
-// created.
-// ---------------------------------------------------------------------------
+// Kept for frontend compatibility.
+//
+// This no longer controls whether registration is allowed.
+// ===========================================================================
 
 router.get(
   '/setup-status',
   async (req, res) => {
     try {
-      const userCount = await db.get(
-        `
-          SELECT COUNT(*)::int AS count
-          FROM users
-        `
-      );
-
-      const hasUsers =
-        Number(userCount.count) > 0;
+      const userCount =
+        await db.get(
+          `
+            SELECT
+              COUNT(*)::int AS count
+            FROM users
+          `
+        );
 
       return res.json({
-        setup_required: !hasUsers
+        setup_required:
+          Number(userCount?.count || 0) === 0
       });
 
     } catch (error) {
@@ -227,9 +332,9 @@ router.get(
   }
 );
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // POST /api/auth/login
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 router.post(
   '/login',
@@ -238,7 +343,11 @@ router.post(
       const {
         email,
         password
-      } = req.body;
+      } = req.body || {};
+
+      // ---------------------------------------------------------------------
+      // Validate input
+      // ---------------------------------------------------------------------
 
       if (!email || !password) {
         return res.status(400).json({
@@ -248,21 +357,42 @@ router.post(
       }
 
       const normalizedEmail =
-        email.trim().toLowerCase();
+        normalizeEmail(email);
 
-      const user = await db.get(
-        `
-          SELECT *
-          FROM users
-          WHERE email = $1
-        `,
-        [normalizedEmail]
-      );
+      if (!normalizedEmail) {
+        return res.status(400).json({
+          error:
+            'Email is required'
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // Find user
+      // ---------------------------------------------------------------------
+
+      const user =
+        await db.get(
+          `
+            SELECT
+              *
+            FROM users
+            WHERE email = $1
+            LIMIT 1
+          `,
+          [
+            normalizedEmail
+          ]
+        );
+
+      // ---------------------------------------------------------------------
+      // Validate password
+      // ---------------------------------------------------------------------
 
       if (
         !user ||
+        !user.password_hash ||
         !(await bcrypt.compare(
-          password,
+          String(password),
           user.password_hash
         ))
       ) {
@@ -272,32 +402,18 @@ router.post(
         });
       }
 
-      const token = jwt.sign(
-        {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          company_name:
-            user.company_name
-        },
-        JWT_SECRET,
-        {
-          expiresIn: '12h'
-        }
-      );
+      // ---------------------------------------------------------------------
+      // Create session token
+      // ---------------------------------------------------------------------
+
+      const token =
+        createToken(user);
 
       return res.json({
         token,
 
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          company_name:
-            user.company_name
-        }
+        user:
+          publicUser(user)
       });
 
     } catch (error) {
@@ -314,29 +430,33 @@ router.post(
   }
 );
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // GET /api/auth/me
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 router.get(
   '/me',
   requireAuth,
   async (req, res) => {
     try {
-      const user = await db.get(
-        `
-          SELECT
-            id,
-            name,
-            email,
-            role,
-            company_name,
-            created_at
-          FROM users
-          WHERE id = $1
-        `,
-        [req.user.id]
-      );
+      const user =
+        await db.get(
+          `
+            SELECT
+              id,
+              name,
+              email,
+              role,
+              company_name,
+              created_at
+            FROM users
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [
+            req.user.id
+          ]
+        );
 
       if (!user) {
         return res.status(401).json({
@@ -363,4 +483,10 @@ router.get(
   }
 );
 
-module.exports = router;
+// ===========================================================================
+// EXPORT
+// ===========================================================================
+
+module.exports =
+  router;
+```
