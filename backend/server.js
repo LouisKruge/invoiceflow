@@ -6,10 +6,6 @@ const path = require('path');
 
 const db = require('./db');
 
-// ---------------------------------------------------------------------------
-// APP
-// ---------------------------------------------------------------------------
-
 const app = express();
 
 const PORT = process.env.PORT || 4000;
@@ -27,30 +23,37 @@ app.use(
 );
 
 // ---------------------------------------------------------------------------
-// DATABASE INITIALIZATION
+// START SERVER
 // ---------------------------------------------------------------------------
 
 async function startServer() {
   try {
+    // -----------------------------------------------------------------------
+    // DATABASE
+    // -----------------------------------------------------------------------
+
     console.log('[server] Initializing database...');
 
-    // Test PostgreSQL connection
     await db.testConnection();
 
-    // Create tables/indexes if they don't exist
     await db.initializeDatabase();
 
-    console.log('[server] Database initialization complete.');
+    console.log(
+      '[server] Database initialization complete.'
+    );
 
     // -----------------------------------------------------------------------
-    // FIRST BOOT / ADMIN SETUP
+    // FIRST BOOT
     // -----------------------------------------------------------------------
 
     const userCount = await db.get(
-      'SELECT COUNT(*)::int AS count FROM users'
+      `
+        SELECT COUNT(*)::int AS count
+        FROM users
+      `
     );
 
-    if (userCount.count === 0) {
+    if (Number(userCount.count) === 0) {
       console.log(
         'No users found — running first-boot administrator setup...'
       );
@@ -58,11 +61,14 @@ async function startServer() {
       try {
         const seed = require('./seed');
 
-        if (typeof seed.runSeed === 'function') {
+        if (
+          seed &&
+          typeof seed.runSeed === 'function'
+        ) {
           await seed.runSeed();
         } else {
           console.log(
-            '[server] seed.runSeed() is not available. Skipping seed.'
+            '[server] seed.runSeed() is not available.'
           );
         }
       } catch (seedError) {
@@ -71,9 +77,8 @@ async function startServer() {
           seedError
         );
 
-        // Do not crash the server because of optional seed data.
         console.log(
-          '[server] Server will continue without seed data.'
+          '[server] Continuing without seed data.'
         );
       }
     } else {
@@ -137,54 +142,66 @@ async function startServer() {
 
     app.get(
       '/api/health',
-      (req, res) => {
-        const geminiConfigured =
-          Boolean(
-            process.env.GEMINI_API_KEY
-          );
+      async (req, res) => {
+        try {
+          const geminiConfigured =
+            Boolean(
+              process.env.GEMINI_API_KEY
+            );
 
-        const claudeConfigured =
-          Boolean(
-            process.env.ANTHROPIC_API_KEY
-          );
+          const claudeConfigured =
+            Boolean(
+              process.env.ANTHROPIC_API_KEY
+            );
 
-        let provider =
-          process.env.AI_PROVIDER ||
-          null;
+          let provider =
+            process.env.AI_PROVIDER ||
+            null;
 
-        if (!provider) {
-          if (geminiConfigured) {
-            provider = 'gemini';
-          } else if (claudeConfigured) {
-            provider = 'claude';
-          } else {
-            provider = 'mock';
+          if (!provider) {
+            if (geminiConfigured) {
+              provider = 'gemini';
+            } else if (claudeConfigured) {
+              provider = 'claude';
+            } else {
+              provider = 'mock';
+            }
           }
+
+          res.json({
+            status: 'ok',
+
+            database:
+              'postgresql',
+
+            ai_provider:
+              provider,
+
+            ai_configured:
+              geminiConfigured ||
+              claudeConfigured,
+
+            gemini_configured:
+              geminiConfigured,
+
+            claude_configured:
+              claudeConfigured,
+
+            gemini_model:
+              process.env.GEMINI_MODEL ||
+              'gemini-2.5-flash'
+          });
+
+        } catch (error) {
+          console.error(
+            '[health]',
+            error
+          );
+
+          res.status(500).json({
+            status: 'error'
+          });
         }
-
-        res.json({
-          status: 'ok',
-
-          database:
-            'postgresql',
-
-          ai_provider:
-            provider,
-
-          ai_configured:
-            geminiConfigured ||
-            claudeConfigured,
-
-          gemini_configured:
-            geminiConfigured,
-
-          claude_configured:
-            claudeConfigured,
-
-          gemini_model:
-            process.env.GEMINI_MODEL ||
-            'gemini-2.5-flash'
-        });
       }
     );
 
@@ -207,10 +224,12 @@ async function startServer() {
 
     // -----------------------------------------------------------------------
     // FRONTEND FALLBACK
+    //
+    // Express 5 DOES NOT support app.get('*', ...).
+    // Use a regular middleware instead.
     // -----------------------------------------------------------------------
 
-    app.get(
-      '*',
+    app.use(
       (req, res, next) => {
         if (
           req.path.startsWith('/api/')
@@ -222,8 +241,32 @@ async function startServer() {
           path.join(
             FRONTEND_DIR,
             'index.html'
-          )
+          ),
+          (error) => {
+            if (error) {
+              next(error);
+            }
+          }
         );
+      }
+    );
+
+    // -----------------------------------------------------------------------
+    // 404 API HANDLER
+    // -----------------------------------------------------------------------
+
+    app.use(
+      (req, res, next) => {
+        if (
+          req.path.startsWith('/api/')
+        ) {
+          return res.status(404).json({
+            error:
+              'API endpoint not found'
+          });
+        }
+
+        next();
       }
     );
 
@@ -238,6 +281,10 @@ async function startServer() {
           err
         );
 
+        if (res.headersSent) {
+          return next(err);
+        }
+
         res.status(
           err.status || 500
         ).json({
@@ -249,7 +296,7 @@ async function startServer() {
     );
 
     // -----------------------------------------------------------------------
-    // START SERVER
+    // START LISTENING
     // -----------------------------------------------------------------------
 
     app.listen(
@@ -344,9 +391,5 @@ async function startServer() {
     process.exit(1);
   }
 }
-
-// ---------------------------------------------------------------------------
-// START
-// ---------------------------------------------------------------------------
 
 startServer();
