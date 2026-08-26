@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  invoiceflow:
+    build: .
+    container_name: invoiceflow
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - JWT_SECRET=${JWT_SECRET:-change-me-to-a-long-random-string}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
+      - AI_PROVIDER=${AI_PROVIDER:-mock}
+      - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.85}
+    volumes:
+      - invoiceflow-data:/app/backend/data
+    restart: unless-stopped
+
+volumes:
+  invoiceflow-data:
