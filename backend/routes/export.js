@@ -21,7 +21,6 @@ async function fetchInvoiceRowsForExport(
   dateFrom,
   dateTo
 ) {
-
   let sql = `
     SELECT
       i.invoice_number,
@@ -39,7 +38,6 @@ async function fetchInvoiceRowsForExport(
       u.name AS processed_by_name,
       i.processed_at,
       i.id
-
     FROM invoices i
 
     LEFT JOIN users u
@@ -51,44 +49,35 @@ async function fetchInvoiceRowsForExport(
   const params = [];
 
   if (
-    ids &&
+    Array.isArray(ids) &&
     ids.length
   ) {
-
     const placeholders =
       ids.map(
         (_, index) =>
           `$${params.length + index + 1}`
-      ).join(',');
+      ).join(', ');
 
     sql += `
       AND i.id IN (${placeholders})
     `;
 
-    params.push(
-      ...ids
-    );
+    params.push(...ids);
   }
 
   if (dateFrom) {
-
-    params.push(
-      dateFrom
-    );
+    params.push(dateFrom);
 
     sql += `
-      AND i.invoice_date::date >= $${params.length}::date
+      AND i.invoice_date::date >= $${params.length}
     `;
   }
 
   if (dateTo) {
-
-    params.push(
-      dateTo
-    );
+    params.push(dateTo);
 
     sql += `
-      AND i.invoice_date::date <= $${params.length}::date
+      AND i.invoice_date::date <= $${params.length}
     `;
   }
 
@@ -109,7 +98,6 @@ async function fetchInvoiceRowsForExport(
 async function fetchLineItems(
   invoiceIds
 ) {
-
   if (!invoiceIds.length) {
     return [];
   }
@@ -120,7 +108,7 @@ async function fetchLineItems(
         (_, index) =>
           `$${index + 1}`
       )
-      .join(',');
+      .join(', ');
 
   return db.all(
     `
@@ -138,9 +126,7 @@ async function fetchLineItems(
       JOIN invoices i
         ON i.id = li.invoice_id
 
-      WHERE li.invoice_id IN (
-        ${placeholders}
-      )
+      WHERE li.invoice_id IN (${placeholders})
     `,
     invoiceIds
   );
@@ -155,18 +141,15 @@ async function respondWithWorkbook(
   invoices,
   filenamePrefix
 ) {
-
   const ids =
     invoices.map(
       invoice => invoice.id
     );
 
   const lineItems =
-    await fetchLineItems(
-      ids
-    );
+    await fetchLineItems(ids);
 
-  const workbook =
+  const wb =
     await buildInvoiceWorkbook(
       invoices,
       lineItems
@@ -184,9 +167,7 @@ async function respondWithWorkbook(
       .slice(0, 10)}.xlsx"`
   );
 
-  await workbook.xlsx.write(
-    res
-  );
+  await wb.xlsx.write(res);
 
   res.end();
 }
@@ -199,9 +180,7 @@ router.get(
   '/all',
   requireAuth,
   async (req, res) => {
-
     try {
-
       const invoices =
         await fetchInvoiceRowsForExport(
           null,
@@ -216,17 +195,15 @@ router.get(
       );
 
     } catch (error) {
-
       console.error(
         '[export/all]',
         error
       );
 
       if (!res.headersSent) {
-
-        return res.status(500).json({
+        res.status(500).json({
           error:
-            'Unable to export invoices.'
+            'Unable to export invoices'
         });
       }
     }
@@ -241,18 +218,14 @@ router.post(
   '/selected',
   requireAuth,
   async (req, res) => {
-
     try {
-
-      const {
-        ids
-      } = req.body;
+      const { ids } =
+        req.body;
 
       if (
         !Array.isArray(ids) ||
         !ids.length
       ) {
-
         return res.status(400).json({
           error:
             'No invoices selected'
@@ -273,17 +246,15 @@ router.post(
       );
 
     } catch (error) {
-
       console.error(
         '[export/selected]',
         error
       );
 
       if (!res.headersSent) {
-
-        return res.status(500).json({
+        res.status(500).json({
           error:
-            'Unable to export selected invoices.'
+            'Unable to export selected invoices'
         });
       }
     }
@@ -298,16 +269,13 @@ router.get(
   '/range',
   requireAuth,
   async (req, res) => {
-
     try {
-
       const {
         from,
         to
       } = req.query;
 
       if (!from || !to) {
-
         return res.status(400).json({
           error:
             'from and to query params are required (YYYY-MM-DD)'
@@ -328,17 +296,15 @@ router.get(
       );
 
     } catch (error) {
-
       console.error(
         '[export/range]',
         error
       );
 
       if (!res.headersSent) {
-
-        return res.status(500).json({
+        res.status(500).json({
           error:
-            'Unable to export invoice range.'
+            'Unable to export invoice range'
         });
       }
     }
