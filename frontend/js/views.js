@@ -1,15 +1,13 @@
-// views.js
+// views.js — pure(ish) render functions.
+// Nothing here calls the API directly;
+// app.js wires up events after mounting the returned HTML.
 //
-// Pure render functions.
-// API calls and application logic live in app.js/api.js.
-//
-// Production InvoiceFlow frontend.
-// AI extraction is Gemini-only on the backend.
-// No mock/demo extraction references.
-
-// ---------------------------------------------------------------------------
-// ICONS
-// ---------------------------------------------------------------------------
+// InvoiceFlow production UI:
+// - Gemini is the production AI extraction provider.
+// - No mock/demo extraction references.
+// - No Claude references.
+// - Session expiry is handled by api.js/app.js.
+// - UI is designed for real company invoice processing.
 
 const Icons = {
   logo: '<svg viewBox="0 0 24 24" fill="none"><path d="M6 3h9l3 3v15H6V3z" stroke="currentColor" stroke-width="1.6"/><path d="M9 9h6M9 13h6M9 17h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
@@ -45,9 +43,10 @@ const Icons = {
   fileEmpty: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 3h8l4 4v14H7V3z"/></svg>'
 };
 
-// ---------------------------------------------------------------------------
-// HELPERS
-// ---------------------------------------------------------------------------
+
+// ============================================================
+// FORMATTING HELPERS
+// ============================================================
 
 function fmtMoney(n, currency = 'ZAR') {
   if (n === null || n === undefined || n === '') {
@@ -59,111 +58,142 @@ function fmtMoney(n, currency = 'ZAR') {
       ? 'R'
       : (currency || '');
 
-  const numeric = Number(n);
+  const numericValue =
+    Number(n);
 
-  if (!Number.isFinite(numeric)) {
+  if (!Number.isFinite(numericValue)) {
     return '—';
   }
 
-  return `${symbol} ${numeric.toLocaleString('en-ZA', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  })}`;
+  return `${symbol} ${numericValue.toLocaleString(
+    'en-ZA',
+    {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }
+  )}`;
 }
 
+
 function fmtDate(d) {
-  if (!d) return '—';
+  if (!d) {
+    return '—';
+  }
 
-  const value = String(d);
+  const value =
+    String(d);
 
-  const date = new Date(
-    value.includes('T') || value.includes(' ')
-      ? value
-      : value + 'T00:00:00'
-  );
+  const date =
+    new Date(
+      value.includes('T') ||
+      value.includes(' ')
+        ? value
+        : value + 'T00:00:00'
+    );
 
-  if (Number.isNaN(date.getTime())) {
+  if (isNaN(date)) {
     return value;
   }
 
-  return date.toLocaleDateString('en-ZA', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric'
-  });
+  return date.toLocaleDateString(
+    'en-ZA',
+    {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric'
+    }
+  );
 }
 
-function fmtDateTime(d) {
-  if (!d) return '—';
 
-  const value = String(d);
+function fmtDateTime(d) {
+  if (!d) {
+    return '—';
+  }
+
+  const value =
+    String(d);
 
   let date;
 
-  if (
-    value.includes('T') &&
-    (value.endsWith('Z') || /[+-]\d\d:\d\d$/.test(value))
-  ) {
-    date = new Date(value);
-  } else {
-    date = new Date(
-      value.replace(' ', 'T') + 'Z'
-    );
-  }
-
-  if (Number.isNaN(date.getTime())) {
+  try {
+    date =
+      new Date(
+        value.includes('T')
+          ? value
+          : value.replace(' ', 'T') + 'Z'
+      );
+  } catch {
     return value;
   }
 
-  return date.toLocaleString('en-ZA', {
-    day: '2-digit',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
+  if (isNaN(date)) {
+    return value;
+  }
+
+  return date.toLocaleString(
+    'en-ZA',
+    {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit'
+    }
+  );
 }
 
+
 function timeAgo(d) {
-  if (!d) return '—';
-
-  const value = String(d);
-
-  const then = new Date(
-    value.includes('T')
-      ? value
-      : value.replace(' ', 'T') + 'Z'
-  ).getTime();
-
-  if (Number.isNaN(then)) {
+  if (!d) {
     return '—';
   }
 
-  const diff = Math.max(
-    0,
-    Date.now() - then
-  );
+  const value =
+    String(d);
 
-  const mins = Math.floor(
-    diff / 60000
-  );
+  const then =
+    new Date(
+      value.includes('T')
+        ? value
+        : value.replace(' ', 'T') + 'Z'
+    ).getTime();
 
-  if (mins < 1) return 'Just now';
+  if (!Number.isFinite(then)) {
+    return '—';
+  }
+
+  const diff =
+    Math.max(
+      0,
+      Date.now() - then
+    );
+
+  const mins =
+    Math.floor(
+      diff / 60000
+    );
+
+  if (mins < 1) {
+    return 'Just now';
+  }
 
   if (mins < 60) {
     return `${mins}m ago`;
   }
 
-  const hrs = Math.floor(
-    mins / 60
-  );
+  const hrs =
+    Math.floor(
+      mins / 60
+    );
 
   if (hrs < 24) {
     return `${hrs}h ago`;
   }
 
-  const days = Math.floor(
-    hrs / 24
-  );
+  const days =
+    Math.floor(
+      hrs / 24
+    );
 
   if (days === 1) {
     return 'Yesterday';
@@ -172,17 +202,21 @@ function timeAgo(d) {
   return `${days}d ago`;
 }
 
+
 function initials(name) {
-  if (!name) return '?';
+  if (!name) {
+    return '?';
+  }
 
   return String(name)
-    .trim()
-    .split(/\s+/)
+    .split(' ')
     .map(p => p[0])
+    .filter(Boolean)
     .slice(0, 2)
     .join('')
     .toUpperCase();
 }
+
 
 function statusLabel(s) {
   return ({
@@ -195,14 +229,16 @@ function statusLabel(s) {
   })[s] || s || 'Unknown';
 }
 
+
 function statusBadge(status) {
   return `
-    <span class="badge badge-${esc(status || 'unknown')}">
+    <span class="badge badge-${esc(status || 'exception')}">
       <span class="badge-dot"></span>
       ${esc(statusLabel(status))}
     </span>
   `;
 }
+
 
 function confidenceTag(score) {
   if (
@@ -217,7 +253,8 @@ function confidenceTag(score) {
     `;
   }
 
-  const numeric = Number(score);
+  const numeric =
+    Number(score);
 
   if (!Number.isFinite(numeric)) {
     return `
@@ -230,7 +267,10 @@ function confidenceTag(score) {
   const safeScore =
     Math.max(
       0,
-      Math.min(1, numeric)
+      Math.min(
+        1,
+        numeric
+      )
     );
 
   const pct =
@@ -252,6 +292,7 @@ function confidenceTag(score) {
   `;
 }
 
+
 function esc(s) {
   if (
     s === null ||
@@ -268,13 +309,14 @@ function esc(s) {
       '>': '&gt;',
       '"': '&quot;',
       "'": '&#39;'
-    })[c]
+    }[c])
   );
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // LOGIN
-// ---------------------------------------------------------------------------
+// ============================================================
 
 function renderLogin(error) {
   return `
@@ -285,6 +327,7 @@ function renderLogin(error) {
           <div class="mark">
             ${Icons.logo}
           </div>
+
           <div class="word">
             InvoiceFlow
           </div>
@@ -300,8 +343,7 @@ function renderLogin(error) {
           error
             ? `
               <div class="auth-error">
-                ${Icons.alertTriangle}
-                <span>${esc(error)}</span>
+                ${esc(error)}
               </div>
             `
             : ''
@@ -342,27 +384,15 @@ function renderLogin(error) {
 
         </form>
 
-        <div
-          style="
-            margin-top:20px;
-            padding-top:16px;
-            border-top:1px solid var(--surface-200);
-            text-align:center;
-            color:var(--ink-400);
-            font-size:12px;
-          "
-        >
-          Secure access to your company's invoice processing system.
-        </div>
-
       </div>
     </div>
   `;
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // APPLICATION SHELL
-// ---------------------------------------------------------------------------
+// ============================================================
 
 function navItem(
   route,
@@ -379,6 +409,7 @@ function navItem(
     >
       ${icon}
       <span>${esc(label)}</span>
+
       ${
         count
           ? `<span class="count">${esc(count)}</span>`
@@ -387,6 +418,7 @@ function navItem(
     </button>
   `;
 }
+
 
 function renderShell(
   route,
@@ -445,26 +477,30 @@ function renderShell(
 
         <nav class="sidebar-nav">
 
-          ${items.map(
-            ([r, icon, label, count]) =>
-              navItem(
-                r,
-                icon,
-                label,
-                route === r,
-                count,
-                r === '#/exceptions'
-              )
-          ).join('')}
+          ${
+            items.map(
+              ([r, icon, label, count]) =>
+                navItem(
+                  r,
+                  icon,
+                  label,
+                  route === r,
+                  count,
+                  r === '#/exceptions'
+                )
+            ).join('')
+          }
 
           <div class="nav-divider"></div>
 
-          ${navItem(
-            '#/settings',
-            Icons.settings,
-            'Settings',
-            route === '#/settings'
-          )}
+          ${
+            navItem(
+              '#/settings',
+              Icons.settings,
+              'Settings',
+              route === '#/settings'
+            )
+          }
 
         </nav>
 
@@ -478,7 +514,7 @@ function renderShell(
 
             <div>
               <div class="name">
-                ${esc(user?.name || 'User')}
+                ${esc(user?.name || '')}
               </div>
 
               <div class="role">
@@ -509,6 +545,7 @@ function renderShell(
         </div>
 
       </aside>
+
 
       <div class="main">
 
@@ -552,13 +589,14 @@ function renderShell(
   `;
 }
 
-// ---------------------------------------------------------------------------
-// DASHBOARD
-// ---------------------------------------------------------------------------
 
-function renderDashboard(d) {
+// ============================================================
+// DASHBOARD
+// ============================================================
+
+function renderDashboard(d = {}) {
   const rows =
-    (d?.recent_invoices || [])
+    (d.recent_invoices || [])
       .map(inv => `
         <tr data-id="${esc(inv.id)}">
 
@@ -621,87 +659,87 @@ function renderDashboard(d) {
 
     </div>
 
+
     <div class="stat-grid">
 
       <div class="card stat-card">
         <div class="label">
           Today's Invoices
         </div>
+
         <div class="value">
-          ${d?.today_invoices ?? 0}
+          ${d.today_invoices ?? 0}
         </div>
       </div>
+
 
       <div class="card stat-card">
         <div class="label">
           Processed
         </div>
+
         <div class="value">
-          ${d?.processed ?? 0}
+          ${d.processed ?? 0}
         </div>
       </div>
+
 
       <div class="card stat-card">
         <div class="label">
           Awaiting Review
         </div>
+
         <div class="value warn">
-          ${d?.awaiting_review ?? 0}
+          ${d.awaiting_review ?? 0}
         </div>
       </div>
+
 
       <div class="card stat-card">
         <div class="label">
           Exceptions
         </div>
+
         <div class="value bad">
-          ${d?.exceptions ?? 0}
+          ${d.exceptions ?? 0}
         </div>
       </div>
+
 
       <div class="card stat-card">
         <div class="label">
           Total Value
         </div>
+
         <div class="value accent">
           ${fmtMoney(
-            d?.total_invoice_value,
-            'ZAR'
+            d.total_invoice_value,
+            d.currency
           )}
         </div>
       </div>
 
     </div>
 
+
     <div class="card">
 
       <div
         class="card-pad"
-        style="
-          padding-bottom:0;
-          display:flex;
-          justify-content:space-between;
-          align-items:center;
-        "
+        style="padding-bottom:0;display:flex;justify-content:space-between;align-items:center;"
       >
 
         <h3
-          style="
-            margin:0 0 12px;
-            font-size:14px;
-          "
+          style="margin:0 0 12px;font-size:14px;"
         >
           Recent Invoices
         </h3>
 
         ${
-          d?.avg_processing_seconds
+          d.avg_processing_seconds
             ? `
               <span
-                style="
-                  font-size:12px;
-                  color:var(--ink-500);
-                "
+                style="font-size:12px;color:var(--ink-500);"
               >
                 Avg processing:
                 <strong class="mono">
@@ -713,6 +751,7 @@ function renderDashboard(d) {
         }
 
       </div>
+
 
       <div class="table-wrap">
 
@@ -765,23 +804,29 @@ function renderDashboard(d) {
   `;
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // CAPTURE
-// ---------------------------------------------------------------------------
+// ============================================================
 
 function renderCapture() {
   return `
     <div class="page-head">
 
       <div>
-        <h1>Capture Invoice</h1>
+
+        <h1>
+          Capture Invoice
+        </h1>
 
         <p class="sub">
           Photograph or upload a physical invoice to begin.
         </p>
+
       </div>
 
     </div>
+
 
     <div class="capture-hero">
 
@@ -794,8 +839,8 @@ function renderCapture() {
       </h2>
 
       <p>
-        Take a clear photo of the invoice, or upload an existing image or PDF.
-        Gemini AI extraction starts immediately.
+        Take a clear photo of the invoice, or upload an existing
+        image or PDF. Gemini AI extraction starts immediately.
       </p>
 
       <div class="capture-actions">
@@ -824,25 +869,43 @@ function renderCapture() {
   `;
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // PROCESSING
-// ---------------------------------------------------------------------------
+// ============================================================
 
 function renderProcessing(
   stageIndex,
   stages,
   warningMode
 ) {
+  const safeStages =
+    Array.isArray(stages) &&
+    stages.length
+      ? stages
+      : [
+          'Uploading invoice',
+          'Reading invoice',
+          'Extracting data',
+          'Validating invoice'
+        ];
+
+  const safeIndex =
+    Math.max(
+      0,
+      Math.min(
+        safeStages.length - 1,
+        Number(stageIndex) || 0
+      )
+    );
+
   return `
     <div class="processing-screen">
 
       <div class="processing-spinner"></div>
 
       <div class="processing-stage">
-        ${esc(
-          stages?.[stageIndex] ||
-          'Processing invoice…'
-        )}
+        ${esc(safeStages[safeIndex])}
       </div>
 
       <div class="processing-sub">
@@ -850,34 +913,33 @@ function renderProcessing(
         ${
           warningMode
             ? 'This is taking a little longer than usual…'
-            : 'AI extraction usually completes quickly.'
+            : 'Gemini AI is processing the invoice.'
         }
 
       </div>
 
+
       <div class="processing-steps">
 
-        ${(stages || [])
-          .map(
-            (s, i) => `
-              <div
-                class="
-                  processing-step
-                  ${
-                    i < stageIndex
-                      ? 'done'
-                      : i === stageIndex
-                        ? 'active'
-                        : ''
-                  }
-                "
-              >
-                <span class="dot"></span>
-                ${esc(s)}
-              </div>
-            `
-          )
-          .join('')}
+        ${
+          safeStages
+            .map(
+              (stage, i) => `
+                <div
+                  class="processing-step
+                    ${i < safeIndex ? 'done' : ''}
+                    ${i === safeIndex ? 'active' : ''}"
+                >
+
+                  <span class="dot"></span>
+
+                  ${esc(stage)}
+
+                </div>
+              `
+            )
+            .join('')
+        }
 
       </div>
 
@@ -885,9 +947,10 @@ function renderProcessing(
   `;
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // REVIEW
-// ---------------------------------------------------------------------------
+// ============================================================
 
 const FIELD_DEFS = [
   [
@@ -964,6 +1027,7 @@ const FIELD_DEFS = [
   ]
 ];
 
+
 function reviewFieldHtml(
   invoice,
   key,
@@ -1003,11 +1067,9 @@ function reviewFieldHtml(
 
   return `
     <div
-      class="
-        review-field
+      class="review-field
         ${low ? 'low-confidence' : ''}
-        ${monoClass}
-      "
+        ${monoClass}"
       data-field="${esc(key)}"
     >
 
@@ -1037,6 +1099,7 @@ function reviewFieldHtml(
   `;
 }
 
+
 function validationRowIcon(vr) {
   if (vr?.passed) {
     return Icons.check;
@@ -1044,6 +1107,7 @@ function validationRowIcon(vr) {
 
   return Icons.alertTriangle;
 }
+
 
 function validationRowClass(vr) {
   if (vr?.passed) {
@@ -1054,6 +1118,7 @@ function validationRowClass(vr) {
     ? 'fail'
     : 'warn';
 }
+
 
 function renderReview(
   invoice,
@@ -1075,79 +1140,71 @@ function renderReview(
 
   const lineItemsRows =
     (invoice.line_items || [])
-      .map(
-        li => `
-          <tr>
+      .map(li => `
+        <tr>
 
-            <td>
-              ${esc(
-                li.description || '—'
-              )}
-            </td>
+          <td>
+            ${esc(
+              li.description || '—'
+            )}
+          </td>
 
-            <td class="num-cell">
-              ${li.quantity ?? '—'}
-            </td>
+          <td class="num-cell">
+            ${li.quantity ?? '—'}
+          </td>
 
-            <td class="num-cell">
-              ${
-                li.unit_price != null
-                  ? fmtMoney(
-                      li.unit_price,
-                      invoice.currency
-                    )
-                  : '—'
-              }
-            </td>
+          <td class="num-cell">
+            ${
+              li.unit_price != null
+                ? fmtMoney(
+                    li.unit_price,
+                    invoice.currency
+                  )
+                : '—'
+            }
+          </td>
 
-            <td class="num-cell">
-              ${
-                li.total != null
-                  ? fmtMoney(
-                      li.total,
-                      invoice.currency
-                    )
-                  : '—'
-              }
-            </td>
+          <td class="num-cell">
+            ${
+              li.total != null
+                ? fmtMoney(
+                    li.total,
+                    invoice.currency
+                  )
+                : '—'
+            }
+          </td>
 
-          </tr>
-        `
-      )
+        </tr>
+      `)
       .join('');
 
   const auditRows =
     (invoice.processing_logs || [])
-      .map(
-        l => `
-          <div class="audit-entry">
+      .map(l => `
+        <div class="audit-entry">
 
-            <span class="t">
-              ${fmtDateTime(
-                l.created_at
-              )}
-            </span>
+          <span class="t">
+            ${fmtDateTime(l.created_at)}
+          </span>
 
-            <span class="d">
-              ${logStageLabel(l)}
+          <span class="d">
+            ${logStageLabel(l)}
 
-              ${
-                l.actor_name
-                  ? `
-                    <span class="actor">
-                      — ${esc(
-                        l.actor_name
-                      )}
-                    </span>
-                  `
-                  : ''
-              }
+            ${
+              l.actor_name
+                ? `
+                  <span class="actor">
+                    — ${esc(l.actor_name)}
+                  </span>
+                `
+                : ''
+            }
 
-            </span>
+          </span>
 
-          </div>
-        `
-      )
+        </div>
+      `)
       .join('');
 
   return `
@@ -1172,11 +1229,7 @@ function renderReview(
 
           ${
             invoice.invoice_number
-              ? `
-                · ${esc(
-                  invoice.invoice_number
-                )}
-              `
+              ? ` · ${esc(invoice.invoice_number)}`
               : ''
           }
 
@@ -1185,44 +1238,49 @@ function renderReview(
       </div>
 
       <div class="page-actions">
-        ${statusBadge(
-          invoice.status
-        )}
+        ${statusBadge(invoice.status)}
       </div>
 
     </div>
+
 
     ${
       opts.warning
         ? `
           <div class="review-warning-banner">
+
             ${Icons.alertTriangle}
 
             <div>
               ${esc(opts.warning)}
             </div>
+
           </div>
         `
         : ''
     }
 
+
     ${
-      hasErrorValidation &&
-      !isFinal
+      hasErrorValidation && !isFinal
         ? `
           <div class="review-warning-banner">
+
             ${Icons.alertTriangle}
 
             <div>
               This invoice has validation issues
               that need attention before approval.
             </div>
+
           </div>
         `
         : ''
     }
 
+
     <div class="review-layout">
+
 
       <div class="review-doc">
 
@@ -1233,22 +1291,19 @@ function renderReview(
           Loading document…
         </div>
 
+
         ${
           !isFinal
             ? `
               <div
-                style="
-                  margin-top:12px;
-                  display:flex;
-                  gap:8px;
-                "
+                style="margin-top:12px;display:flex;gap:8px;"
               >
 
                 <button
                   class="btn btn-ghost btn-sm"
                   id="btn-retake"
-                  style="flex:1"
                   type="button"
+                  style="flex:1"
                 >
                   Retake Photo
                 </button>
@@ -1260,54 +1315,48 @@ function renderReview(
 
       </div>
 
+
       <div>
+
 
         <div class="card card-pad">
 
           <div class="review-field-grid">
 
-            ${FIELD_DEFS
-              .map(
-                ([
-                  k,
-                  l,
-                  t,
-                  span
-                ]) => `
-                  <div
-                    class="${
-                      span === 2
-                        ? 'span-2'
-                        : ''
-                    }"
-                  >
-                    ${reviewFieldHtml(
-                      invoice,
-                      k,
-                      l,
-                      t,
-                      span
-                    )}
-                  </div>
-                `
-              )
-              .join('')}
+            ${
+              FIELD_DEFS
+                .map(
+                  ([
+                    key,
+                    label,
+                    type,
+                    span
+                  ]) => `
+                    <div
+                      class="${span === 2 ? 'span-2' : ''}"
+                    >
+                      ${reviewFieldHtml(
+                        invoice,
+                        key,
+                        label,
+                        type,
+                        span
+                      )}
+                    </div>
+                  `
+                )
+                .join('')
+            }
 
           </div>
 
         </div>
 
+
         ${
-          (invoice.line_items || [])
-            .length
+          (invoice.line_items || []).length
             ? `
-              <div
-                class="
-                  card
-                  card-pad
-                  line-items-card
-                "
-              >
+              <div class="card card-pad line-items-card">
 
                 <h3>
                   Line Items
@@ -1323,21 +1372,15 @@ function renderReview(
                           Description
                         </th>
 
-                        <th
-                          style="text-align:right"
-                        >
+                        <th style="text-align:right">
                           Qty
                         </th>
 
-                        <th
-                          style="text-align:right"
-                        >
+                        <th style="text-align:right">
                           Unit Price
                         </th>
 
-                        <th
-                          style="text-align:right"
-                        >
+                        <th style="text-align:right">
                           Total
                         </th>
                       </tr>
@@ -1356,13 +1399,8 @@ function renderReview(
             : ''
         }
 
-        <div
-          class="
-            card
-            card-pad
-            validation-card
-          "
-        >
+
+        <div class="card card-pad validation-card">
 
           <h3>
             AI Validation
@@ -1375,24 +1413,23 @@ function renderReview(
                 .map(
                   vr => `
                     <div
-                      class="
-                        validation-row
-                        ${validationRowClass(vr)}
-                      "
+                      class="validation-row
+                        ${validationRowClass(vr)}"
                     >
+
                       ${validationRowIcon(vr)}
 
                       <span>
                         ${esc(vr.message)}
                       </span>
+
                     </div>
                   `
                 )
-                .join('') ||
+                .join('')
+              ||
               `
-                <div
-                  class="validation-row pass"
-                >
+                <div class="validation-row pass">
                   No validation results yet.
                 </div>
               `
@@ -1402,17 +1439,12 @@ function renderReview(
 
         </div>
 
+
         ${
           invoice.processing_logs &&
           invoice.processing_logs.length
             ? `
-              <div
-                class="
-                  card
-                  card-pad
-                  audit-card
-                "
-              >
+              <div class="card card-pad audit-card">
 
                 <h3>
                   Processing History
@@ -1427,17 +1459,14 @@ function renderReview(
             : ''
         }
 
+
         ${
           !isFinal
             ? `
               <div class="review-actions">
 
                 <button
-                  class="
-                    btn
-                    btn-danger-ghost
-                    btn-lg
-                  "
+                  class="btn btn-danger-ghost btn-lg"
                   id="btn-reject"
                   type="button"
                 >
@@ -1445,11 +1474,7 @@ function renderReview(
                 </button>
 
                 <button
-                  class="
-                    btn
-                    btn-accent
-                    btn-lg
-                  "
+                  class="btn btn-accent btn-lg"
                   id="btn-approve"
                   type="button"
                 >
@@ -1462,11 +1487,7 @@ function renderReview(
               <div class="review-actions">
 
                 <button
-                  class="
-                    btn
-                    btn-ghost
-                    btn-lg
-                  "
+                  class="btn btn-ghost btn-lg"
                   data-route="#/invoices"
                   type="button"
                 >
@@ -1483,31 +1504,24 @@ function renderReview(
   `;
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // PROCESSING LOG LABELS
-// ---------------------------------------------------------------------------
+// ============================================================
 
 function logStageLabel(l) {
   const map = {
 
     uploaded:
-      `Invoice uploaded (${
-        l.detail?.filename ||
-        'file'
-      })`,
+      `Invoice uploaded (${l.detail?.filename || 'file'})`,
 
     ai_extracted:
-      `AI extraction complete (provider: ${
-        l.detail?.provider ||
-        'Gemini'
-      })`,
+      `Gemini AI extraction complete`,
 
     validated:
-      `Validated — status set to ${
-        statusLabel(
-          l.detail?.status
-        )
-      }`,
+      `Validated — status set to ${statusLabel(
+        l.detail?.status
+      )}`,
 
     field_edited:
       `Manually corrected ${
@@ -1522,21 +1536,16 @@ function logStageLabel(l) {
     rejected:
       `Invoice rejected${
         l.detail?.reason
-          ? ': ' +
-            l.detail.reason
+          ? ': ' + l.detail.reason
           : ''
       }`,
 
     retried:
-      `Re-processed (provider: ${
-        l.detail?.provider ||
-        'Gemini'
-      })`,
+      'Invoice re-processed using Gemini AI',
 
     error:
       `Processing error: ${
-        l.detail?.message ||
-        ''
+        l.detail?.message || ''
       }`
   };
 
@@ -1547,94 +1556,113 @@ function logStageLabel(l) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// INVOICES
-// ---------------------------------------------------------------------------
+
+// ============================================================
+// INVOICE LIST
+// ============================================================
 
 const STATUS_FILTERS = [
-  ['all', 'All'],
-  ['processing', 'Processing'],
+  [
+    'all',
+    'All'
+  ],
+  [
+    'processing',
+    'Processing'
+  ],
   [
     'review_required',
     'Review Required'
   ],
-  ['approved', 'Approved'],
-  ['rejected', 'Rejected'],
-  ['duplicate', 'Duplicate'],
-  ['exception', 'Exception']
+  [
+    'approved',
+    'Approved'
+  ],
+  [
+    'rejected',
+    'Rejected'
+  ],
+  [
+    'duplicate',
+    'Duplicate'
+  ],
+  [
+    'exception',
+    'Exception'
+  ]
 ];
+
 
 function renderInvoicesList(
   invoices,
   filters,
   title = 'Invoices'
 ) {
+  const safeInvoices =
+    Array.isArray(invoices)
+      ? invoices
+      : [];
+
+  const safeFilters =
+    filters || {};
+
   const rows =
-    (invoices || [])
-      .map(
-        inv => `
-          <tr data-id="${esc(inv.id)}">
+    safeInvoices
+      .map(inv => `
+        <tr data-id="${esc(inv.id)}">
 
-            <td class="checkbox-cell">
+          <td class="checkbox-cell">
 
-              <input
-                type="checkbox"
-                class="row-check"
-                data-id="${esc(inv.id)}"
-                onclick="event.stopPropagation()"
-              />
+            <input
+              type="checkbox"
+              class="row-check"
+              data-id="${esc(inv.id)}"
+              onclick="event.stopPropagation()"
+            />
 
-            </td>
+          </td>
 
-            <td class="mono">
-              ${esc(
-                inv.invoice_number ||
-                '—'
-              )}
-            </td>
+          <td class="mono">
+            ${esc(
+              inv.invoice_number || '—'
+            )}
+          </td>
 
-            <td>
-              ${esc(
-                inv.supplier_name ||
-                '—'
-              )}
-            </td>
+          <td>
+            ${esc(
+              inv.supplier_name || '—'
+            )}
+          </td>
 
-            <td class="mono">
-              ${esc(
-                inv.supplier_vat_number ||
-                '—'
-              )}
-            </td>
+          <td class="mono">
+            ${esc(
+              inv.supplier_vat_number || '—'
+            )}
+          </td>
 
-            <td>
-              ${fmtDate(
-                inv.invoice_date
-              )}
-            </td>
+          <td>
+            ${fmtDate(inv.invoice_date)}
+          </td>
 
-            <td class="num-cell">
-              ${fmtMoney(
-                inv.total_amount,
-                inv.currency
-              )}
-            </td>
+          <td class="num-cell">
+            ${fmtMoney(
+              inv.total_amount,
+              inv.currency
+            )}
+          </td>
 
-            <td>
-              ${statusBadge(
-                inv.status
-              )}
-            </td>
+          <td>
+            ${statusBadge(inv.status)}
+          </td>
 
-            <td>
-              ${confidenceTag(
-                inv.overall_confidence
-              )}
-            </td>
+          <td>
+            ${confidenceTag(
+              inv.overall_confidence
+            )}
+          </td>
 
-          </tr>
-        `
-      )
+        </tr>
+      `)
       .join('');
 
   return `
@@ -1647,15 +1675,14 @@ function renderInvoicesList(
         </h1>
 
         <p class="sub">
-          ${(invoices || []).length}
-          invoice${
-            (invoices || []).length === 1
-              ? ''
-              : 's'
-          }
+
+          ${safeInvoices.length}
+          invoice${safeInvoices.length === 1 ? '' : 's'}
+
         </p>
 
       </div>
+
 
       <div class="page-actions">
 
@@ -1690,6 +1717,7 @@ function renderInvoicesList(
 
     </div>
 
+
     <div class="filter-bar">
 
       <div class="search-input-wrap">
@@ -1700,47 +1728,44 @@ function renderInvoicesList(
           type="text"
           id="invoice-search"
           placeholder="Search invoice #, supplier, VAT, PO, amount…"
-          value="${esc(
-            filters?.q || ''
-          )}"
+          value="${esc(safeFilters.q || '')}"
         />
 
       </div>
 
     </div>
 
+
     <div class="filter-bar">
 
       <div class="chip-filter">
 
-        ${STATUS_FILTERS
-          .map(
-            ([v, l]) => `
-              <button
-                class="
-                  chip
-                  ${
-                    filters?.status === v ||
-                    (
-                      !filters?.status &&
-                      v === 'all'
-                    )
+        ${
+          STATUS_FILTERS
+            .map(
+              ([value, label]) => `
+                <button
+                  class="chip ${
+                    safeFilters.status === value ||
+                    (!safeFilters.status &&
+                      value === 'all')
                       ? 'active'
                       : ''
-                  }
-                "
-                data-status="${esc(v)}"
-                type="button"
-              >
-                ${esc(l)}
-              </button>
-            `
-          )
-          .join('')}
+                  }"
+                  data-status="${esc(value)}"
+                  type="button"
+                >
+                  ${esc(label)}
+                </button>
+              `
+            )
+            .join('')
+        }
 
       </div>
 
     </div>
+
 
     <div class="card">
 
@@ -1757,9 +1782,7 @@ function renderInvoicesList(
               <th>VAT No.</th>
               <th>Date</th>
 
-              <th
-                style="text-align:right"
-              >
+              <th style="text-align:right">
                 Amount
               </th>
 
@@ -1768,6 +1791,7 @@ function renderInvoicesList(
             </tr>
 
           </thead>
+
 
           <tbody>
 
@@ -1778,14 +1802,14 @@ function renderInvoicesList(
 
                   <td colspan="8">
 
-                    <div
-                      class="empty-state"
-                    >
+                    <div class="empty-state">
+
                       ${Icons.fileEmpty}
 
                       <p>
                         No invoices match your filters.
                       </p>
+
                     </div>
 
                   </td>
@@ -1804,75 +1828,66 @@ function renderInvoicesList(
   `;
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // SUPPLIERS
-// ---------------------------------------------------------------------------
+// ============================================================
 
 function renderSuppliers(
   suppliers
 ) {
+  const safeSuppliers =
+    Array.isArray(suppliers)
+      ? suppliers
+      : [];
+
   const rows =
-    (suppliers || [])
-      .map(
-        s => `
-          <div
-            class="supplier-card-row"
-          >
+    safeSuppliers
+      .map(s => `
+        <div class="supplier-card-row">
 
-            <div>
+          <div>
 
-              <div
-                class="supplier-name"
-              >
-                ${esc(s.name)}
-              </div>
-
-              <div
-                class="supplier-meta"
-              >
-
-                ${
-                  s.vat_number
-                    ? `
-                      VAT
-                      ${esc(
-                        s.vat_number
-                      )}
-                    `
-                    : 'No VAT number on file'
-                }
-
-                ·
-
-                ${s.invoice_count || 0}
-                invoice${
-                  s.invoice_count === 1
-                    ? ''
-                    : 's'
-                }
-
-              </div>
-
+            <div class="supplier-name">
+              ${esc(s.name)}
             </div>
 
-            <div
-              class="supplier-spend"
-            >
+            <div class="supplier-meta">
 
-              <span class="lbl">
-                Total spend
-              </span>
+              ${
+                s.vat_number
+                  ? `VAT ${esc(s.vat_number)}`
+                  : 'No VAT number on file'
+              }
 
-              ${fmtMoney(
-                s.total_spend,
-                'ZAR'
-              )}
+              ·
+
+              ${s.invoice_count || 0}
+              invoice${
+                s.invoice_count === 1
+                  ? ''
+                  : 's'
+              }
 
             </div>
 
           </div>
-        `
-      )
+
+
+          <div class="supplier-spend">
+
+            <span class="lbl">
+              Total spend
+            </span>
+
+            ${fmtMoney(
+              s.total_spend
+            )}
+
+          </div>
+
+        </div>
+      `)
       .join('');
 
   return `
@@ -1885,18 +1900,21 @@ function renderSuppliers(
         </h1>
 
         <p class="sub">
-          ${(suppliers || []).length}
+
+          ${safeSuppliers.length}
           supplier${
-            (suppliers || []).length === 1
+            safeSuppliers.length === 1
               ? ''
               : 's'
           }
           on file.
+
         </p>
 
       </div>
 
     </div>
+
 
     <div class="card card-pad">
 
@@ -1908,9 +1926,8 @@ function renderSuppliers(
             ${Icons.suppliers}
 
             <p>
-              No suppliers yet — suppliers
-              are created automatically from
-              captured invoices.
+              No suppliers yet — they're created
+              automatically from captured invoices.
             </p>
 
           </div>
@@ -1921,25 +1938,28 @@ function renderSuppliers(
   `;
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // REPORTS
-// ---------------------------------------------------------------------------
+// ============================================================
 
 function renderReports(
   suppliers,
   summary
 ) {
   const safeSuppliers =
-    suppliers || [];
+    Array.isArray(suppliers)
+      ? suppliers
+      : [];
+
+  const safeSummary =
+    summary || {};
 
   const maxSpend =
     Math.max(
       1,
       ...safeSuppliers.map(
-        s =>
-          Number(
-            s.total_spend
-          ) || 0
+        s => Number(s.total_spend) || 0
       )
     );
 
@@ -1952,21 +1972,22 @@ function renderReports(
           (Number(a.total_spend) || 0)
       )
       .slice(0, 8)
-      .map(
-        s => `
-          <div
-            style="
-              margin-bottom:12px;
-            "
-          >
+      .map(s => {
+
+        const spend =
+          Number(s.total_spend) || 0;
+
+        const width =
+          Math.max(
+            3,
+            (spend / maxSpend) * 100
+          );
+
+        return `
+          <div style="margin-bottom:12px;">
 
             <div
-              style="
-                display:flex;
-                justify-content:space-between;
-                font-size:12.5px;
-                margin-bottom:4px;
-              "
+              style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:4px;"
             >
 
               <span>
@@ -1974,46 +1995,24 @@ function renderReports(
               </span>
 
               <span class="mono">
-                ${fmtMoney(
-                  s.total_spend,
-                  'ZAR'
-                )}
+                ${fmtMoney(spend)}
               </span>
 
             </div>
 
             <div
-              style="
-                height:8px;
-                background:var(--surface-100);
-                border-radius:6px;
-                overflow:hidden;
-              "
+              style="height:8px;background:var(--surface-100);border-radius:6px;overflow:hidden;"
             >
 
               <div
-                style="
-                  height:100%;
-                  background:var(--accent-600);
-                  width:${Math.max(
-                    3,
-                    (
-                      (
-                        Number(
-                          s.total_spend
-                        ) || 0
-                      ) /
-                      maxSpend
-                    ) * 100
-                  )}%;
-                "
+                style="height:100%;background:var(--accent-600);width:${width}%;"
               ></div>
 
             </div>
 
           </div>
-        `
-      )
+        `;
+      })
       .join('');
 
   return `
@@ -2033,11 +2032,10 @@ function renderReports(
 
     </div>
 
+
     <div
       class="stat-grid"
-      style="
-        grid-template-columns:repeat(3,1fr);
-      "
+      style="grid-template-columns:repeat(3,1fr);"
     >
 
       <div class="card stat-card">
@@ -2048,12 +2046,12 @@ function renderReports(
 
         <div class="value accent">
           ${fmtMoney(
-            summary?.total_invoice_value,
-            'ZAR'
+            safeSummary.total_invoice_value
           )}
         </div>
 
       </div>
+
 
       <div class="card stat-card">
 
@@ -2064,9 +2062,9 @@ function renderReports(
         <div class="value">
 
           ${
-            summary?.avg_processing_seconds
+            safeSummary.avg_processing_seconds
               ? `${esc(
-                  summary.avg_processing_seconds
+                  safeSummary.avg_processing_seconds
                 )}s`
               : '—'
           }
@@ -2074,6 +2072,7 @@ function renderReports(
         </div>
 
       </div>
+
 
       <div class="card stat-card">
 
@@ -2089,13 +2088,11 @@ function renderReports(
 
     </div>
 
+
     <div class="card card-pad">
 
       <h3
-        style="
-          margin:0 0 16px;
-          font-size:14px;
-        "
+        style="margin:0 0 16px;font-size:14px;"
       >
         Spend by Supplier
       </h3>
@@ -2119,20 +2116,22 @@ function renderReports(
   `;
 }
 
-// ---------------------------------------------------------------------------
+
+// ============================================================
 // SETTINGS
-// ---------------------------------------------------------------------------
+// ============================================================
 
 function renderSettings(
   user,
   health
 ) {
-  const provider =
-    health?.ai_provider ||
-    'gemini';
+  const aiProvider =
+    String(
+      health?.ai_provider || 'gemini'
+    ).toLowerCase();
 
-  const geminiConfigured =
-    health?.gemini_configured;
+  const providerReady =
+    aiProvider === 'gemini';
 
   return `
     <div class="page-head">
@@ -2151,22 +2150,18 @@ function renderSettings(
 
     </div>
 
+
     <div
       class="card card-pad"
-      style="
-        max-width:480px;
-        margin-bottom:16px;
-      "
+      style="max-width:480px;margin-bottom:16px;"
     >
 
       <h3
-        style="
-          margin:0 0 14px;
-          font-size:14px;
-        "
+        style="margin:0 0 14px;font-size:14px;"
       >
         Account
       </h3>
+
 
       <div class="field">
 
@@ -2175,13 +2170,12 @@ function renderSettings(
         </label>
 
         <input
-          value="${esc(
-            user?.name || ''
-          )}"
+          value="${esc(user?.name || '')}"
           disabled
         />
 
       </div>
+
 
       <div class="field">
 
@@ -2190,13 +2184,12 @@ function renderSettings(
         </label>
 
         <input
-          value="${esc(
-            user?.email || ''
-          )}"
+          value="${esc(user?.email || '')}"
           disabled
         />
 
       </div>
+
 
       <div class="field">
 
@@ -2205,14 +2198,13 @@ function renderSettings(
         </label>
 
         <input
-          value="${esc(
-            user?.role || ''
-          )}"
+          value="${esc(user?.role || '')}"
           disabled
           style="text-transform:capitalize"
         />
 
       </div>
+
 
       <div
         class="field"
@@ -2224,9 +2216,7 @@ function renderSettings(
         </label>
 
         <input
-          value="${esc(
-            user?.company_name || ''
-          )}"
+          value="${esc(user?.company_name || '')}"
           disabled
         />
 
@@ -2234,268 +2224,73 @@ function renderSettings(
 
     </div>
 
+
     <div
       class="card card-pad"
-      style="
-        max-width:480px;
-      "
+      style="max-width:480px;"
     >
 
       <h3
-        style="
-          margin:0 0 14px;
-          font-size:14px;
-        "
+        style="margin:0 0 14px;font-size:14px;"
       >
         AI Extraction
       </h3>
 
+
       <div
-        style="
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap:12px;
-          margin-bottom:12px;
-        "
+        style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;"
       >
 
         <span
-          style="
-            font-size:13px;
-            color:var(--ink-500);
-          "
+          style="font-size:13px;color:var(--ink-500);"
         >
           Provider
         </span>
 
         <span
-          class="badge badge-approved"
+          class="badge ${
+            providerReady
+              ? 'badge-approved'
+              : 'badge-exception'
+          }"
         >
+
           <span class="badge-dot"></span>
-          Gemini
-        </span>
 
-      </div>
-
-      <div
-        style="
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap:12px;
-          margin-bottom:12px;
-        "
-      >
-
-        <span
-          style="
-            font-size:13px;
-            color:var(--ink-500);
-          "
-        >
-          Gemini API
-        </span>
-
-        <strong
-          style="
-            font-size:13px;
-            color:var(
-              ${
-                geminiConfigured === false
-                  ? '--danger-600'
-                  : '--ink-900'
-              }
-            );
-          "
-        >
           ${
-            geminiConfigured === false
-              ? 'Not configured'
-              : 'Connected'
+            providerReady
+              ? 'Gemini AI'
+              : esc(aiProvider)
           }
+
+        </span>
+
+      </div>
+
+
+      <p
+        style="font-size:13px;color:var(--ink-500);margin:0 0 6px;"
+      >
+
+        InvoiceFlow uses
+        <strong style="color:var(--ink-900);">
+          Gemini AI
         </strong>
+        for invoice image and document extraction.
 
-      </div>
-
-      <p
-        style="
-          font-size:12.5px;
-          line-height:1.6;
-          color:var(--ink-400);
-          margin:0;
-        "
-      >
-        InvoiceFlow uses Gemini AI on the backend
-        to extract invoice data from uploaded
-        images and PDF documents.
       </p>
 
-      ${
-        health?.ai_model
-          ? `
-            <div
-              style="
-                margin-top:14px;
-                padding-top:12px;
-                border-top:1px solid var(--surface-200);
-              "
-            >
-
-              <span
-                style="
-                  font-size:11px;
-                  color:var(--ink-400);
-                  display:block;
-                  margin-bottom:4px;
-                "
-              >
-                AI MODEL
-              </span>
-
-              <span class="mono">
-                ${esc(
-                  health.ai_model
-                )}
-              </span>
-
-            </div>
-          `
-          : ''
-      }
-
-    </div>
-
-    <div
-      class="card card-pad"
-      style="
-        max-width:480px;
-        margin-top:16px;
-      "
-    >
-
-      <h3
-        style="
-          margin:0 0 14px;
-          font-size:14px;
-        "
-      >
-        Session
-      </h3>
 
       <p
-        style="
-          font-size:12.5px;
-          line-height:1.6;
-          color:var(--ink-400);
-          margin:0 0 14px;
-        "
+        style="font-size:12.5px;color:var(--ink-400);margin:0;"
       >
-        You are currently signed in to
-        InvoiceFlow.
-      </p>
 
-      <button
-        class="btn btn-danger-ghost"
-        id="settings-logout-btn"
-        type="button"
-      >
-        Sign out
-      </button>
+        Invoice data is extracted from the uploaded
+        document and then passed through validation
+        before it becomes available for review.
+
+      </p>
 
     </div>
   `;
-}
-
-// ---------------------------------------------------------------------------
-// SESSION EXPIRED
-// ---------------------------------------------------------------------------
-
-function renderSessionExpired() {
-  return `
-    <div class="auth-screen">
-
-      <div class="auth-card">
-
-        <div class="auth-logo">
-
-          <div class="mark">
-            ${Icons.logo}
-          </div>
-
-          <div class="word">
-            InvoiceFlow
-          </div>
-
-        </div>
-
-        <div
-          style="
-            width:56px;
-            height:56px;
-            border-radius:50%;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            margin:0 auto 18px;
-            background:var(--surface-100);
-            color:var(--ink-600);
-          "
-        >
-          ${Icons.alertTriangle}
-        </div>
-
-        <h1>
-          Session expired
-        </h1>
-
-        <p class="sub">
-          Your InvoiceFlow session is no longer valid.
-          Please sign in again to continue.
-        </p>
-
-        <button
-          class="btn btn-accent btn-block btn-lg"
-          id="session-login-btn"
-          type="button"
-        >
-          Sign in again
-        </button>
-
-      </div>
-
-    </div>
-  `;
-}
-
-// ---------------------------------------------------------------------------
-// EXPORTS
-// ---------------------------------------------------------------------------
-
-if (
-  typeof window !== 'undefined'
-) {
-  window.Icons = Icons;
-
-  window.fmtMoney = fmtMoney;
-  window.fmtDate = fmtDate;
-  window.fmtDateTime = fmtDateTime;
-  window.timeAgo = timeAgo;
-  window.initials = initials;
-  window.statusLabel = statusLabel;
-  window.statusBadge = statusBadge;
-  window.confidenceTag = confidenceTag;
-  window.esc = esc;
-
-  window.renderLogin = renderLogin;
-  window.renderShell = renderShell;
-  window.renderDashboard = renderDashboard;
-  window.renderCapture = renderCapture;
-  window.renderProcessing = renderProcessing;
-  window.renderReview = renderReview;
-  window.renderInvoicesList = renderInvoicesList;
-  window.renderSuppliers = renderSuppliers;
-  window.renderReports = renderReports;
-  window.renderSettings = renderSettings;
-  window.renderSessionExpired = renderSessionExpired;
 }
