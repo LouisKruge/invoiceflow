@@ -2,7 +2,6 @@
 // InvoiceFlow — Frontend API Module
 // =============================================================================
 // Browser-side API client.
-//
 // IMPORTANT:
 // - This file runs in the browser.
 // - Do NOT use require(), dotenv, express, pg, fs, path, or other Node modules.
@@ -29,11 +28,16 @@
       return;
     }
 
-    localStorage.setItem(TOKEN_KEY, value);
+    localStorage.setItem(
+      TOKEN_KEY,
+      value
+    );
   }
 
   function clearToken() {
-    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(
+      TOKEN_KEY
+    );
   }
 
   // ===========================================================================
@@ -44,7 +48,9 @@
     clearToken();
 
     window.dispatchEvent(
-      new CustomEvent('invoiceflow:session-expired')
+      new CustomEvent(
+        'invoiceflow:session-expired'
+      )
     );
   }
 
@@ -52,23 +58,19 @@
   // GENERIC REQUEST
   // ===========================================================================
 
-  async function request(path, opts = {}) {
+  async function request(
+    path,
+    opts = {}
+  ) {
     const headers = Object.assign(
       {},
       opts.headers || {}
     );
 
-    // Internal option.
-    // Prevents login/register 401/403 responses from being treated
-    // as an expired existing session.
-    const skipAuthFailureHandling =
-      opts.skipAuthFailureHandling === true;
-
-    // Do not send this internal option to fetch().
-    delete opts.skipAuthFailureHandling;
-
     // Do not set JSON content type for FormData.
-    if (!(opts.body instanceof FormData)) {
+    if (
+      !(opts.body instanceof FormData)
+    ) {
       headers['Content-Type'] =
         'application/json';
     }
@@ -92,8 +94,12 @@
             headers
           }
         );
-
     } catch (error) {
+      console.error(
+        '[InvoiceFlow] Network request failed:',
+        error
+      );
+
       throw new Error(
         'Unable to connect to InvoiceFlow. Please check your internet connection.'
       );
@@ -117,28 +123,43 @@
       response.status === 401 ||
       response.status === 403
     ) {
+      /*
+       * IMPORTANT:
+       *
+       * Login and registration can legitimately return 401/403.
+       * We should NOT automatically clear an existing session for those
+       * public authentication endpoints.
+       */
+
+      const isPublicAuthRequest =
+        path === '/auth/login' ||
+        path === '/auth/register' ||
+        path === '/auth/setup-status';
+
+      let body = {};
+
+      if (isJson) {
+        body =
+          await response
+            .json()
+            .catch(
+              () => ({})
+            );
+      }
+
       let message =
         'Your session has expired. Please sign in again.';
 
-      if (isJson) {
-        const body =
-          await response
-            .json()
-            .catch(() => ({}));
-
-        if (
-          body &&
-          body.error
-        ) {
-          message =
-            body.error;
-        }
+      if (
+        body &&
+        body.error
+      ) {
+        message =
+          body.error;
       }
 
-      // Login/register failures must NOT clear an existing session
-      // automatically.
       if (
-        !skipAuthFailureHandling
+        !isPublicAuthRequest
       ) {
         invalidateSession();
       }
@@ -150,7 +171,7 @@
         response.status;
 
       error.sessionExpired =
-        !skipAuthFailureHandling;
+        !isPublicAuthRequest;
 
       throw error;
     }
@@ -167,7 +188,9 @@
         const body =
           await response
             .json()
-            .catch(() => ({}));
+            .catch(
+              () => ({})
+            );
 
         if (
           body &&
@@ -180,10 +203,13 @@
         const text =
           await response
             .text()
-            .catch(() => '');
+            .catch(
+              () => ''
+            );
 
         if (text) {
-          message = text;
+          message =
+            text;
         }
       }
 
@@ -215,6 +241,23 @@
     email,
     password
   ) {
+    const normalizedEmail =
+      String(email || '')
+        .trim()
+        .toLowerCase();
+
+    const normalizedPassword =
+      String(password || '');
+
+    if (
+      !normalizedEmail ||
+      !normalizedPassword
+    ) {
+      throw new Error(
+        'Email and password are required.'
+      );
+    }
+
     const data =
       await request(
         '/auth/login',
@@ -223,13 +266,12 @@
 
           body:
             JSON.stringify({
-              email,
-              password
-            }),
+              email:
+                normalizedEmail,
 
-          // IMPORTANT:
-          // A failed login must NOT be treated as an expired session.
-          skipAuthFailureHandling: true
+              password:
+                normalizedPassword
+            })
         }
       );
 
@@ -242,6 +284,14 @@
       );
     }
 
+    if (
+      !data.user
+    ) {
+      throw new Error(
+        'Login succeeded but the server did not return your user profile.'
+      );
+    }
+
     setToken(
       data.token
     );
@@ -250,7 +300,7 @@
   }
 
   // ===========================================================================
-  // AUTH — REGISTER
+  // AUTH — REGISTER FIRST ADMINISTRATOR
   // ===========================================================================
 
   async function register(
@@ -259,6 +309,113 @@
     password,
     companyName
   ) {
+    // ---------------------------------------------------------------
+    // Normalize values
+    // ---------------------------------------------------------------
+
+    const normalizedName =
+      String(name || '')
+        .trim();
+
+    const normalizedEmail =
+      String(email || '')
+        .trim()
+        .toLowerCase();
+
+    const normalizedPassword =
+      String(password || '');
+
+    const normalizedCompany =
+      String(companyName || '')
+        .trim();
+
+    // ---------------------------------------------------------------
+    // Client-side validation
+    // ---------------------------------------------------------------
+
+    if (
+      !normalizedName
+    ) {
+      throw new Error(
+        'Please enter your name.'
+      );
+    }
+
+    if (
+      !normalizedEmail
+    ) {
+      throw new Error(
+        'Please enter your email address.'
+      );
+    }
+
+    if (
+      !normalizedPassword
+    ) {
+      throw new Error(
+        'Please enter a password.'
+      );
+    }
+
+    if (
+      !normalizedCompany
+    ) {
+      throw new Error(
+        'Please enter your company name.'
+      );
+    }
+
+    if (
+      normalizedPassword.length < 8
+    ) {
+      throw new Error(
+        'Password must be at least 8 characters.'
+      );
+    }
+
+    // ---------------------------------------------------------------
+    // DEBUG LOG
+    //
+    // We deliberately NEVER log the actual password.
+    // ---------------------------------------------------------------
+
+    console.log(
+      '[InvoiceFlow] Register request:',
+      {
+        name:
+          normalizedName,
+
+        email:
+          normalizedEmail,
+
+        passwordProvided:
+          normalizedPassword.length > 0,
+
+        passwordLength:
+          normalizedPassword.length,
+
+        company_name:
+          normalizedCompany
+      }
+    );
+
+    // ---------------------------------------------------------------
+    // IMPORTANT
+    //
+    // The backend expects:
+    //
+    // {
+    //   name,
+    //   email,
+    //   password,
+    //   company_name
+    // }
+    //
+    // NOT:
+    //
+    // companyName
+    // ---------------------------------------------------------------
+
     const data =
       await request(
         '/auth/register',
@@ -267,22 +424,34 @@
 
           body:
             JSON.stringify({
-              name,
-              email,
-              password,
-              company_name:
-                companyName
-            }),
+              name:
+                normalizedName,
 
-          // IMPORTANT:
-          // Registration errors such as 403 when registration is closed
-          // should be shown to the user, not treated as session expiry.
-          skipAuthFailureHandling: true
+              email:
+                normalizedEmail,
+
+              password:
+                normalizedPassword,
+
+              company_name:
+                normalizedCompany
+            })
         }
       );
 
+    // ---------------------------------------------------------------
+    // Validate server response
+    // ---------------------------------------------------------------
+
     if (
-      !data ||
+      !data
+    ) {
+      throw new Error(
+        'The server returned an empty registration response.'
+      );
+    }
+
+    if (
       !data.token
     ) {
       throw new Error(
@@ -298,10 +467,32 @@
       );
     }
 
-    // Backend automatically creates a JWT.
-    // Save it immediately so the new user is logged in.
+    // ---------------------------------------------------------------
+    // Automatically log the new administrator in
+    // ---------------------------------------------------------------
+
     setToken(
       data.token
+    );
+
+    console.log(
+      '[InvoiceFlow] Administrator account created successfully:',
+      {
+        id:
+          data.user.id,
+
+        name:
+          data.user.name,
+
+        email:
+          data.user.email,
+
+        role:
+          data.user.role,
+
+        company_name:
+          data.user.company_name
+      }
     );
 
     return data;
@@ -313,14 +504,7 @@
 
   async function setupStatus() {
     return request(
-      '/auth/setup-status',
-      {
-        method: 'GET',
-
-        // This endpoint is intentionally public.
-        // Never invalidate a session based on its response.
-        skipAuthFailureHandling: true
-      }
+      '/auth/setup-status'
     );
   }
 
@@ -405,15 +589,15 @@
     const currentToken =
       token();
 
-    if (!currentToken) {
+    if (
+      !currentToken
+    ) {
       return null;
     }
 
     return (
-      `${BASE}/invoices/` +
-      `${encodeURIComponent(id)}` +
-      `/document?t=` +
-      `${encodeURIComponent(currentToken)}`
+      `${BASE}/invoices/${encodeURIComponent(id)}` +
+      `/document?t=${encodeURIComponent(currentToken)}`
     );
   }
 
@@ -423,7 +607,9 @@
     const currentToken =
       token();
 
-    if (!currentToken) {
+    if (
+      !currentToken
+    ) {
       invalidateSession();
 
       return null;
@@ -434,9 +620,7 @@
     try {
       response =
         await fetch(
-          `${BASE}/invoices/` +
-          `${encodeURIComponent(id)}` +
-          `/document`,
+          `${BASE}/invoices/${encodeURIComponent(id)}/document`,
           {
             headers: {
               Authorization:
@@ -444,7 +628,6 @@
             }
           }
         );
-
     } catch (error) {
       throw new Error(
         'Unable to load the invoice document. Please check your connection.'
@@ -471,7 +654,9 @@
       throw error;
     }
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
       throw new Error(
         `Unable to load document (${response.status}).`
       );
@@ -493,7 +678,9 @@
     file,
     onProgress
   ) {
-    if (!token()) {
+    if (
+      !token()
+    ) {
       invalidateSession();
 
       return Promise.reject(
@@ -503,7 +690,9 @@
       );
     }
 
-    if (!file) {
+    if (
+      !file
+    ) {
       return Promise.reject(
         new Error(
           'No invoice file was provided.'
@@ -534,7 +723,9 @@
     id,
     file
   ) {
-    if (!file) {
+    if (
+      !file
+    ) {
       throw new Error(
         'No invoice file was provided.'
       );
@@ -569,8 +760,11 @@
       `/invoices/${encodeURIComponent(id)}`,
       {
         method: 'PATCH',
+
         body:
-          JSON.stringify(fields)
+          JSON.stringify(
+            fields
+          )
       }
     );
   }
@@ -626,9 +820,7 @@
   // ===========================================================================
 
   function exportAllUrl() {
-    return (
-      `${BASE}/export/all`
-    );
+    return `${BASE}/export/all`;
   }
 
   function exportRangeUrl(
@@ -679,7 +871,9 @@
         const currentToken =
           token();
 
-        if (!currentToken) {
+        if (
+          !currentToken
+        ) {
           invalidateSession();
 
           reject(
@@ -739,7 +933,6 @@
                     '{}'
                   );
               }
-
             } catch (error) {
               console.warn(
                 '[InvoiceFlow] Could not parse upload response:',
@@ -924,7 +1117,7 @@
     exportSelected,
 
     // -------------------------------------------------------------------------
-    // Token / session
+    // Token / Session
     // -------------------------------------------------------------------------
 
     setToken,
@@ -934,7 +1127,7 @@
   };
 
   // ===========================================================================
-  // GLOBAL API
+  // EXPOSE API GLOBALLY
   // ===========================================================================
 
   window.API =
