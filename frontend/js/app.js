@@ -2219,7 +2219,20 @@ async function runCaptureBatch(files) {
   router();
 }
 
-async function runCapture(file) {
+async function renderCapturePage() {
+  await mountShell(renderCapture(), '#/capture');
+  document.getElementById('btn-take-photo').onclick = () => {
+    Camera.open({ onCapture: (file) => runCaptureBatch([file]), onCancel: () => {} });
+  };
+  document.getElementById('btn-upload-invoice').onclick = () => {
+    Camera.openNativePicker({
+      capture: false,
+      multiple: true,
+      onCapture: (files) => runCaptureBatch(Array.isArray(files) ? files : [files]),
+      onCancel: () => {},
+    });
+  };
+}
 
   /**
    * Process multiple invoices one at a time.
