@@ -363,16 +363,403 @@
   // ROUTER
   // ===========================================================================
 
-  async function router() {
-    if (routerRunning) {
+ async function router() {
+  if (routerRunning) {
+    console.warn('[Router] Already running — skipping duplicate call.');
+    return;
+  }
+
+  routerRunning = true;
+
+  console.log('[Router] START');
+  console.log('[Router] Current hash:', location.hash);
+  console.log('[Router] API available:', hasAPI());
+
+  try {
+
+    // -----------------------------------------------------------------------
+    // API CHECK
+    // -----------------------------------------------------------------------
+
+    if (!hasAPI()) {
+      console.error('[Router] API module is not available.');
+
+      root.innerHTML = `
+        <div style="
+          min-height:100vh;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:24px;
+          font-family:system-ui,sans-serif;
+        ">
+          <div style="
+            max-width:520px;
+            text-align:center;
+          ">
+            <h2>InvoiceFlow could not start</h2>
+            <p>
+              The frontend API module could not be loaded.
+            </p>
+          </div>
+        </div>
+      `;
+
       return;
     }
 
-    routerRunning =
-      true;
+    console.log('[Router] API check passed.');
+
+    // -----------------------------------------------------------------------
+    // SETUP CHECK
+    // -----------------------------------------------------------------------
+
+    if (!AppState.setupChecked) {
+      console.log('[Router] Checking setup status...');
+
+      await checkSetupStatus();
+
+      console.log(
+        '[Router] Setup check complete:',
+        {
+          setupRequired: AppState.setupRequired,
+          setupChecked: AppState.setupChecked
+        }
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // HASH
+    // -----------------------------------------------------------------------
+
+    let hash = location.hash || '';
+
+    console.log('[Router] Hash after setup check:', hash);
+
+    if (!hash) {
+      hash =
+        AppState.setupRequired
+          ? '#/signup'
+          : '#/login';
+
+      console.log(
+        '[Router] No hash. Redirecting to:',
+        hash
+      );
+
+      location.hash = hash;
+
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // ROUTE MATCHES
+    // -----------------------------------------------------------------------
+
+    const invoiceMatch =
+      hash.match(
+        /^#\/invoices\/(.+)$/
+      );
+
+    const reviewMatch =
+      hash.match(
+        /^#\/review\/(.+)$/
+      );
+
+    // -----------------------------------------------------------------------
+    // TOKEN
+    // -----------------------------------------------------------------------
+
+    const token =
+      hasFunction(
+        API,
+        'token'
+      )
+        ? API.token()
+        : null;
+
+    console.log(
+      '[Router] Authentication state:',
+      {
+        hasToken: !!token,
+        setupRequired: AppState.setupRequired,
+        userLoaded: !!AppState.user
+      }
+    );
+
+    // -----------------------------------------------------------------------
+    // FIRST BOOT
+    // -----------------------------------------------------------------------
+
+    if (
+      AppState.setupRequired &&
+      !token &&
+      hash !== '#/signup'
+    ) {
+      console.log(
+        '[Router] Setup required. Redirecting to signup.'
+      );
+
+      location.hash = '#/signup';
+
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // NO SESSION
+    // -----------------------------------------------------------------------
+
+    if (
+      !token &&
+      hash !== '#/login' &&
+      hash !== '#/signup'
+    ) {
+      const target =
+        AppState.setupRequired
+          ? '#/signup'
+          : '#/login';
+
+      console.log(
+        '[Router] No session. Redirecting to:',
+        target
+      );
+
+      location.hash = target;
+
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // ALREADY AUTHENTICATED
+    // -----------------------------------------------------------------------
+
+    if (
+      token &&
+      (
+        hash === '#/login' ||
+        hash === '#/signup'
+      )
+    ) {
+      console.log(
+        '[Router] Already authenticated. Redirecting to dashboard.'
+      );
+
+      location.hash = '#/dashboard';
+
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // LOAD USER
+    // -----------------------------------------------------------------------
+
+    if (
+      token &&
+      !AppState.user
+    ) {
+      console.log('[Router] Loading authenticated user...');
+
+      try {
+
+        if (
+          !hasFunction(
+            API,
+            'me'
+          )
+        ) {
+          throw new Error(
+            'Authentication API is unavailable.'
+          );
+        }
+
+        const response =
+          await API.me();
+
+        console.log(
+          '[Router] API.me() response received.'
+        );
+
+        if (
+          !response ||
+          !response.user
+        ) {
+          throw new Error(
+            'Authentication response did not contain a user.'
+          );
+        }
+
+        AppState.user =
+          response.user;
+
+        AppState.sessionError =
+          null;
+
+        console.log(
+          '[Router] User loaded:',
+          AppState.user
+        );
+
+      } catch (error) {
+
+        console.error(
+          '[Router] Failed to load authenticated user:',
+          error
+        );
+
+        if (
+          isAuthError(error)
+        ) {
+          handleSessionExpired(
+            'Your session is no longer valid. Please sign in again.'
+          );
+        } else {
+          toast(
+            error?.message ||
+            'Unable to verify your session.',
+            'error'
+          );
+        }
+
+        return;
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // HEALTH
+    // -----------------------------------------------------------------------
+
+    if (
+      token &&
+      !AppState.health
+    ) {
+      console.log('[Router] Checking API health...');
+
+      try {
+
+        const response =
+          await fetch(
+            '/api/health',
+            {
+              headers: {
+                Authorization:
+                  `Bearer ${token}`,
+              },
+            }
+          );
+
+        if (response.ok) {
+          AppState.health =
+            await response.json();
+
+          console.log(
+            '[Router] Health check passed.'
+          );
+        } else {
+          console.warn(
+            '[Router] Health check returned:',
+            response.status
+          );
+        }
+
+      } catch (error) {
+
+        console.warn(
+          '[Router] Health check failed:',
+          error
+        );
+
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // FIND ROUTE
+    // -----------------------------------------------------------------------
+
+    let routeHandler =
+      routes[hash];
+
+    if (!routeHandler) {
+
+      if (invoiceMatch) {
+
+        routeHandler =
+          () =>
+            renderInvoiceDetailPage(
+              invoiceMatch[1]
+            );
+
+      } else if (reviewMatch) {
+
+        routeHandler =
+          () =>
+            renderInvoiceDetailPage(
+              reviewMatch[1]
+            );
+      }
+    }
+
+    console.log(
+      '[Router] Route resolution:',
+      {
+        hash,
+        routeFound: !!routeHandler
+      }
+    );
+
+    // -----------------------------------------------------------------------
+    // UNKNOWN ROUTE
+    // -----------------------------------------------------------------------
+
+    if (!routeHandler) {
+
+      console.warn(
+        '[Router] No route found. Redirecting to dashboard.'
+      );
+
+      location.hash =
+        '#/dashboard';
+
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // RENDER
+    // -----------------------------------------------------------------------
+
+    console.log(
+      '[Router] Rendering route:',
+      hash
+    );
+
+    await routeHandler();
+
+    console.log(
+      '[Router] Route rendered successfully:',
+      hash
+    );
+
+  } catch (error) {
+
+    console.error(
+      '[Router] UNHANDLED ERROR:',
+      error
+    );
 
     try {
-      if (!hasAPI()) {
+
+      handleApiError(
+        error,
+        'Unable to load this page.'
+      );
+
+    } catch (handlerError) {
+
+      console.error(
+        '[Router] Error inside handleApiError:',
+        handlerError
+      );
+
+      if (root) {
         root.innerHTML = `
           <div style="
             min-height:100vh;
@@ -383,172 +770,44 @@
             font-family:system-ui,sans-serif;
           ">
             <div style="
-              max-width:520px;
+              max-width:600px;
               text-align:center;
             ">
-              <h2>InvoiceFlow could not start</h2>
+              <h2>InvoiceFlow could not load</h2>
               <p>
-                The frontend API module could not be loaded.
+                An unexpected error prevented the application from loading.
               </p>
+
+              <button
+                onclick="location.reload()"
+                style="
+                  margin-top:16px;
+                  padding:10px 18px;
+                  border:0;
+                  border-radius:8px;
+                  background:#111827;
+                  color:#fff;
+                  font-weight:700;
+                  cursor:pointer;
+                "
+              >
+                Reload application
+              </button>
             </div>
           </div>
         `;
-
-        return;
       }
+    }
 
-      if (!AppState.setupChecked) {
-        await checkSetupStatus();
-      }
+  } finally {
 
-      let hash =
-        location.hash ||
-        '';
+    routerRunning = false;
 
-      if (!hash) {
-        hash =
-          AppState.setupRequired
-            ? '#/signup'
-            : '#/login';
-
-        location.hash =
-          hash;
-
-        return;
-      }
-
-      const invoiceMatch =
-        hash.match(
-          /^#\/invoices\/(.+)$/
-        );
-
-      const reviewMatch =
-        hash.match(
-          /^#\/review\/(.+)$/
-        );
-
-      const token =
-        hasFunction(
-          API,
-          'token'
-        )
-          ? API.token()
-          : null;
-
-      // -----------------------------------------------------------------------
-      // First boot
-      // -----------------------------------------------------------------------
-
-      if (
-        AppState.setupRequired &&
-        !token &&
-        hash !== '#/signup'
-      ) {
-        location.hash =
-          '#/signup';
-
-        return;
-      }
-
-      // -----------------------------------------------------------------------
-      // No session
-      // -----------------------------------------------------------------------
-
-      if (
-        !token &&
-        hash !== '#/login' &&
-        hash !== '#/signup'
-      ) {
-        location.hash =
-          AppState.setupRequired
-            ? '#/signup'
-            : '#/login';
-
-        return;
-      }
-
-      // -----------------------------------------------------------------------
-      // Already authenticated
-      // -----------------------------------------------------------------------
-
-      if (
-        token &&
-        (
-          hash === '#/login' ||
-          hash === '#/signup'
-        )
-      ) {
-        location.hash =
-          '#/dashboard';
-
-        return;
-      }
-
-      // -----------------------------------------------------------------------
-      // Load authenticated user
-      // -----------------------------------------------------------------------
-
-      if (
-        token &&
-        !AppState.user
-      ) {
-        try {
-          if (
-            !hasFunction(
-              API,
-              'me'
-            )
-          ) {
-            throw new Error(
-              'Authentication API is unavailable.'
-            );
-          }
-
-          const response =
-            await API.me();
-
-          if (
-            !response ||
-            !response.user
-          ) {
-            throw new Error(
-              'Authentication response did not contain a user.'
-            );
-          }
-
-          AppState.user =
-            response.user;
-
-          AppState.sessionError =
-            null;
-
-        } catch (error) {
-          if (
-            isAuthError(error)
-          ) {
-            handleSessionExpired(
-              'Your session is no longer valid. Please sign in again.'
-            );
-          } else {
-            console.error(
-              '[Router] Failed to load authenticated user:',
-              error
-            );
-
-            toast(
-              error?.message ||
-              'Unable to verify your session.',
-              'error'
-            );
-          }
-
-          return;
-        }
-      }
-
-      // -----------------------------------------------------------------------
-      // Health
-      // -----------------------------------------------------------------------
+    console.log(
+      '[Router] FINISHED'
+    );
+  }
+}
       // -----------------------------------------------------------------------
       // Health
       // -----------------------------------------------------------------------
