@@ -3230,16 +3230,13 @@ async function runCaptureBatch(files) {
     toast(`All ${files.length} invoices uploaded and processed.`, 'success');
   }
 
-  location.hash = '#/invoices';
+   location.hash = '#/invoices';
   router();
 }
 
-
-}
-
-  /**
-   * Process multiple invoices one at a time.
-   *
+// /**
+//  * Process multiple invoices one at a time.
+//  */
    * This deliberately uses the existing API.captureInvoice(file) method
    * instead of requiring a new backend endpoint.
    *
