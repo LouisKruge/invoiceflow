@@ -4669,96 +4669,89 @@ async function runCaptureBatch(files) {
     );
   }
 
-  async function loadAndPaintInvoices(
-    filters,
-    title,
-    isExceptionView
-  ) {
-    try {
-      const params = {
-        q:
-          filters.q,
-
-        status:
-          isExceptionView
-            ? undefined
-            : (
-                filters.status ===
-                'all'
-                  ? undefined
-                  : filters.status
-              ),
-      };
-
-      const response =
-        await API.listInvoices(
-          params
-        );
-
-      const invoices =
-        Array.isArray(
-          response?.invoices
-        )
-          ? response.invoices
-          : [];
-
-      const finalList =
-        isExceptionView
-          ? invoices.filter(
-              (invoice) =>
-                [
-                  'exception',
-                  'duplicate',
-                ].includes(
-                  invoice.status
-                )
-            )
-        const finalList =
+ async function loadAndPaintInvoices(
+  filters,
+  title,
   isExceptionView
-    ? invoices.filter(
-        (invoice) =>
-          [
-            'exception',
-            'duplicate',
-          ].includes(
-            invoice.status
-          )
-      )
-          : invoices;
+) {
+  try {
+    const params = {
+      q: filters.q,
 
-      const content =
-        document.querySelector(
-          '.content'
-        );
-
-      if (!content) {
-        return;
-      }
-
-      content.innerHTML =
-        renderInvoicesList(
-          finalList,
-          filters,
-          title ||
-            'Invoices'
-        );
-
-      bindShellEvents();
-
-      bindInvoicesListEvents(
-        filters,
-        title,
+      status:
         isExceptionView
+          ? undefined
+          : (
+              filters.status === 'all'
+                ? undefined
+                : filters.status
+            ),
+    };
+
+    const response =
+      await API.listInvoices(
+        params
       );
 
-    } catch (error) {
-      handleApiError(
-        error,
-        'Unable to load invoices.'
+    const invoices =
+      Array.isArray(
+        response?.invoices
+      )
+        ? response.invoices
+        : [];
+
+    const finalList =
+      isExceptionView
+        ? invoices.filter(
+            (invoice) =>
+              [
+                'exception',
+                'duplicate',
+              ].includes(
+                invoice.status
+              )
+          )
+        : invoices;
+
+    const content =
+      document.querySelector(
+        '.content'
       );
+
+    if (!content) {
+      return;
     }
-  }
 
+    content.innerHTML =
+      renderInvoicesList(
+        finalList,
+        filters,
+        title ||
+          'Invoices'
+      );
+
+    bindShellEvents();
+
+    bindInvoicesListEvents(
+      filters,
+      title,
+      isExceptionView
+    );
+
+  } catch (error) {
+
+    console.error(
+      '[InvoiceFlow] Failed to load invoices:',
+      error
+    );
+
+    toast(
+      error.message ||
+        'Unable to load invoices.',
+      'error'
+    );
+  }
+}
   function bindInvoicesListEvents(
     filters,
     title,
