@@ -554,29 +554,10 @@ function renderCapture() {
 
     <h2>Ready when you are</h2>
 
-    <p>
-      Take a clear photo of the invoice, or upload an existing
-      image or PDF. AI extraction starts immediately.
-    </p>
-
+        <p>Take a clear photo of the invoice, or upload one or more existing images/PDFs at once. AI extraction starts immediately for each.</p>
     <div class="capture-actions">
-
-      <button
-        class="btn btn-accent btn-lg"
-        id="btn-take-photo"
-      >
-        ${Icons.capture}
-        Take Photo
-      </button>
-
-      <button
-        class="btn btn-ghost btn-lg"
-        id="btn-upload-invoice"
-      >
-        ${Icons.download}
-        Upload Invoice
-      </button>
-
+      <button class="btn btn-accent btn-lg" id="btn-take-photo">${Icons.capture} Take Photo</button>
+      <button class="btn btn-ghost btn-lg" id="btn-upload-invoice">${Icons.download} Upload Invoices</button>
     </div>
 
   </div>`;
