@@ -2,32 +2,10 @@
 // InvoiceFlow — Frontend API Module
 // =============================================================================
 // Browser-side API client.
-// Supports single and bulk invoice capture.
+// Supports single and bulk invoice capture, editing, approval, rejection,
+// and deletion.
 // =============================================================================
-// ===========================================================================
-// DELETE INVOICE
-// ===========================================================================
 
-async function deleteInvoice(id) {
-  if (!id) {
-    throw new Error('Invoice ID is required.');
-  }
-
-  const response = await request(
-    `/api/invoices/${encodeURIComponent(id)}`,
-    {
-      method: 'DELETE',
-    }
-  );
-
-  if (!response || !response.invoice) {
-    throw new Error(
-      'The server did not return the deleted invoice.'
-    );
-  }
-
-  return response;
-}
 (() => {
   'use strict';
 
@@ -413,9 +391,52 @@ async function deleteInvoice(id) {
   }
 
   async function getInvoice(id) {
+    if (!id) {
+      throw new Error(
+        'Invoice ID is required.'
+      );
+    }
+
     return request(
       `/invoices/${encodeURIComponent(id)}`
     );
+  }
+
+  // ===========================================================================
+  // DELETE INVOICE
+  // ===========================================================================
+
+  async function deleteInvoice(id) {
+    if (!id) {
+      throw new Error(
+        'Invoice ID is required.'
+      );
+    }
+
+    console.log(
+      '[InvoiceFlow] Deleting invoice:',
+      id
+    );
+
+    const response =
+      await request(
+        `/invoices/${encodeURIComponent(id)}`,
+        {
+          method: 'DELETE'
+        }
+      );
+
+    if (
+      !response ||
+      response.success === false
+    ) {
+      throw new Error(
+        response?.error ||
+        'The server did not confirm invoice deletion.'
+      );
+    }
+
+    return response;
   }
 
   // ===========================================================================
@@ -590,12 +611,6 @@ async function deleteInvoice(id) {
   // ===========================================================================
   // CAPTURE — BULK
   // ===========================================================================
-  //
-  // Uses the existing single-invoice endpoint.
-  //
-  // Each invoice is processed independently.
-  // If one invoice fails, the remaining invoices continue.
-  // ===========================================================================
 
   async function captureInvoices(
     files,
@@ -760,6 +775,12 @@ async function deleteInvoice(id) {
     id,
     file
   ) {
+    if (!id) {
+      throw new Error(
+        'Invoice ID is required.'
+      );
+    }
+
     if (!file) {
       throw new Error(
         'No invoice file was provided.'
@@ -935,6 +956,12 @@ async function deleteInvoice(id) {
   async function approveInvoice(
     id
   ) {
+    if (!id) {
+      throw new Error(
+        'Invoice ID is required.'
+      );
+    }
+
     return request(
       `/invoices/${encodeURIComponent(id)}/approve`,
       {
@@ -951,6 +978,12 @@ async function deleteInvoice(id) {
     id,
     reason = ''
   ) {
+    if (!id) {
+      throw new Error(
+        'Invoice ID is required.'
+      );
+    }
+
     return request(
       `/invoices/${encodeURIComponent(id)}/reject`,
       {
@@ -994,6 +1027,15 @@ async function deleteInvoice(id) {
   async function exportSelected(
     ids
   ) {
+    if (
+      !Array.isArray(ids) ||
+      !ids.length
+    ) {
+      throw new Error(
+        'No invoices were selected for export.'
+      );
+    }
+
     return request(
       '/export/selected',
       {
@@ -1191,6 +1233,7 @@ async function deleteInvoice(id) {
     // Invoices
     listInvoices,
     getInvoice,
+    deleteInvoice,
 
     // Documents
     documentUrl,
