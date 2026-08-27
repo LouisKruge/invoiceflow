@@ -549,6 +549,9 @@
       // -----------------------------------------------------------------------
       // Health
       // -----------------------------------------------------------------------
+      // -----------------------------------------------------------------------
+      // Health
+      // -----------------------------------------------------------------------
 
       if (
         token &&
@@ -578,491 +581,54 @@
         }
       }
 
-     
-
-  const statusClass = (status) => {
-    const value = String(status || 'pending').toLowerCase();
-
-    if (value === 'approved') return 'status-approved';
-    if (value === 'rejected') return 'status-rejected';
-
-    if (
-      value === 'exception' ||
-      value === 'duplicate'
-    ) {
-      return 'status-exception';
-    }
-
-    if (
-      value === 'processing' ||
-      value === 'pending'
-    ) {
-      return 'status-pending';
-    }
-
-    return 'status-default';
-  };
-
-  const formatDate = (value) => {
-    if (!value) return '—';
-
-    const date = new Date(value);
-
-    if (Number.isNaN(date.getTime())) {
-      return String(value);
-    }
-
-    return date.toLocaleDateString('en-ZA', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric'
-    });
-  };
-
-  const formatAmount = (invoice) => {
-    const value =
-      invoice.total ??
-      invoice.amount ??
-      invoice.total_amount ??
-      invoice.invoice_total;
-
-    if (
-      value === null ||
-      value === undefined ||
-      value === ''
-    ) {
-      return '—';
-    }
-
-    const number = Number(value);
-
-    if (!Number.isFinite(number)) {
-      return escapeHtml(value);
-    }
-
-    return number.toLocaleString('en-ZA', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    });
-  };
-
-  return `
-    <div
-      class="invoice-list-page"
-      style="
-        width:100%;
-      "
-    >
-
-      <div
-        style="
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap:20px;
-          margin-bottom:24px;
-          flex-wrap:wrap;
-        "
-      >
-
-        <div>
-          <h1
-            style="
-              margin:0;
-              font-size:28px;
-              font-weight:800;
-              color:#101828;
-            "
-          >
-            ${escapeHtml(title)}
-          </h1>
-
-          <p
-            style="
-              margin:6px 0 0;
-              color:#667085;
-              font-size:14px;
-            "
-          >
-            ${list.length}
-            invoice${list.length === 1 ? '' : 's'}
-          </p>
-        </div>
-
-        <button
-          type="button"
-          class="btn btn-primary"
-          id="btn-upload-invoice"
-        >
-          Upload Invoice
-        </button>
-
-      </div>
-
-      ${
-        !list.length
-          ? `
-            <div
-              style="
-                background:#fff;
-                border:1px solid #e4e7ec;
-                border-radius:16px;
-                padding:56px 24px;
-                text-align:center;
-              "
-            >
-
-              <div
-                style="
-                  font-size:40px;
-                  margin-bottom:12px;
-                "
-              >
-                📄
-              </div>
-
-              <h2
-                style="
-                  margin:0 0 8px;
-                  color:#101828;
-                  font-size:20px;
-                "
-              >
-                No invoices found
-              </h2>
-
-              <p
-                style="
-                  margin:0;
-                  color:#667085;
-                  font-size:14px;
-                "
-              >
-                Upload an invoice to get started.
-              </p>
-
-            </div>
-          `
-          : `
-            <div
-              style="
-                background:#fff;
-                border:1px solid #e4e7ec;
-                border-radius:16px;
-                overflow:hidden;
-              "
-            >
-
-              <div style="overflow-x:auto;">
-
-                <table
-                  class="data-table"
-                  style="
-                    width:100%;
-                    border-collapse:collapse;
-                  "
-                >
-
-                  <thead>
-                    <tr>
-
-                      <th style="text-align:left;padding:14px 16px;">
-                        Invoice
-                      </th>
-
-                      <th style="text-align:left;padding:14px 16px;">
-                        Supplier
-                      </th>
-
-                      <th style="text-align:left;padding:14px 16px;">
-                        Date
-                      </th>
-
-                      <th style="text-align:right;padding:14px 16px;">
-                        Amount
-                      </th>
-
-                      <th style="text-align:left;padding:14px 16px;">
-                        Status
-                      </th>
-
-                      <th style="text-align:right;padding:14px 16px;">
-                        Actions
-                      </th>
-
-                    </tr>
-                  </thead>
-
-                  <tbody>
-
-                    ${list
-                      .map((invoice) => {
-
-                        const id =
-                          invoice.id;
-
-                        const invoiceNumber =
-                          invoice.invoice_number ??
-                          invoice.invoiceNumber ??
-                          invoice.number ??
-                          'Invoice';
-
-                        const supplier =
-                          invoice.supplier_name ??
-                          invoice.supplierName ??
-                          invoice.vendor_name ??
-                          invoice.vendorName ??
-                          invoice.supplier ??
-                          '—';
-
-                        const invoiceDate =
-                          invoice.invoice_date ??
-                          invoice.invoiceDate ??
-                          invoice.date ??
-                          invoice.updated_at ??
-                          invoice.updatedAt;
-
-                        const status =
-                          invoice.status ??
-                          'pending';
-
-                        const safeId =
-                          escapeHtml(id);
-
-                        const normalizedStatus =
-                          String(status).toLowerCase();
-
-                        return `
-                          <tr
-                            data-id="${safeId}"
-                            class="invoice-row"
-                            style="
-                              cursor:pointer;
-                              border-top:1px solid #f0f2f5;
-                            "
-                          >
-
-                            <td style="padding:16px;">
-
-                              <div
-                                style="
-                                  font-weight:700;
-                                  color:#101828;
-                                "
-                              >
-                                ${escapeHtml(invoiceNumber)}
-                              </div>
-
-                              ${
-                                invoice.file_name ||
-                                invoice.fileName ||
-                                invoice.original_filename
-                                  ? `
-                                    <div
-                                      style="
-                                        margin-top:4px;
-                                        color:#667085;
-                                        font-size:12px;
-                                      "
-                                    >
-                                      ${escapeHtml(
-                                        invoice.file_name ||
-                                        invoice.fileName ||
-                                        invoice.original_filename
-                                      )}
-                                    </div>
-                                  `
-                                  : ''
-                              }
-
-                            </td>
-
-                            <td
-                              style="
-                                padding:16px;
-                                color:#475467;
-                              "
-                            >
-                              ${escapeHtml(supplier)}
-                            </td>
-
-                            <td
-                              style="
-                                padding:16px;
-                                color:#475467;
-                                white-space:nowrap;
-                              "
-                            >
-                              ${escapeHtml(
-                                formatDate(invoiceDate)
-                              )}
-                            </td>
-
-                            <td
-                              style="
-                                padding:16px;
-                                text-align:right;
-                                font-weight:700;
-                                color:#101828;
-                                white-space:nowrap;
-                              "
-                            >
-                              R ${formatAmount(invoice)}
-                            </td>
-
-                            <td style="padding:16px;">
-
-                              <span
-                                class="invoice-status ${statusClass(status)}"
-                                style="
-                                  display:inline-flex;
-                                  align-items:center;
-                                  padding:5px 10px;
-                                  border-radius:999px;
-                                  font-size:12px;
-                                  font-weight:700;
-                                "
-                              >
-                                ${escapeHtml(
-                                  statusLabel(status)
-                                )}
-                              </span>
-
-                            </td>
-
-                            <td
-                              style="
-                                padding:16px;
-                                text-align:right;
-                                white-space:nowrap;
-                              "
-                            >
-
-                              <div
-                                style="
-                                  display:flex;
-                                  justify-content:flex-end;
-                                  gap:8px;
-                                "
-                              >
-
-                                <button
-                                  type="button"
-                                  class="btn btn-ghost invoice-view-btn"
-                                  data-action="view"
-                                  data-id="${safeId}"
-                                >
-                                  View
-                                </button>
-
-                                ${
-                                  [
-                                    'pending',
-                                    'processing',
-                                    'exception',
-                                    'duplicate'
-                                  ].includes(normalizedStatus)
-                                    ? `
-                                      <button
-                                        type="button"
-                                        class="btn btn-primary invoice-approve-btn"
-                                        data-action="approve"
-                                        data-id="${safeId}"
-                                      >
-                                        Approve
-                                      </button>
-                                    `
-                                    : ''
-                                }
-
-                                ${
-                                  [
-                                    'pending',
-                                    'processing',
-                                    'exception',
-                                    'duplicate'
-                                  ].includes(normalizedStatus)
-                                    ? `
-                                      <button
-                                        type="button"
-                                        class="btn btn-ghost invoice-reject-btn"
-                                        data-action="reject"
-                                        data-id="${safeId}"
-                                        style="
-                                          color:#b42318;
-                                          border-color:#fecdca;
-                                        "
-                                      >
-                                        Reject
-                                      </button>
-                                    `
-                                    : ''
-                                }
-
-                                ${
-                                  [
-                                    'exception',
-                                    'duplicate'
-                                  ].includes(normalizedStatus)
-                                    ? `
-                                      <button
-                                        type="button"
-                                        class="btn btn-ghost invoice-retry-btn"
-                                        data-action="retry"
-                                        data-id="${safeId}"
-                                      >
-                                        Retry
-                                      </button>
-                                    `
-                                    : ''
-                                }
-
-                                <button
-                                  type="button"
-                                  class="btn btn-danger-ghost invoice-delete-btn"
-                                  data-action="delete"
-                                  data-id="${safeId}"
-                                  style="
-                                    color:#b42318;
-                                    border:1px solid #fecdca;
-                                    background:#fff7f7;
-                                  "
-                                >
-                                  Delete
-                                </button>
-
-                              </div>
-
-                            </td>
-
-                          </tr>
-                        `;
-                      })
-                      .join('')}
-
-                  </tbody>
-
-                </table>
-
-              </div>
-
-            </div>
-          `
+      // -----------------------------------------------------------------------
+      // Route
+      // -----------------------------------------------------------------------
+
+      let routeHandler =
+        routes[hash];
+
+      if (!routeHandler) {
+        if (invoiceMatch) {
+          routeHandler =
+            () =>
+              renderInvoiceDetailPage(
+                invoiceMatch[1]
+              );
+        } else if (reviewMatch) {
+          routeHandler =
+            () =>
+              renderInvoiceDetailPage(
+                reviewMatch[1]
+              );
+        }
       }
 
-    </div>
-  `;
-}
-function renderInvoicesList(invoices, filters = {}, title = 'Invoices') {
-  const list = Array.isArray(invoices) ? invoices : [];
+      if (!routeHandler) {
+        location.hash =
+          '#/dashboard';
 
-  const statusLabel = (status) => {
-    const value = String(status || 'pending').toLowerCase();
+        return;
+      }
 
-    return value
-      .replace(/[-_]/g, ' ')
-      .replace(/\b\w/g, (char) => char.toUpperCase());
-  };
+      await routeHandler();
+
+    } catch (error) {
+      console.error(
+        '[Router] Unhandled router error:',
+        error
+      );
+
+      handleApiError(
+        error,
+        'Unable to load this page.'
+      );
+
+    } finally {
+      routerRunning =
+        false;
+    }
+  }
 
 
 // ===========================================================================
