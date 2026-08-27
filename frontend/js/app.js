@@ -3537,6 +3537,7 @@ function bindInvoiceListEvents(container) {
     `;
   }
 
+ 
   // ===========================================================================
   // SINGLE INVOICE PROCESSING
   // ===========================================================================
@@ -3599,33 +3600,91 @@ function bindInvoiceListEvents(container) {
       );
 
       const result =
-        
+        await API.captureInvoice(
+          file
+        );
+
+      clearInterval(
+        stageTimer
+      );
+
+      stageTimer =
+        null;
+
+      if (
+        !result ||
+        !result.invoice ||
+        !result.invoice.id
+      ) {
+        throw new Error(
+          'The server processed the invoice but did not return an invoice ID.'
+        );
+      }
+
+      root.innerHTML =
+        renderProcessing(
+          PROCESSING_STAGES.length - 1,
+          PROCESSING_STAGES,
+          false
+        );
+
+      setTimeout(
+        () => {
+          location.hash =
+            `#/review/${result.invoice.id}`;
+        },
+        500
+      );
+
+      if (result.warning) {
+        setTimeout(
+          () => {
+            toast(
+              result.warning,
+              'error'
+            );
+          },
+          800
+        );
+      }
+
     } catch (error) {
+      if (stageTimer) {
+        clearInterval(
+          stageTimer
+        );
 
-      // bulk error handling...
+        stageTimer =
+          null;
+      }
 
+      console.error(
+        '[Capture] Invoice capture failed:',
+        error
+      );
+
+      if (
+        isAuthError(error)
+      ) {
+        handleSessionExpired(
+          'Your session expired while uploading the invoice. Please sign in again.'
+        );
+
+        return;
+      }
+
+      toast(
+        `Upload failed: ${
+          error?.message ||
+          'Unknown error'
+        }`,
+        'error'
+      );
+
+      location.hash =
+        '#/capture';
     }
-
-    // progress...
   }
-
-  // finished...
-}
-
-
-// ===========================================================================
-// SINGLE INVOICE PROCESSING
-// ===========================================================================
-
-async function runCapture(file) {
-
-  // THIS is where this belongs:
-
-  const result =
-    await API.captureInvoice(file);
-
-  // ...
-}
   // ===========================================================================
   // REVIEW
   // ===========================================================================
