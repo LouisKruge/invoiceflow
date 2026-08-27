@@ -3599,19 +3599,7 @@ function bindInvoiceListEvents(container) {
       );
 
       const result =
-        async function runBulkCapture(files) {
-
-  // bulk processing...
-
-  for (...) {
-
-    try {
-
-      const response =
-        await API.captureInvoice(file);
-
-      // bulk success handling...
-
+        
     } catch (error) {
 
       // bulk error handling...
