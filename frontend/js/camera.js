@@ -110,18 +110,22 @@ const Camera = (() => {
     bar.querySelector('[data-r="keep"]').onclick = () => onKeep();
   }
 
-  function openNativePicker({ capture, onCapture, onCancel }) {
+   function openNativePicker({ capture, multiple, onCapture, onCancel }) {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*,application/pdf';
     input.className = 'file-input-hidden';
     if (capture) input.setAttribute('capture', 'environment');
+    if (multiple) input.setAttribute('multiple', 'multiple');
     document.body.appendChild(input);
     input.onchange = () => {
-      const file = input.files[0];
+      const files = Array.from(input.files || []);
       input.remove();
-      if (file) onCapture(file); else onCancel && onCancel();
+      if (files.length) onCapture(multiple ? files : files[0]);
+      else onCancel && onCancel();
     };
+    input.click();
+  }
     input.click();
   }
 
