@@ -647,7 +647,537 @@
   window.addEventListener(
     'DOMContentLoaded',
     router
-  );
+  );// ===========================================================================
+// INVOICE LIST RENDERER
+// ===========================================================================
+
+function renderInvoicesList(
+  invoices,
+  filters = {},
+  title = 'Invoices'
+) {
+  const list =
+    Array.isArray(invoices)
+      ? invoices
+      : [];
+
+  const statusLabel = (status) => {
+    const value =
+      String(status || 'pending')
+        .toLowerCase();
+
+    return value
+      .replace(/[-_]/g, ' ')
+      .replace(/\b\w/g, (char) =>
+        char.toUpperCase()
+      );
+  };
+
+  const statusClass = (status) => {
+    const value =
+      String(status || 'pending')
+        .toLowerCase();
+
+    if (
+      value === 'approved'
+    ) {
+      return 'status-approved';
+    }
+
+    if (
+      value === 'rejected'
+    ) {
+      return 'status-rejected';
+    }
+
+    if (
+      value === 'exception' ||
+      value === 'duplicate'
+    ) {
+      return 'status-exception';
+    }
+
+    if (
+      value === 'processing' ||
+      value === 'pending'
+    ) {
+      return 'status-pending';
+    }
+
+    return 'status-default';
+  };
+
+  const formatDate = (value) => {
+    if (!value) {
+      return '—';
+    }
+
+    const date =
+      new Date(value);
+
+    if (
+      Number.isNaN(
+        date.getTime()
+      )
+    ) {
+      return String(value);
+    }
+
+    return date.toLocaleDateString(
+      undefined,
+      {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric'
+      }
+    );
+  };
+
+  const formatAmount = (
+    invoice
+  ) => {
+    const value =
+      invoice.total ??
+      invoice.amount ??
+      invoice.total_amount ??
+      invoice.invoice_total;
+
+    if (
+      value === null ||
+      value === undefined ||
+      value === ''
+    ) {
+      return '—';
+    }
+
+    const number =
+      Number(value);
+
+    if (
+      !Number.isFinite(number)
+    ) {
+      return escapeHtml(value);
+    }
+
+    return number.toLocaleString(
+      'en-ZA',
+      {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      }
+    );
+  };
+
+  return `
+    <div
+      style="
+        width:100%;
+      "
+    >
+
+      <!-- ===============================================================
+           HEADER
+           =============================================================== -->
+
+      <div
+        style="
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:20px;
+          margin-bottom:24px;
+          flex-wrap:wrap;
+        "
+      >
+
+        <div>
+          <h1
+            style="
+              margin:0;
+              font-size:28px;
+              font-weight:800;
+              color:#101828;
+            "
+          >
+            ${escapeHtml(title)}
+          </h1>
+
+          <p
+            style="
+              margin:6px 0 0;
+              color:#667085;
+              font-size:14px;
+            "
+          >
+            ${list.length}
+            invoice${list.length === 1 ? '' : 's'}
+          </p>
+        </div>
+
+        <div
+          style="
+            display:flex;
+            gap:10px;
+            align-items:center;
+          "
+        >
+
+          <button
+            type="button"
+            class="btn btn-primary"
+            id="btn-upload-invoice"
+          >
+            Upload Invoice
+          </button>
+
+        </div>
+
+      </div>
+
+      <!-- ===============================================================
+           EMPTY STATE
+           =============================================================== -->
+
+      ${
+        !list.length
+          ? `
+            <div
+              style="
+                background:#fff;
+                border:1px solid #e4e7ec;
+                border-radius:16px;
+                padding:56px 24px;
+                text-align:center;
+              "
+            >
+
+              <div
+                style="
+                  font-size:40px;
+                  margin-bottom:12px;
+                "
+              >
+                📄
+              </div>
+
+              <h2
+                style="
+                  margin:0 0 8px;
+                  color:#101828;
+                  font-size:20px;
+                "
+              >
+                No invoices found
+              </h2>
+
+              <p
+                style="
+                  margin:0;
+                  color:#667085;
+                  font-size:14px;
+                "
+              >
+                Upload an invoice to get started.
+              </p>
+
+            </div>
+          `
+          : `
+            <!-- =========================================================
+                 TABLE
+                 ========================================================= -->
+
+            <div
+              style="
+                background:#fff;
+                border:1px solid #e4e7ec;
+                border-radius:16px;
+                overflow:hidden;
+              "
+            >
+
+              <div
+                style="
+                  overflow-x:auto;
+                "
+              >
+
+                <table
+                  class="data-table"
+                  style="
+                    width:100%;
+                    border-collapse:collapse;
+                  "
+                >
+
+                  <thead>
+                    <tr>
+
+                      <th
+                        style="
+                          text-align:left;
+                          padding:14px 16px;
+                        "
+                      >
+                        Invoice
+                      </th>
+
+                      <th
+                        style="
+                          text-align:left;
+                          padding:14px 16px;
+                        "
+                      >
+                        Supplier
+                      </th>
+
+                      <th
+                        style="
+                          text-align:left;
+                          padding:14px 16px;
+                        "
+                      >
+                        Date
+                      </th>
+
+                      <th
+                        style="
+                          text-align:right;
+                          padding:14px 16px;
+                        "
+                      >
+                        Amount
+                      </th>
+
+                      <th
+                        style="
+                          text-align:left;
+                          padding:14px 16px;
+                        "
+                      >
+                        Status
+                      </th>
+
+                      <th
+                        style="
+                          text-align:right;
+                          padding:14px 16px;
+                        "
+                      >
+                        Actions
+                      </th>
+
+                    </tr>
+                  </thead>
+
+                  <tbody>
+
+                    ${list
+                      .map(
+                        (invoice) => {
+
+                          const id =
+                            invoice.id;
+
+                          const invoiceNumber =
+                            invoice.invoice_number ??
+                            invoice.invoiceNumber ??
+                            invoice.number ??
+                            'Invoice';
+
+                          const supplier =
+                            invoice.supplier_name ??
+                            invoice.supplierName ??
+                            invoice.vendor_name ??
+                            invoice.vendorName ??
+                            invoice.supplier ??
+                            '—';
+
+                          const invoiceDate =
+                            invoice.invoice_date ??
+                            invoice.invoiceDate ??
+                            invoice.date ??
+                            invoice.created_at ??
+                            invoice.createdAt;
+
+                          const status =
+                            invoice.status ??
+                            'pending';
+
+                          return `
+                            <tr
+                              data-id="${escapeHtml(id)}"
+                              style="
+                                cursor:pointer;
+                                border-top:1px solid #f0f2f5;
+                              "
+                            >
+
+                              <td
+                                style="
+                                  padding:16px;
+                                "
+                              >
+
+                                <div
+                                  style="
+                                    font-weight:700;
+                                    color:#101828;
+                                  "
+                                >
+                                  ${escapeHtml(
+                                    invoiceNumber
+                                  )}
+                                </div>
+
+                                ${
+                                  invoice.file_name ||
+                                  invoice.fileName
+                                    ? `
+                                      <div
+                                        style="
+                                          margin-top:4px;
+                                          color:#667085;
+                                          font-size:12px;
+                                        "
+                                      >
+                                        ${escapeHtml(
+                                          invoice.file_name ||
+                                          invoice.fileName
+                                        )}
+                                      </div>
+                                    `
+                                    : ''
+                                }
+
+                              </td>
+
+                              <td
+                                style="
+                                  padding:16px;
+                                  color:#475467;
+                                "
+                              >
+                                ${escapeHtml(
+                                  supplier
+                                )}
+                              </td>
+
+                              <td
+                                style="
+                                  padding:16px;
+                                  color:#475467;
+                                  white-space:nowrap;
+                                "
+                              >
+                                ${escapeHtml(
+                                  formatDate(
+                                    invoiceDate
+                                  )
+                                )}
+                              </td>
+
+                              <td
+                                style="
+                                  padding:16px;
+                                  text-align:right;
+                                  font-weight:700;
+                                  color:#101828;
+                                  white-space:nowrap;
+                                "
+                              >
+                                R
+                                ${formatAmount(
+                                  invoice
+                                )}
+                              </td>
+
+                              <td
+                                style="
+                                  padding:16px;
+                                "
+                              >
+
+                                <span
+                                  class="invoice-status ${statusClass(status)}"
+                                  style="
+                                    display:inline-flex;
+                                    align-items:center;
+                                    padding:5px 10px;
+                                    border-radius:999px;
+                                    font-size:12px;
+                                    font-weight:700;
+                                  "
+                                >
+                                  ${escapeHtml(
+                                    statusLabel(status)
+                                  )}
+                                </span>
+
+                              </td>
+
+                              <td
+                                style="
+                                  padding:16px;
+                                  text-align:right;
+                                  white-space:nowrap;
+                                "
+                              >
+
+                                <div
+                                  style="
+                                    display:flex;
+                                    justify-content:flex-end;
+                                    gap:8px;
+                                  "
+                                >
+
+                                  <button
+                                    type="button"
+                                    class="btn btn-ghost invoice-view-btn"
+                                    data-action="view"
+                                    data-id="${escapeHtml(id)}"
+                                  >
+                                    View
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    class="btn btn-danger-ghost invoice-delete-btn"
+                                    data-action="delete"
+                                    data-id="${escapeHtml(id)}"
+                                    style="
+                                      color:#b42318;
+                                      border:1px solid #fecdca;
+                                      background:#fff7f7;
+                                    "
+                                  >
+                                    Delete
+                                  </button>
+
+                                </div>
+
+                              </td>
+
+                            </tr>
+                          `;
+                        }
+                      )
+                      .join('')}
+
+                  </tbody>
+
+                </table>
+
+              </div>
+
+            </div>
+          `
+      }
+
+    </div>
+  `;
+}
 
   // ===========================================================================
   // SHELL
