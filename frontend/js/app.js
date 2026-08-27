@@ -1757,29 +1757,28 @@
     }
 
     // =========================================================================
-    // UPLOAD INVOICE
+    // BULK UPLOAD
     // =========================================================================
+    //
+    // This uses the standard browser file input.
     //
     // IMPORTANT:
     //
-    // The previous implementation depended on:
+    // The previous implementation had:
     //
-    //     Camera.openNativePicker()
+    //     fileInput.multiple = false;
     //
-    // That function is not guaranteed to exist in the browser environment.
+    // and then processed only:
     //
-    // We now use the standard HTML file input API instead.
+    //     files[0]
     //
-    // This works with:
+    // This version supports multiple invoices.
     //
-    // - Chrome
-    // - Edge
-    // - Firefox
-    // - Safari
-    // - Windows
-    // - macOS
-    // - Android
-    // - iPhone/iPad
+    // The selected files are processed one at a time through the existing:
+    //
+    //     API.captureInvoice(file)
+    //
+    // endpoint.
     //
     // Supported:
     //
@@ -1788,6 +1787,10 @@
     // - JPEG
     // - PNG
     // - WEBP
+    // - GIF
+    // - BMP
+    // - HEIC
+    // - HEIF
     //
     // =========================================================================
 
@@ -1832,8 +1835,13 @@
       fileInput.accept =
         'image/*,.pdf,application/pdf';
 
+      // -----------------------------------------------------------------------
+      // IMPORTANT:
+      // Allow multiple files to be selected.
+      // -----------------------------------------------------------------------
+
       fileInput.multiple =
-        false;
+        true;
 
       fileInput.style.position =
         'fixed';
@@ -1863,145 +1871,253 @@
       );
 
       // -----------------------------------------------------------------------
-      // When the user selects a file.
+      // File validation helper.
+      // -----------------------------------------------------------------------
+
+      function validateInvoiceFile(
+        file
+      ) {
+        if (!file) {
+          return {
+            valid: false,
+            message:
+              'No file was selected.',
+          };
+        }
+
+        const fileName =
+          String(
+            file.name ||
+            ''
+          ).toLowerCase();
+
+        const isPdf =
+          file.type ===
+            'application/pdf' ||
+          fileName.endsWith(
+            '.pdf'
+          );
+
+        const isImage =
+          file.type.startsWith(
+            'image/'
+          ) ||
+          /\.(jpg|jpeg|png|webp|gif|bmp|heic|heif)$/i.test(
+            fileName
+          );
+
+        if (
+          !isPdf &&
+          !isImage
+        ) {
+          return {
+            valid: false,
+            message:
+              'Please select a PDF or image invoice.',
+          };
+        }
+
+        // ---------------------------------------------------------------------
+        // 25 MB per-file frontend limit.
+        // ---------------------------------------------------------------------
+
+        const maxFileSize =
+          25 *
+          1024 *
+          1024;
+
+        if (
+          file.size >
+          maxFileSize
+        ) {
+          return {
+            valid: false,
+            message:
+              'The invoice file is too large. Maximum size is 25 MB.',
+          };
+        }
+
+        if (
+          file.size <= 0
+        ) {
+          return {
+            valid: false,
+            message:
+              'The selected file is empty.',
+          };
+        }
+
+        return {
+          valid: true,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // When the user selects one or more files.
       // -----------------------------------------------------------------------
 
       fileInput.addEventListener(
         'change',
-        (event) => {
+        async (event) => {
           try {
-            const files =
+            const fileList =
               event.target.files;
 
             if (
-              !files ||
-              !files.length
+              !fileList ||
+              !fileList.length
             ) {
               console.log(
-                '[Capture] File picker closed without selecting a file.'
+                '[Capture] File picker closed without selecting files.'
               );
 
               return;
             }
 
-            const file =
-              files[0];
+            const files =
+              Array.from(
+                fileList
+              );
 
             console.log(
-              '[Capture] Invoice file selected:',
-              {
-                name:
-                  file.name,
+              '[Capture] Invoice files selected:',
+              files.map(
+                (file) => ({
+                  name:
+                    file.name,
 
-                type:
-                  file.type,
+                  type:
+                    file.type,
 
-                size:
-                  file.size,
+                  size:
+                    file.size,
 
-                lastModified:
-                  file.lastModified
+                  lastModified:
+                    file.lastModified,
+                })
+              )
+            );
+
+            // -----------------------------------------------------------------
+            // Validate every selected file before processing anything.
+            // -----------------------------------------------------------------
+
+            const validFiles = [];
+
+            const invalidFiles = [];
+
+            files.forEach(
+              (file) => {
+                const validation =
+                  validateInvoiceFile(
+                    file
+                  );
+
+                if (
+                  validation.valid
+                ) {
+                  validFiles.push(
+                    file
+                  );
+                } else {
+                  invalidFiles.push({
+                    file,
+                    message:
+                      validation.message,
+                  });
+                }
               }
             );
 
             // -----------------------------------------------------------------
-            // Validate file.
+            // Tell the user about invalid files.
             // -----------------------------------------------------------------
 
-            const fileName =
-              String(
-                file.name ||
-                ''
-              ).toLowerCase();
-
-            const isPdf =
-              file.type ===
-                'application/pdf' ||
-              fileName.endsWith(
-                '.pdf'
-              );
-
-            const isImage =
-              file.type.startsWith(
-                'image/'
-              ) ||
-              /\.(jpg|jpeg|png|webp|gif|bmp|heic|heif)$/i.test(
-                fileName
-              );
-
             if (
-              !isPdf &&
-              !isImage
+              invalidFiles.length
             ) {
+              console.warn(
+                '[Capture] Invalid invoice files:',
+                invalidFiles
+              );
+
+              const invalidNames =
+                invalidFiles
+                  .map(
+                    (item) =>
+                      item.file.name
+                  )
+                  .slice(
+                    0,
+                    3
+                  );
+
+              const suffix =
+                invalidFiles.length > 3
+                  ? ` and ${invalidFiles.length - 3} more`
+                  : '';
+
               toast(
-                'Please select a PDF or image invoice.',
+                `${invalidFiles.length} file${
+                  invalidFiles.length === 1
+                    ? ''
+                    : 's'
+                } skipped: ${
+                  invalidNames.join(
+                    ', '
+                  )
+                }${suffix}`,
                 'error'
               );
+            }
 
-              fileInput.value =
-                '';
+            if (
+              !validFiles.length
+            ) {
+              toast(
+                'No valid invoice files were selected.',
+                'error'
+              );
 
               return;
             }
 
             // -----------------------------------------------------------------
-            // Validate file size.
+            // Single file:
             //
-            // 25 MB is a safe frontend limit.
-            // The backend may have its own limit as well.
+            // Keep the original behaviour and send directly into the
+            // single-invoice processing flow.
             // -----------------------------------------------------------------
 
-            const maxFileSize =
-              25 *
-              1024 *
-              1024;
-
             if (
-              file.size >
-              maxFileSize
+              validFiles.length === 1
             ) {
-              toast(
-                'The invoice file is too large. Maximum size is 25 MB.',
-                'error'
+              await runCapture(
+                validFiles[0]
               );
-
-              fileInput.value =
-                '';
-
-              return;
-            }
-
-            if (
-              file.size <= 0
-            ) {
-              toast(
-                'The selected file is empty.',
-                'error'
-              );
-
-              fileInput.value =
-                '';
 
               return;
             }
 
             // -----------------------------------------------------------------
-            // Pass the actual File object into the existing invoice pipeline.
+            // Multiple files:
+            //
+            // Process them sequentially.
             // -----------------------------------------------------------------
 
-            runCapture(
-              file
+            await runBulkCapture(
+              validFiles
             );
 
           } catch (error) {
             console.error(
-              '[Capture] Error handling selected invoice:',
+              '[Capture] Error handling selected invoice files:',
               error
             );
 
             toast(
               error?.message ||
-              'Unable to read the selected invoice.',
+              'Unable to read the selected invoice files.',
               'error'
             );
 
@@ -2009,7 +2125,7 @@
             // -----------------------------------------------------------------
             // Clear the input.
             //
-            // This allows the user to select the exact same file again.
+            // This allows the user to select the exact same files again.
             // -----------------------------------------------------------------
 
             fileInput.value =
@@ -2027,7 +2143,7 @@
           event.preventDefault();
 
           console.log(
-            '[Capture] Opening browser file picker...'
+            '[Capture] Opening browser file picker for bulk invoice upload...'
           );
 
           try {
@@ -2049,7 +2165,7 @@
   }
 
   // ===========================================================================
-  // INVOICE PROCESSING
+  // BULK INVOICE PROCESSING
   // ===========================================================================
 
   const PROCESSING_STAGES = [
@@ -2058,6 +2174,722 @@
     'Extracting invoice information...',
     'Validating information...',
   ];
+
+  /**
+   * Process multiple invoices one at a time.
+   *
+   * This deliberately uses the existing API.captureInvoice(file) method
+   * instead of requiring a new backend endpoint.
+   *
+   * That means the backend does not have to understand a multipart array.
+   * The frontend simply sends each invoice through the same proven pipeline.
+   */
+  async function runBulkCapture(
+    files
+  ) {
+    if (
+      !Array.isArray(files) ||
+      !files.length
+    ) {
+      toast(
+        'No invoice files were selected.',
+        'error'
+      );
+
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // Make a safe copy so the original FileList is never mutated.
+    // -------------------------------------------------------------------------
+
+    const invoiceFiles =
+      Array.from(
+        files
+      );
+
+    const total =
+      invoiceFiles.length;
+
+    const results = [];
+
+    let successful =
+      0;
+
+    let failed =
+      0;
+
+    // -------------------------------------------------------------------------
+    // Initial processing screen.
+    // -------------------------------------------------------------------------
+
+    renderBulkProcessing(
+      0,
+      total,
+      invoiceFiles[0],
+      successful,
+      failed,
+      results,
+      'Preparing invoices...'
+    );
+
+    // -------------------------------------------------------------------------
+    // Process sequentially.
+    //
+    // Sequential processing is safer for OCR / AI workloads because it:
+    //
+    // 1. avoids flooding the backend,
+    // 2. avoids browser memory spikes,
+    // 3. reduces simultaneous API requests,
+    // 4. works with the existing single-file endpoint.
+    // -------------------------------------------------------------------------
+
+    for (
+      let index = 0;
+      index < invoiceFiles.length;
+      index++
+    ) {
+      const file =
+        invoiceFiles[index];
+
+      const currentNumber =
+        index + 1;
+
+      renderBulkProcessing(
+        currentNumber - 1,
+        total,
+        file,
+        successful,
+        failed,
+        results,
+        `Processing invoice ${currentNumber} of ${total}...`
+      );
+
+      try {
+        console.log(
+          '[Bulk Capture] Processing invoice:',
+          {
+            index:
+              currentNumber,
+
+            total,
+
+            name:
+              file.name,
+
+            type:
+              file.type,
+
+            size:
+              file.size,
+          }
+        );
+
+        // ---------------------------------------------------------------------
+        // Use the existing production invoice capture API.
+        // ---------------------------------------------------------------------
+
+        const response =
+          await API.captureInvoice(
+            file
+          );
+
+        if (
+          !response ||
+          !response.invoice ||
+          !response.invoice.id
+        ) {
+          throw new Error(
+            'The server processed the invoice but did not return an invoice ID.'
+          );
+        }
+
+        successful++;
+
+        results.push({
+          success: true,
+
+          fileName:
+            file.name,
+
+          invoiceId:
+            response.invoice.id,
+
+          invoice:
+            response.invoice,
+
+          warning:
+            response.warning ||
+            null,
+        });
+
+        console.log(
+          '[Bulk Capture] Invoice processed successfully:',
+          {
+            file:
+              file.name,
+
+            invoiceId:
+              response.invoice.id,
+          }
+        );
+
+      } catch (error) {
+        console.error(
+          '[Bulk Capture] Invoice processing failed:',
+          {
+            file:
+              file.name,
+
+            error,
+          }
+        );
+
+        // ---------------------------------------------------------------------
+        // Authentication failure:
+        //
+        // There is no point continuing if the entire session has expired.
+        // ---------------------------------------------------------------------
+
+        if (
+          isAuthError(error)
+        ) {
+          handleSessionExpired(
+            'Your session expired while processing the invoices. Please sign in again.'
+          );
+
+          return;
+        }
+
+        failed++;
+
+        results.push({
+          success: false,
+
+          fileName:
+            file.name,
+
+          error:
+            error?.message ||
+            'Unknown processing error.',
+        });
+      }
+
+      // -----------------------------------------------------------------------
+      // Update progress after each completed invoice.
+      // -----------------------------------------------------------------------
+
+      renderBulkProcessing(
+        currentNumber,
+        total,
+        invoiceFiles[
+          Math.min(
+            currentNumber,
+            total - 1
+          )
+        ],
+        successful,
+        failed,
+        results,
+        currentNumber === total
+          ? 'Finishing batch...'
+          : `Completed ${currentNumber} of ${total} invoices...`
+      );
+    }
+
+    // =========================================================================
+    // FINAL RESULT
+    // =========================================================================
+
+    renderBulkProcessing(
+      total,
+      total,
+      null,
+      successful,
+      failed,
+      results,
+      'Batch processing complete.'
+    );
+
+    // -------------------------------------------------------------------------
+    // Show a useful completion message.
+    // -------------------------------------------------------------------------
+
+    if (
+      successful &&
+      !failed
+    ) {
+      toast(
+        `${successful} invoice${
+          successful === 1
+            ? ''
+            : 's'
+        } processed successfully.`,
+        'success'
+      );
+
+    } else if (
+      successful &&
+      failed
+    ) {
+      toast(
+        `${successful} processed successfully. ${failed} failed.`,
+        'error'
+      );
+
+    } else {
+      toast(
+        'None of the selected invoices could be processed.',
+        'error'
+      );
+    }
+
+    // -------------------------------------------------------------------------
+    // Give the user a moment to see the completed result before returning
+    // to the invoice list.
+    // -------------------------------------------------------------------------
+
+    setTimeout(
+      () => {
+        location.hash =
+          '#/invoices';
+      },
+      1200
+    );
+  }
+
+  // ===========================================================================
+  // BULK PROCESSING UI
+  // ===========================================================================
+
+  function renderBulkProcessing(
+    completed,
+    total,
+    currentFile,
+    successful,
+    failed,
+    results,
+    statusMessage
+  ) {
+    const safeTotal =
+      Math.max(
+        Number(total) || 0,
+        1
+      );
+
+    const safeCompleted =
+      Math.min(
+        Math.max(
+          Number(completed) || 0,
+          0
+        ),
+        safeTotal
+      );
+
+    const percentage =
+      Math.round(
+        (
+          safeCompleted /
+          safeTotal
+        ) *
+        100
+      );
+
+    const currentFileName =
+      currentFile?.name ||
+      '';
+
+    const failedResults =
+      Array.isArray(results)
+        ? results.filter(
+            (result) =>
+              !result.success
+          )
+        : [];
+
+    const successResults =
+      Array.isArray(results)
+        ? results.filter(
+            (result) =>
+              result.success
+          )
+        : [];
+
+    root.innerHTML = `
+      <div
+        style="
+          min-height:100vh;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:32px 20px;
+          background:#f6f8fb;
+          box-sizing:border-box;
+          font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+        "
+      >
+
+        <div
+          style="
+            width:100%;
+            max-width:680px;
+            background:#fff;
+            border:1px solid #e4e7ec;
+            border-radius:20px;
+            padding:32px;
+            box-sizing:border-box;
+            box-shadow:0 20px 60px rgba(16,24,40,.08);
+          "
+        >
+
+          <div
+            style="
+              display:flex;
+              align-items:flex-start;
+              justify-content:space-between;
+              gap:20px;
+              margin-bottom:28px;
+            "
+          >
+
+            <div>
+
+              <div
+                style="
+                  font-size:12px;
+                  font-weight:800;
+                  letter-spacing:.12em;
+                  text-transform:uppercase;
+                  color:#667085;
+                  margin-bottom:8px;
+                "
+              >
+                InvoiceFlow
+              </div>
+
+              <h1
+                style="
+                  margin:0;
+                  font-size:28px;
+                  line-height:1.15;
+                  color:#101828;
+                "
+              >
+                Processing invoices
+              </h1>
+
+              <p
+                style="
+                  margin:8px 0 0;
+                  color:#667085;
+                  font-size:15px;
+                "
+              >
+                ${escapeHtml(statusMessage || 'Processing...')}
+              </p>
+
+            </div>
+
+            <div
+              style="
+                min-width:76px;
+                text-align:right;
+              "
+            >
+              <div
+                style="
+                  font-size:26px;
+                  font-weight:800;
+                  color:#101828;
+                "
+              >
+                ${percentage}%
+              </div>
+
+              <div
+                style="
+                  font-size:12px;
+                  color:#667085;
+                "
+              >
+                ${safeCompleted} / ${safeTotal}
+              </div>
+            </div>
+
+          </div>
+
+          <div
+            style="
+              width:100%;
+              height:10px;
+              background:#eaecf0;
+              border-radius:999px;
+              overflow:hidden;
+              margin-bottom:24px;
+            "
+          >
+            <div
+              style="
+                width:${percentage}%;
+                height:100%;
+                background:#111827;
+                border-radius:999px;
+                transition:width .3s ease;
+              "
+            ></div>
+          </div>
+
+          ${
+            currentFileName
+              ? `
+                <div
+                  style="
+                    padding:16px;
+                    border:1px solid #eaecf0;
+                    border-radius:14px;
+                    background:#f9fafb;
+                    margin-bottom:20px;
+                  "
+                >
+                  <div
+                    style="
+                      font-size:12px;
+                      font-weight:700;
+                      color:#667085;
+                      margin-bottom:5px;
+                    "
+                  >
+                    CURRENT INVOICE
+                  </div>
+
+                  <div
+                    style="
+                      font-size:15px;
+                      font-weight:700;
+                      color:#101828;
+                      word-break:break-word;
+                    "
+                  >
+                    ${escapeHtml(currentFileName)}
+                  </div>
+                </div>
+              `
+              : ''
+          }
+
+          <div
+            style="
+              display:grid;
+              grid-template-columns:repeat(3,minmax(0,1fr));
+              gap:12px;
+              margin-bottom:24px;
+            "
+          >
+
+            <div
+              style="
+                padding:16px;
+                border:1px solid #eaecf0;
+                border-radius:14px;
+              "
+            >
+              <div
+                style="
+                  font-size:12px;
+                  color:#667085;
+                  margin-bottom:4px;
+                "
+              >
+                Total
+              </div>
+
+              <div
+                style="
+                  font-size:22px;
+                  font-weight:800;
+                  color:#101828;
+                "
+              >
+                ${safeTotal}
+              </div>
+            </div>
+
+            <div
+              style="
+                padding:16px;
+                border:1px solid #eaecf0;
+                border-radius:14px;
+              "
+            >
+              <div
+                style="
+                  font-size:12px;
+                  color:#667085;
+                  margin-bottom:4px;
+                "
+              >
+                Successful
+              </div>
+
+              <div
+                style="
+                  font-size:22px;
+                  font-weight:800;
+                  color:#101828;
+                "
+              >
+                ${Number(successful) || 0}
+              </div>
+            </div>
+
+            <div
+              style="
+                padding:16px;
+                border:1px solid #eaecf0;
+                border-radius:14px;
+              "
+            >
+              <div
+                style="
+                  font-size:12px;
+                  color:#667085;
+                  margin-bottom:4px;
+                "
+              >
+                Failed
+              </div>
+
+              <div
+                style="
+                  font-size:22px;
+                  font-weight:800;
+                  color:#101828;
+                "
+              >
+                ${Number(failed) || 0}
+              </div>
+            </div>
+
+          </div>
+
+          ${
+            failedResults.length
+              ? `
+                <div
+                  style="
+                    margin-top:8px;
+                    padding:16px;
+                    border-radius:14px;
+                    background:#fff7f7;
+                    border:1px solid #fecdca;
+                  "
+                >
+
+                  <div
+                    style="
+                      font-size:13px;
+                      font-weight:800;
+                      color:#b42318;
+                      margin-bottom:10px;
+                    "
+                  >
+                    Failed invoices
+                  </div>
+
+                  <div
+                    style="
+                      display:flex;
+                      flex-direction:column;
+                      gap:8px;
+                    "
+                  >
+                    ${failedResults
+                      .slice(
+                        0,
+                        8
+                      )
+                      .map(
+                        (result) => `
+                          <div
+                            style="
+                              font-size:13px;
+                              color:#7a271a;
+                              word-break:break-word;
+                            "
+                          >
+                            <strong>
+                              ${escapeHtml(
+                                result.fileName
+                              )}
+                            </strong>
+                            — 
+                            ${escapeHtml(
+                              result.error
+                            )}
+                          </div>
+                        `
+                      )
+                      .join('')}
+                  </div>
+
+                  ${
+                    failedResults.length > 8
+                      ? `
+                        <div
+                          style="
+                            margin-top:8px;
+                            font-size:12px;
+                            color:#b42318;
+                          "
+                        >
+                          ${
+                            failedResults.length - 8
+                          } more failed invoice${
+                            failedResults.length - 8 === 1
+                              ? ''
+                              : 's'
+                          }.
+                        </div>
+                      `
+                      : ''
+                  }
+
+                </div>
+              `
+              : ''
+          }
+
+          ${
+            successResults.length &&
+            safeCompleted === safeTotal
+              ? `
+                <div
+                  style="
+                    margin-top:16px;
+                    padding:14px 16px;
+                    border-radius:12px;
+                    background:#f6fef9;
+                    border:1px solid #abefc6;
+                    color:#067647;
+                    font-size:14px;
+                    font-weight:700;
+                  "
+                >
+                  Batch complete. Returning to invoices...
+                </div>
+              `
+              : ''
+          }
+
+        </div>
+
+      </div>
+    `;
+  }
+
+  // ===========================================================================
+  // SINGLE INVOICE PROCESSING
+  // ===========================================================================
 
   async function runCapture(
     file
@@ -3396,6 +4228,7 @@
     toast,
     handleSessionExpired,
     runCapture,
+    runBulkCapture,
   };
 
   console.log(
