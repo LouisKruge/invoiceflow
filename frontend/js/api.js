@@ -2,6 +2,7 @@
 // InvoiceFlow — Frontend API Module
 // =============================================================================
 // Browser-side API client.
+// Supports single and bulk invoice capture.
 // =============================================================================
 
 (() => {
@@ -474,7 +475,57 @@
   }
 
   // ===========================================================================
-  // CAPTURE
+  // FILE VALIDATION
+  // ===========================================================================
+
+  const ALLOWED_FILE_TYPES = [
+    'application/pdf',
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+    'image/heic',
+    'image/heif'
+  ];
+
+  const MAX_FILE_SIZE =
+    25 * 1024 * 1024;
+
+  function validateInvoiceFile(file) {
+    if (!file) {
+      throw new Error(
+        'No invoice file was provided.'
+      );
+    }
+
+    if (!(file instanceof File)) {
+      throw new Error(
+        'Invalid invoice file.'
+      );
+    }
+
+    if (
+      file.type &&
+      !ALLOWED_FILE_TYPES.includes(file.type)
+    ) {
+      throw new Error(
+        'Unsupported invoice file type. Please upload a PDF, JPG, PNG, WEBP, HEIC or HEIF file.'
+      );
+    }
+
+    if (
+      file.size >
+      MAX_FILE_SIZE
+    ) {
+      throw new Error(
+        'Invoice file is too large. Maximum file size is 25 MB.'
+      );
+    }
+
+    return true;
+  }
+
+  // ===========================================================================
+  // CAPTURE — SINGLE INVOICE
   // ===========================================================================
 
   function captureInvoice(
@@ -491,12 +542,10 @@
       );
     }
 
-    if (!file) {
-      return Promise.reject(
-        new Error(
-          'No invoice file was provided.'
-        )
-      );
+    try {
+      validateInvoiceFile(file);
+    } catch (error) {
+      return Promise.reject(error);
     }
 
     const form =
@@ -504,7 +553,8 @@
 
     form.append(
       'file',
-      file
+      file,
+      file.name || 'invoice'
     );
 
     return xhrUpload(
@@ -512,6 +562,171 @@
       form,
       onProgress
     );
+  }
+
+  // ===========================================================================
+  // CAPTURE — BULK
+  // ===========================================================================
+  //
+  // Uses the existing single-invoice endpoint.
+  //
+  // Each invoice is processed independently.
+  // If one invoice fails, the remaining invoices continue.
+  // ===========================================================================
+
+  async function captureInvoices(
+    files,
+    onItemProgress,
+    onItemComplete
+  ) {
+    if (!token()) {
+      invalidateSession();
+
+      throw new Error(
+        'Your session has expired. Please sign in again.'
+      );
+    }
+
+    if (!files) {
+      throw new Error(
+        'No invoice files were provided.'
+      );
+    }
+
+    const fileArray =
+      Array.from(files);
+
+    if (!fileArray.length) {
+      throw new Error(
+        'No invoice files were provided.'
+      );
+    }
+
+    const results = [];
+
+    for (
+      let index = 0;
+      index < fileArray.length;
+      index++
+    ) {
+      const file =
+        fileArray[index];
+
+      const result = {
+        index,
+
+        file,
+
+        fileName:
+          file?.name ||
+          `Invoice ${index + 1}`,
+
+        status:
+          'processing',
+
+        success:
+          false,
+
+        data:
+          null,
+
+        error:
+          null
+      };
+
+      results.push(result);
+
+      try {
+        validateInvoiceFile(file);
+
+        result.status =
+          'uploading';
+
+        const data =
+          await captureInvoice(
+            file,
+            (progress) => {
+              if (
+                typeof onItemProgress ===
+                'function'
+              ) {
+                onItemProgress({
+                  index,
+
+                  file,
+
+                  fileName:
+                    result.fileName,
+
+                  progress,
+
+                  status:
+                    progress >= 1
+                      ? 'processing'
+                      : 'uploading'
+                });
+              }
+            }
+          );
+
+        result.status =
+          'completed';
+
+        result.success =
+          true;
+
+        result.data =
+          data;
+
+        if (
+          typeof onItemComplete ===
+          'function'
+        ) {
+          onItemComplete(
+            result
+          );
+        }
+      } catch (error) {
+        result.status =
+          'failed';
+
+        result.success =
+          false;
+
+        result.error =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        if (
+          typeof onItemComplete ===
+          'function'
+        ) {
+          onItemComplete(
+            result
+          );
+        }
+      }
+    }
+
+    return {
+      results,
+
+      total:
+        results.length,
+
+      uploaded:
+        results.filter(
+          result =>
+            result.success
+        ).length,
+
+      failed:
+        results.filter(
+          result =>
+            !result.success
+        ).length
+    };
   }
 
   // ===========================================================================
@@ -528,12 +743,15 @@
       );
     }
 
+    validateInvoiceFile(file);
+
     const form =
       new FormData();
 
     form.append(
       'file',
-      file
+      file,
+      file.name || 'invoice'
     );
 
     return request(
@@ -549,24 +767,6 @@
   // UPDATE HELPERS
   // ===========================================================================
 
-  /*
-   * Convert values coming from HTML inputs into sensible JSON values.
-   *
-   * IMPORTANT:
-   * HTML input.value is ALWAYS a string.
-   *
-   * Examples:
-   *
-   *   "true"   -> true
-   *   "false"  -> false
-   *   "123"    -> 123
-   *   "12.50"  -> 12.5
-   *   "ABC"    -> "ABC"
-   *
-   * Empty strings remain empty strings because some invoice fields may
-   * legitimately be optional text fields.
-   */
-
   function normalizeUpdateValue(
     value
   ) {
@@ -578,10 +778,6 @@
 
     const trimmed =
       value.trim();
-
-    // -------------------------------------------------------------------------
-    // Boolean strings
-    // -------------------------------------------------------------------------
 
     if (
       trimmed.toLowerCase() ===
@@ -596,12 +792,6 @@
     ) {
       return false;
     }
-
-    // -------------------------------------------------------------------------
-    // Integer strings
-    //
-    // Only convert strings that are clearly integers.
-    // -------------------------------------------------------------------------
 
     if (
       /^-?\d+$/.test(trimmed)
@@ -618,10 +808,6 @@
       }
     }
 
-    // -------------------------------------------------------------------------
-    // Decimal / numeric strings
-    // -------------------------------------------------------------------------
-
     if (
       /^-?(?:\d+\.\d+|\d+\.)$/.test(
         trimmed
@@ -636,10 +822,6 @@
         return number;
       }
     }
-
-    // -------------------------------------------------------------------------
-    // Otherwise leave it as text.
-    // -------------------------------------------------------------------------
 
     return value;
   }
@@ -704,6 +886,7 @@
       '[InvoiceFlow] Updating invoice:',
       {
         id,
+
         fields:
           normalizedFields
       }
@@ -726,7 +909,9 @@
   // APPROVE
   // ===========================================================================
 
-  async function approveInvoice(id) {
+  async function approveInvoice(
+    id
+  ) {
     return request(
       `/invoices/${encodeURIComponent(id)}/approve`,
       {
@@ -783,7 +968,9 @@
     );
   }
 
-  async function exportSelected(ids) {
+  async function exportSelected(
+    ids
+  ) {
     return request(
       '/export/selected',
       {
@@ -988,6 +1175,10 @@
 
     // Capture
     captureInvoice,
+    captureInvoices,
+    validateInvoiceFile,
+
+    // Retry
     retryInvoice,
 
     // Editing
