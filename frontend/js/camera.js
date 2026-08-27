@@ -126,8 +126,7 @@ const Camera = (() => {
     };
     input.click();
   }
-    input.click();
-  }
+    
 
   return { open, openNativePicker };
 })();
