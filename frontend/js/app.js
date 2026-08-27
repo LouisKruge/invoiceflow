@@ -578,16 +578,7 @@
         }
       }
 
-     function renderInvoicesList(invoices, filters = {}, title = 'Invoices') {
-  const list = Array.isArray(invoices) ? invoices : [];
-
-  const statusLabel = (status) => {
-    const value = String(status || 'pending').toLowerCase();
-
-    return value
-      .replace(/[-_]/g, ' ')
-      .replace(/\b\w/g, (char) => char.toUpperCase());
-  };
+     
 
   const statusClass = (status) => {
     const value = String(status || 'pending').toLowerCase();
@@ -1062,7 +1053,16 @@
     </div>
   `;
 }
+function renderInvoicesList(invoices, filters = {}, title = 'Invoices') {
+  const list = Array.isArray(invoices) ? invoices : [];
 
+  const statusLabel = (status) => {
+    const value = String(status || 'pending').toLowerCase();
+
+    return value
+      .replace(/[-_]/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  };
 
 
 // ===========================================================================
