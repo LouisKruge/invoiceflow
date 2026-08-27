@@ -3681,92 +3681,45 @@ function bindInvoiceListEvents(container) {
       );
 
       const result =
-        await API.captureInvoice(
-          file
-        );
+        async function runBulkCapture(files) {
 
-      clearInterval(
-        stageTimer
-      );
+  // bulk processing...
 
-      stageTimer =
-        null;
+  for (...) {
 
-      if (
-        !result ||
-        !result.invoice ||
-        !result.invoice.id
-      ) {
-        throw new Error(
-          'The server processed the invoice but did not return an invoice ID.'
-        );
-      }
+    try {
 
-      root.innerHTML =
-        renderProcessing(
-          PROCESSING_STAGES.length - 1,
-          PROCESSING_STAGES,
-          false
-        );
+      const response =
+        await API.captureInvoice(file);
 
-      setTimeout(
-        () => {
-          location.hash =
-            `#/review/${result.invoice.id}`;
-        },
-        500
-      );
-
-      if (result.warning) {
-        setTimeout(
-          () => {
-            toast(
-              result.warning,
-              'error'
-            );
-          },
-          800
-        );
-      }
+      // bulk success handling...
 
     } catch (error) {
-      if (stageTimer) {
-        clearInterval(
-          stageTimer
-        );
 
-        stageTimer =
-          null;
-      }
+      // bulk error handling...
 
-      console.error(
-        '[Capture] Invoice capture failed:',
-        error
-      );
-
-      if (
-        isAuthError(error)
-      ) {
-        handleSessionExpired(
-          'Your session expired while uploading the invoice. Please sign in again.'
-        );
-
-        return;
-      }
-
-      toast(
-        `Upload failed: ${
-          error?.message ||
-          'Unknown error'
-        }`,
-        'error'
-      );
-
-      location.hash =
-        '#/capture';
     }
+
+    // progress...
   }
 
+  // finished...
+}
+
+
+// ===========================================================================
+// SINGLE INVOICE PROCESSING
+// ===========================================================================
+
+async function runCapture(file) {
+
+  // THIS is where this belongs:
+
+  const result =
+    await API.captureInvoice(file);
+
+  // ...
+}
   // ===========================================================================
   // REVIEW
   // ===========================================================================
