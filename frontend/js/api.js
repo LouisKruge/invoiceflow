@@ -4,7 +4,30 @@
 // Browser-side API client.
 // Supports single and bulk invoice capture.
 // =============================================================================
+// ===========================================================================
+// DELETE INVOICE
+// ===========================================================================
 
+async function deleteInvoice(id) {
+  if (!id) {
+    throw new Error('Invoice ID is required.');
+  }
+
+  const response = await request(
+    `/api/invoices/${encodeURIComponent(id)}`,
+    {
+      method: 'DELETE',
+    }
+  );
+
+  if (!response || !response.invoice) {
+    throw new Error(
+      'The server did not return the deleted invoice.'
+    );
+  }
+
+  return response;
+}
 (() => {
   'use strict';
 
