@@ -3175,56 +3175,7 @@ router.delete(
   // BULK INVOICE PROCESSING
   // ===========================================================================
 
-  const PROCESSING_STAGES = ['Uploading invoice...', 'Reading document...', 'Extracting invoice information...', 'Validating information...'];
-
-async function runCaptureBatch(files) {
-  if (!files || !files.length) return;
-
-  if (files.length === 1) {
-    return runCapture(files[0]);
-  }
-
-  const results = [];
-  const errors = [];
-
-  for (let i = 0; i < files.length; i++) {
-    const stages = [
-      `Uploading invoice ${i + 1} of ${files.length}...`,
-      'Reading document...',
-      'Extracting invoice information...',
-      'Validating information...',
-    ];
-    let stageIndex = 0;
-    root.innerHTML = renderProcessing(stageIndex, stages, false);
-    const stageTimer = setInterval(() => {
-      if (stageIndex < stages.length - 1) {
-        stageIndex++;
-        root.innerHTML = renderProcessing(stageIndex, stages, false);
-      }
-    }, 700);
-
-    try {
-      const result = await API.captureInvoice(files[i]);
-      results.push(result);
-    } catch (err) {
-      errors.push({ file: files[i].name, message: err.message });
-    } finally {
-      clearInterval(stageTimer);
-    }
-  }
-
-  if (errors.length) {
-    toast(
-      `${results.length} of ${files.length} uploaded. ${errors.length} failed: ${errors.map(e => e.file).join(', ')}`,
-      errors.length === files.length ? 'error' : ''
-    );
-  } else {
-    toast(`All ${files.length} invoices uploaded and processed.`, 'success');
-  }
-
-   location.hash = '#/invoices';
-  router();
-}
+  
 
 // /**
 //  * Process multiple invoices one at a time.
