@@ -4958,7 +4958,7 @@ function bindInvoiceListEvents(container) {
   window.AppState =
     AppState;
 
-  window.InvoiceFlowApp = {
+   window.InvoiceFlowApp = {
     router,
     logout,
     toast,
@@ -4967,8 +4967,29 @@ function bindInvoiceListEvents(container) {
     runBulkCapture,
   };
 
+  // ===========================================================================
+  // ROUTER INITIALIZATION
+  // ===========================================================================
+
+  window.addEventListener(
+    'hashchange',
+    () => {
+      router();
+    }
+  );
+
+  window.addEventListener(
+    'load',
+    () => {
+      router();
+    }
+  );
+
   console.log(
     '[InvoiceFlow] Application module loaded successfully.'
   );
+
+  // Start the application immediately.
+  router();
 
 })();
