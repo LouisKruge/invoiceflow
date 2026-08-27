@@ -3236,13 +3236,13 @@ async function runCaptureBatch(files) {
 
 // /**
 //  * Process multiple invoices one at a time.
-//  */
-   * This deliberately uses the existing API.captureInvoice(file) method
-   * instead of requiring a new backend endpoint.
-   *
-   * That means the backend does not have to understand a multipart array.
-   * The frontend simply sends each invoice through the same proven pipeline.
-   */
+//  *
+//   * This deliberately uses the existing API.captureInvoice(file) method
+//   * instead of requiring a new backend endpoint.
+ //  *
+ //  * That means the backend does not have to understand a multipart array.
+  // * The frontend simply sends each invoice through the same proven pipeline.
+ //  */
   async function runBulkCapture(
     files
   ) {
