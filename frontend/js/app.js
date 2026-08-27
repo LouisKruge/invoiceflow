@@ -3721,6 +3721,17 @@ async function renderCapturePage() {
                   invoice.status
                 )
             )
+        const finalList =
+  isExceptionView
+    ? invoices.filter(
+        (invoice) =>
+          [
+            'exception',
+            'duplicate',
+          ].includes(
+            invoice.status
+          )
+      )
           : invoices;
 
       const content =
