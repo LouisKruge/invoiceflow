@@ -77,6 +77,7 @@ const Icons = {
 
   importFile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3h8L18 6.5V21h-11.5z"/><path d="M12 16V9.5M12 9.5L9.5 12M12 9.5L14.5 12"/></svg>',
 
+  signoutSheet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4.5H9a2 2 0 014 0h2.5A1.5 1.5 0 0117 6v13.5H5V6a1.5 1.5 0 011.5-1.5z"/><path d="M8.5 12.5h6M14.5 12.5L12 10M14.5 12.5L12 15"/></svg>',
   review: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20.5 20.5l-4.7-4.7M11 8v3.5M11 14h.01"/></svg>',
 };
 
@@ -485,6 +486,7 @@ const NAV_GROUPS = [
     ['#/stock/transactions', 'ledger', 'Transactions'],
     ['#/stock/adjustments', 'adjust', 'Adjustments'],
     ['#/stock/import', 'importFile', 'Import Stock'],
+    ['#/stock/signout', 'signoutSheet', 'Stock Sign-Out'],
     ['#/stock/review', 'review', 'Stock Review'],
   ]],
   ['Intelligence', [
@@ -507,6 +509,7 @@ const ROUTE_TITLES = {
   '#/stock/adjustments': 'Stock Adjustments',
   '#/stock/import': 'Import Stock',
   '#/stock/review': 'Stock Review',
+  '#/stock/signout': 'Stock Sign-Out',
 };
 
 function routeTitle(route) {
@@ -516,6 +519,7 @@ function routeTitle(route) {
   if (route && route.startsWith('#/suppliers/')) return 'Supplier';
   if (route && route.startsWith('#/stock/products/')) return 'Product';
   if (route && route.startsWith('#/stock/transactions/')) return 'Stock Transaction';
+  if (route && route.startsWith('#/stock/signout/')) return 'Sign-Out Sheet';
 
   return 'InvoiceFlow';
 }
@@ -545,7 +549,9 @@ function navMarkup(route, counts) {
               ? counts.approvals
               : r === '#/stock/review'
                 ? counts.stockReview
-                : 0;
+                : r === '#/stock/signout'
+                  ? counts.stockSheets
+                  : 0;
 
         return navItem(
           r,
@@ -2484,6 +2490,9 @@ function renderStockOverview(data) {
       <button class="btn btn-secondary" data-route="#/stock/adjustments">
         ${Icons.adjust} Adjust stock
       </button>
+      <button class="btn btn-secondary" data-route="#/stock/signout">
+        ${Icons.signoutSheet} Sign out stock
+      </button>
       <button class="btn btn-primary" data-route="#/stock/import">
         ${Icons.importFile} Import stock
       </button>
@@ -2737,9 +2746,13 @@ function renderProductDetail(detail, history) {
               ? `<button class="section-link" data-invoice-id="${esc(t.source_document_id)}">
                    ${esc(t.invoice_number || 'Invoice')} →
                  </button>`
-              : t.source_document_type === 'STOCK_IMPORT'
-                ? '<span class="cell-muted">Spreadsheet import</span>'
-                : '<span class="cell-muted">—</span>'
+              : t.source_document_type === 'STOCK_SHEET' && t.source_document_id
+                ? `<button class="section-link" data-sheet-link="${esc(t.source_document_id)}">
+                     Stock sheet ${esc(t.sheet_number || '')} →
+                   </button>`
+                : t.source_document_type === 'STOCK_IMPORT'
+                  ? '<span class="cell-muted">Spreadsheet import</span>'
+                  : '<span class="cell-muted">—</span>'
           }
         </td>
         <td class="cell-muted">${esc(t.reason || '—')}</td>
@@ -2975,6 +2988,10 @@ function renderStockTransactions(data, filters) {
 function renderStockTransactionDetail(data) {
   const t = data.transaction;
 
+  // A movement off a sign-out sheet carries the sheet, so the document it came
+  // from is always one click away.
+  const sheet = data.stock_sheet || {};
+
   const field = (label, value) => `
     <div class="conf-row">
       <span class="name">${esc(label)}</span>
@@ -3027,7 +3044,14 @@ function renderStockTransactionDetail(data) {
                    ${esc(t.invoice_number || t.source_document_id)} →
                  </button>`
               )
-            : field('Document', esc(t.source_document_id || '—'))
+            : t.source_document_type === 'STOCK_SHEET' && t.source_document_id
+              ? field(
+                  'Document',
+                  `<button class="section-link" data-sheet-link="${esc(t.source_document_id)}">
+                     ${esc(sheet.sheet_number || t.sheet_number || 'Stock sheet')} →
+                   </button>`
+                )
+              : field('Document', esc(t.source_document_id || '—'))
         }
         ${field('Supplier', esc(t.supplier_name || '—'))}
         ${field('Employee', esc(t.employee_name || '—'))}
@@ -3419,4 +3443,656 @@ function renderStockReview(items) {
       </div>
     `
   }`;
+}
+
+// ------------------------------ Stock sign-out ------------------------------
+
+// A sheet's own progress through the pipeline. The shapes follow the same rule
+// as everywhere else: filled = settled, hollow = in flight, square = a person
+// has to look at it.
+const SHEET_STATUS = {
+  UPLOADED:        ['processing',       'Uploaded'],
+  PROCESSING:      ['processing',       'Reading'],
+  EXTRACTED:       ['review_required',  'Extracted'],
+  REVIEW_REQUIRED: ['exception',        'Needs review'],
+  READY:           ['review_required',  'Ready to post'],
+  POSTED:          ['approved',         'Posted'],
+  FAILED:          ['exception',        'Failed'],
+  CANCELLED:       ['rejected',         'Cancelled'],
+};
+
+const SHEET_ROW_STATUS = {
+  PENDING:            ['processing',      'Pending'],
+  MATCHED:            ['approved',        'Matched'],
+  RESOLVED:           ['approved',        'Corrected'],
+  REVIEW_REQUIRED:    ['exception',       'Needs review'],
+  INSUFFICIENT_STOCK: ['exception',       'Not enough stock'],
+  EXCLUDED:           ['rejected',        'Excluded'],
+  POSTED:             ['approved',        'Posted'],
+};
+
+function sheetStatusMark(status, table = SHEET_STATUS) {
+  const [cls, label] = table[status] || ['processing', status || '—'];
+
+  return `
+    <span class="status status-${cls}">
+      <span class="mark"></span>${esc(label)}
+    </span>
+  `;
+}
+
+const SHEET_FILTERS = [
+  ['', 'All'],
+  ['REVIEW_REQUIRED', 'Needs review'],
+  ['READY', 'Ready'],
+  ['POSTED', 'Posted'],
+  ['FAILED', 'Failed'],
+];
+
+/**
+ * The Stock Sign-Out landing screen: upload, the day's figures, and the
+ * history of every sheet that has been through the system.
+ */
+function renderStockSignOut(data = {}) {
+  const metrics = data.metrics || {};
+  const totals = metrics.totals || {};
+  const sheets = data.sheets || [];
+  const filters = data.filters || {};
+
+  const rows = sheets
+    .map(sheet => `
+      <tr class="clickable" data-sheet-id="${esc(sheet.id)}">
+        <td class="cell-id">${esc(sheet.sheet_number)}</td>
+        <td class="cell-strong">${esc(sheet.employee_name || 'Unnamed')}</td>
+        <td class="cell-muted">${esc(sheet.job_reference || '—')}</td>
+        <td class="cell-num">${sheet.row_count ?? 0}</td>
+        <td class="cell-num">${fmtQty(sheet.total_quantity)}</td>
+        <td>${sheetStatusMark(sheet.status)}</td>
+        <td class="cell-muted">${esc(sheet.filename || '—')}</td>
+        <td class="cell-muted">${esc(timeAgo(sheet.posted_at || sheet.created_at))}</td>
+      </tr>
+    `)
+    .join('');
+
+  const chips = SHEET_FILTERS
+    .map(([value, label]) => `
+      <button
+        class="filter-chip ${(filters.status || '') === value ? 'active' : ''}"
+        data-sheet-status="${esc(value)}"
+      >${esc(label)}</button>
+    `)
+    .join('');
+
+  return `
+  <div class="page-head">
+    <div>
+      <h1>Stock sign-out</h1>
+      <p class="sub">
+        Upload a stock sign-out sheet and InvoiceFlow will read the products and
+        quantities off it and deduct them from inventory once you approve.
+      </p>
+    </div>
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi">
+      <div class="label">Sheets today</div>
+      <div class="value">${totals.uploaded_today ?? 0}</div>
+      <div class="foot">${totals.posted_today ?? 0} posted</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Units issued today</div>
+      <div class="value">${fmtQty(metrics.units_issued_today)}</div>
+      <div class="foot">
+        ${metrics.movements_today ?? 0} movement${metrics.movements_today === 1 ? '' : 's'} ·
+        ${fmtQty(metrics.units_issued)} in 30 days
+      </div>
+    </div>
+    <div class="kpi">
+      <div class="label">Awaiting review</div>
+      <div class="value">${totals.review ?? 0}</div>
+      <div class="foot ${totals.review ? 'critical' : ''}">
+        ${totals.ready ?? 0} ready to post
+      </div>
+    </div>
+    <div class="kpi">
+      <div class="label">Failed documents</div>
+      <div class="value">${totals.failed ?? 0}</div>
+      <div class="foot ${totals.failed ? 'critical' : ''}">
+        ${totals.failed ? 'Retry or cancel these' : 'Nothing failed'}
+      </div>
+    </div>
+  </div>
+
+  <div class="dropzone" id="sheet-dropzone">
+    <h2>Drag &amp; drop a stock sign-out sheet</h2>
+    <div class="or">or</div>
+    <button class="btn btn-primary" id="btn-select-sheet-doc">
+      ${Icons.plus} Select file
+    </button>
+    <div class="hint">
+      Photo, PDF, Excel or CSV<br />
+      Nothing is deducted until you approve what was read
+    </div>
+  </div>
+
+  <div id="sheet-stage"></div>
+
+  ${
+    (metrics.top_employees || []).length
+      ? `
+        <div class="section">
+          <div class="detail-block">
+            <div class="head">
+              <h3>Who is taking stock</h3>
+              <span style="font-size:11.5px;color:var(--ink-faint);">Units issued · last 90 days</span>
+            </div>
+            <div class="body">
+              ${metrics.top_employees.map(e => `
+                <div class="intel-row">
+                  <div style="flex:1;min-width:0;">
+                    <div class="title">${esc(e.employee_name)}</div>
+                    <div class="detail">
+                      ${e.movements} movement${e.movements === 1 ? '' : 's'}
+                    </div>
+                  </div>
+                  <span class="num">${fmtQty(e.units)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `
+      : ''
+  }
+
+  <div class="section">
+    <div class="section-head">
+      <h2>Sign-out sheets</h2>
+      <div class="filter-row" style="margin:0;">${chips}</div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Sheet</th>
+            <th>Employee</th>
+            <th>Job</th>
+            <th class="th-num">Lines</th>
+            <th class="th-num">Units</th>
+            <th>Status</th>
+            <th>File</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            rows ||
+            `
+              <tr>
+                <td colspan="8">
+                  <div class="empty-state">
+                    ${Icons.stock}
+                    <p>No sign-out sheets yet.</p>
+                    <div class="hint">Upload one above and it will appear here.</div>
+                  </div>
+                </td>
+              </tr>
+            `
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+const SHEET_STAGES = [
+  'Uploading the sheet',
+  'Reading the document',
+  'Extracting rows',
+  'Matching products',
+  'Validating quantities',
+];
+
+function renderSheetProcessing(stageIndex, failure) {
+  return `
+  <div class="detail-block" style="margin-top:24px;">
+    <div class="head">
+      <h3>${failure ? 'This sheet could not be read' : 'Reading the sheet'}</h3>
+    </div>
+    <div class="body">
+      ${
+        failure
+          ? `
+            <div class="check-row fail" style="border:none;padding:0 0 10px;">
+              <span class="glyph">${Icons.warning}</span>
+              <span>${esc(failure)}</span>
+            </div>
+            <div class="cell-muted" style="font-size:12.5px;">
+              No stock has been touched. Fix the document and upload it again.
+            </div>
+          `
+          : SHEET_STAGES.map((stage, i) => `
+              <div class="batch-row ${i > stageIndex ? 'pending' : ''}">
+                ${stepMark(i < stageIndex ? 'done' : i === stageIndex ? 'active' : 'pending')}
+                <div class="label"><div class="name">${esc(stage)}</div></div>
+              </div>
+            `).join('')
+      }
+    </div>
+  </div>`;
+}
+
+/**
+ * One line of a sheet, with its correction panel when it needs one.
+ */
+function sheetRowHtml(row, sheet, expandedRowId) {
+  const needsWork =
+    row.status === 'REVIEW_REQUIRED' || row.status === 'INSUFFICIENT_STOCK';
+
+  const posted = sheet.status === 'POSTED';
+  const expanded = expandedRowId === row.id;
+
+  const product =
+    row.product_id
+      ? `
+        <div class="cell-strong">${esc(row.product_description || '—')}</div>
+        <div class="cell-muted" style="font-size:12px;">
+          ${esc(row.sku || 'No SKU')}
+          ${row.match_method ? ` · ${esc(String(row.match_method).replace(/_/g, ' '))}` : ''}
+        </div>
+      `
+      : '<span class="cell-muted">Not identified</span>';
+
+  const candidates =
+    (row.candidates || [])
+      .map(c => `
+        <label class="intel-row" style="cursor:pointer;align-items:center;">
+          <input
+            type="radio"
+            name="sheet-row-${esc(row.id)}"
+            value="${esc(c.product_id)}"
+            style="width:14px;height:14px;margin-right:2px;"
+          />
+          <div style="flex:1;min-width:0;">
+            <div class="title">${esc(c.description)}</div>
+            <div class="detail">
+              ${esc(c.sku || 'No SKU')} · matched on ${esc(String(c.method || 'similarity').replace(/_/g, ' '))}
+            </div>
+          </div>
+          <span class="confidence ${c.confidence < 0.9 ? 'low' : ''}">
+            ${Math.round(Number(c.confidence || 0) * 100)}%
+          </span>
+        </label>
+      `)
+      .join('');
+
+  return `
+    <tr class="${needsWork ? 'row-attention' : ''}">
+      <td class="cell-muted">${row.row_number}</td>
+      <td>
+        <div class="cell-strong">${esc(row.raw_description || '—')}</div>
+        <div class="cell-muted" style="font-size:12px;">
+          ${esc(row.raw_product_code || 'No code on the sheet')}
+        </div>
+      </td>
+      <td class="cell-num">
+        ${row.quantity != null ? fmtQty(row.quantity) : `<span class="cell-muted">${esc(row.raw_quantity || '—')}</span>`}
+      </td>
+      <td>${product}</td>
+      <td class="cell-num">${confidenceText(row.match_confidence)}</td>
+      <td class="cell-num">${row.stock_before != null ? fmtQty(row.stock_before) : '—'}</td>
+      <td class="cell-num">${row.stock_after != null ? fmtQty(row.stock_after) : '—'}</td>
+      <td>
+        ${sheetStatusMark(row.status, SHEET_ROW_STATUS)}
+        ${row.issue ? `<div class="cell-muted" style="font-size:12px;margin-top:3px;">${esc(row.issue)}</div>` : ''}
+      </td>
+      <td class="sheet-actions">
+        ${
+          posted
+            ? ''
+            : `<button class="btn btn-secondary btn-sm" data-fix-row="${esc(row.id)}">
+                 ${expanded ? 'Close' : needsWork ? 'Resolve' : 'Edit'}
+               </button>`
+        }
+      </td>
+    </tr>
+
+    ${
+      expanded && !posted
+        ? `
+          <tr class="row-editor">
+            <td colspan="9">
+              <div class="sheet-editor">
+
+                <div class="eyebrow">What was written on the sheet</div>
+                <div class="cell-muted" style="font-size:13px;margin-bottom:14px;">
+                  “${esc(row.raw_description || '')}”
+                  ${row.raw_quantity ? ` · quantity read as “${esc(row.raw_quantity)}”` : ''}
+                </div>
+
+                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                  <div class="field" style="flex:0 0 160px;">
+                    <label>Quantity issued</label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      id="row-qty-${esc(row.id)}"
+                      value="${row.quantity != null ? esc(row.quantity) : ''}"
+                      placeholder="Type the quantity"
+                    />
+                  </div>
+
+                  <div class="field" style="flex:1;min-width:220px;">
+                    <label>Find a product</label>
+                    <input
+                      type="search"
+                      id="row-search-${esc(row.id)}"
+                      placeholder="Search the product master"
+                      autocomplete="off"
+                    />
+                  </div>
+                </div>
+
+                <div class="eyebrow" style="margin:16px 0 8px;">Possible matches</div>
+
+                <div id="row-results-${esc(row.id)}">
+                  ${candidates || '<div class="cell-muted" style="font-size:13px;">No candidates were found — search above.</div>'}
+                </div>
+
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+                  <button class="btn btn-secondary btn-sm" data-exclude-row="${esc(row.id)}">
+                    ${row.status === 'EXCLUDED' ? 'Put back on the sheet' : 'Not stock — exclude'}
+                  </button>
+                  <button class="btn btn-primary btn-sm" data-save-row="${esc(row.id)}">
+                    Save correction
+                  </button>
+                </div>
+
+              </div>
+            </td>
+          </tr>
+        `
+        : ''
+    }
+  `;
+}
+
+/**
+ * The review screen for one sheet: the document on the left, what was read
+ * from it on the right, and the approval that turns it into stock movements.
+ */
+function renderStockSheetDetail(sheet, opts = {}) {
+  const posted = sheet.status === 'POSTED';
+  const cancelled = sheet.status === 'CANCELLED';
+  const failed = sheet.status === 'FAILED';
+  const working = sheet.status === 'UPLOADED' || sheet.status === 'PROCESSING';
+
+  const rows = sheet.rows || [];
+
+  const blocking =
+    rows.filter(
+      r => r.status === 'REVIEW_REQUIRED' || r.status === 'INSUFFICIENT_STOCK'
+    ).length;
+
+  const included = rows.filter(r => r.status !== 'EXCLUDED');
+
+  const isPdf = String(sheet.mime_type || '').includes('pdf');
+  const isImage = String(sheet.mime_type || '').startsWith('image/');
+
+  const header = [
+    ['employee_name', 'Employee'],
+    ['job_reference', 'Job'],
+    ['department', 'Department'],
+    ['vehicle', 'Vehicle'],
+    ['issue_date', 'Date'],
+  ];
+
+  return `
+  <button class="back-link" data-route="#/stock/signout">
+    ${Icons.arrowLeft} Stock sign-out
+  </button>
+
+  <div class="page-head">
+    <div>
+      <h1>${esc(sheet.sheet_number)}</h1>
+      <p class="sub">
+        ${esc(sheet.filename || 'Uploaded document')}
+        ${sheet.created_by_name ? ` · uploaded by ${esc(sheet.created_by_name)}` : ''}
+        ${sheet.created_at ? ` · ${esc(fmtDateTime(sheet.created_at))}` : ''}
+      </p>
+    </div>
+
+    <div class="page-actions decision-bar">
+      ${sheetStatusMark(sheet.status)}
+
+      ${
+        failed
+          ? `<button class="btn btn-secondary" id="btn-retry-sheet">Read it again</button>`
+          : ''
+      }
+
+      ${
+        !posted && !cancelled && userCanApprove()
+          ? `
+            <button class="btn btn-secondary" id="btn-cancel-sheet">Cancel sheet</button>
+            <button
+              class="btn btn-primary"
+              id="btn-approve-sheet"
+              ${blocking || working ? 'disabled' : ''}
+            >Approve &amp; deduct stock</button>
+          `
+          : ''
+      }
+    </div>
+  </div>
+
+  ${
+    opts.warning
+      ? `
+        <div class="detail-block" style="border-color:var(--critical);margin-bottom:20px;">
+          <div class="body" style="padding:14px 18px;">
+            <div class="check-row fail" style="border:none;padding:0;">
+              <span class="glyph">${Icons.warning}</span>
+              <span>${esc(opts.warning)}</span>
+            </div>
+          </div>
+        </div>
+      `
+      : ''
+  }
+
+  ${
+    posted
+      ? `
+        <div class="detail-block" style="margin-bottom:20px;">
+          <div class="body" style="padding:14px 18px;">
+            <div class="check-row pass" style="border:none;padding:0;">
+              <span class="glyph">${Icons.check}</span>
+              <span>
+                Stock issued on ${esc(fmtDateTime(sheet.posted_at))}
+                ${sheet.posted_by_name ? ` by ${esc(sheet.posted_by_name)}` : ''}.
+                ${included.length} movement${included.length === 1 ? '' : 's'} posted to the ledger.
+              </span>
+            </div>
+          </div>
+        </div>
+      `
+      : ''
+  }
+
+  ${
+    failed
+      ? `
+        <div class="detail-block" style="border-color:var(--critical);margin-bottom:20px;">
+          <div class="body" style="padding:14px 18px;">
+            <div class="check-row fail" style="border:none;padding:0;">
+              <span class="glyph">${Icons.warning}</span>
+              <span>${esc(sheet.error_message || 'The document could not be read.')}</span>
+            </div>
+            <div class="cell-muted" style="font-size:12.5px;margin-top:8px;">
+              No stock has been touched.
+            </div>
+          </div>
+        </div>
+      `
+      : ''
+  }
+
+  <div class="workspace">
+
+    <div class="doc-panel">
+      <div class="doc-toolbar">
+        <button class="icon-btn" id="doc-zoom-out" title="Zoom out">${Icons.zoomOut}</button>
+        <span class="zoom-label" id="doc-zoom-label">100%</span>
+        <button class="icon-btn" id="doc-zoom-in" title="Zoom in">${Icons.zoomIn}</button>
+        <button class="icon-btn" id="doc-rotate" title="Rotate">${Icons.rotate}</button>
+        <div class="spacer"></div>
+        <button class="icon-btn" id="doc-download" title="Download original">${Icons.download}</button>
+      </div>
+
+      <div
+        class="doc-stage"
+        id="doc-stage"
+        data-pdf="${isPdf ? '1' : '0'}"
+        data-image="${isImage ? '1' : '0'}"
+      >
+        <div class="doc-empty">Loading document…</div>
+      </div>
+    </div>
+
+    <div>
+
+      <div class="detail-block">
+        <div class="head">
+          <h3>Who signed for this</h3>
+          ${
+            posted
+              ? ''
+              : '<span style="font-size:11.5px;color:var(--ink-faint);">Correct anything the sheet did not say clearly</span>'
+          }
+        </div>
+        <div class="body">
+          <div class="field-grid">
+            ${header.map(([key, label]) => `
+              <div class="field">
+                <label>${esc(label)}</label>
+                <input
+                  class="sheet-header-field"
+                  data-field="${esc(key)}"
+                  value="${esc(sheet[key] == null ? '' : sheet[key])}"
+                  placeholder="Not on the sheet"
+                  ${posted ? 'disabled' : ''}
+                />
+              </div>
+            `).join('')}
+          </div>
+
+          ${
+            posted
+              ? ''
+              : `
+                <div style="display:flex;justify-content:flex-end;margin-top:14px;">
+                  <button class="btn btn-secondary btn-sm" id="btn-save-sheet-header">
+                    Save details
+                  </button>
+                </div>
+              `
+          }
+        </div>
+      </div>
+
+      ${
+        sheet.extraction_source
+          ? `
+            <div class="detail-block">
+              <div class="head"><h3>How this was read</h3></div>
+              <div class="body">
+                <div class="conf-row">
+                  <span class="name">Source</span>
+                  <span class="pct" style="min-width:0;">
+                    ${sheet.extraction_source === 'SPREADSHEET' ? 'Read directly from the spreadsheet' : 'Read from the document by AI'}
+                  </span>
+                </div>
+                ${
+                  sheet.extraction_model
+                    ? `
+                      <div class="conf-row">
+                        <span class="name">Model</span>
+                        <span class="pct" style="min-width:0;">${esc(sheet.extraction_model)}</span>
+                      </div>
+                    `
+                    : ''
+                }
+                ${
+                  Object.entries(sheet.header_confidence || {}).map(([field, score]) => `
+                    <div class="conf-row">
+                      <span class="name">${esc(field)}</span>
+                      <span class="pct" style="min-width:0;">${confidenceText(score)}</span>
+                    </div>
+                  `).join('')
+                }
+                <div class="cell-muted" style="font-size:12.5px;margin-top:12px;">
+                  A confident reading is never enough on its own — every line is
+                  still checked against the product master and against what is
+                  actually in stock.
+                </div>
+              </div>
+            </div>
+          `
+          : ''
+      }
+
+    </div>
+
+  </div>
+
+  <div class="section">
+    <div class="detail-block">
+      <div class="head">
+        <h3>What was read from the sheet</h3>
+        <span class="confidence">
+          ${included.length} line${included.length === 1 ? '' : 's'} ·
+          ${sheet.matched_count ?? 0} matched ·
+          ${blocking} need${blocking === 1 ? 's' : ''} review
+        </span>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table sheet-lines">
+          <thead>
+            <tr>
+              <th style="padding-left:18px;">#</th>
+              <th>Read from the sheet</th>
+              <th class="th-num">Qty</th>
+              <th>Matched product</th>
+              <th class="th-num">Confidence</th>
+              <th class="th-num">In stock</th>
+              <th class="th-num">After issue</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              rows.length
+                ? rows.map(row => sheetRowHtml(row, sheet, opts.expandedRow)).join('')
+                : `
+                  <tr>
+                    <td colspan="9">
+                      <div class="empty-state">
+                        ${Icons.review}
+                        <p>${working ? 'Still reading this document…' : 'No lines were read from this document.'}</p>
+                      </div>
+                    </td>
+                  </tr>
+                `
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
 }

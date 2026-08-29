@@ -25,6 +25,8 @@ const {
 const ledger = require('../services/stockLedger');
 const matching = require('../services/productMatching');
 const importer = require('../services/stockImport');
+const sheets = require('../services/stockSheet');
+const ai = require('../services/aiExtraction');
 
 const router = express.Router();
 
@@ -664,6 +666,7 @@ router.get(
               s.name AS supplier_name,
               u.name AS created_by_name,
               i.invoice_number,
+              sh.sheet_number,
               SUM(t.signed_quantity) OVER (
                 ORDER BY t.created_at, t.id
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
@@ -675,6 +678,9 @@ router.get(
             LEFT JOIN invoices i
               ON t.source_document_type = 'INVOICE'
              AND i.id = t.source_document_id
+            LEFT JOIN stock_sheets sh
+              ON t.source_document_type = 'STOCK_SHEET'
+             AND sh.id = t.source_document_id
             WHERE t.product_id = $1
             ORDER BY t.created_at ASC, t.id ASC
           `,
@@ -779,6 +785,9 @@ router.get(
         LEFT JOIN invoices i
           ON t.source_document_type = 'INVOICE'
          AND i.id = t.source_document_id
+        LEFT JOIN stock_sheets sh
+          ON t.source_document_type = 'STOCK_SHEET'
+         AND sh.id = t.source_document_id
         ${where}
       `;
 
@@ -798,7 +807,8 @@ router.get(
               l.name AS location_name,
               s.name AS supplier_name,
               u.name AS created_by_name,
-              i.invoice_number
+              i.invoice_number,
+              sh.sheet_number
             ${base}
             ORDER BY t.created_at DESC, t.id DESC
             LIMIT $${params.length - 1} OFFSET $${params.length}
@@ -848,6 +858,7 @@ router.get(
               s.name AS supplier_name,
               u.name AS created_by_name,
               i.invoice_number,
+              sh.sheet_number,
               i.status AS invoice_status
             FROM stock_transactions t
             JOIN products p ON p.id = t.product_id
@@ -857,6 +868,9 @@ router.get(
             LEFT JOIN invoices i
               ON t.source_document_type = 'INVOICE'
              AND i.id = t.source_document_id
+            LEFT JOIN stock_sheets sh
+              ON t.source_document_type = 'STOCK_SHEET'
+             AND sh.id = t.source_document_id
             WHERE t.id = $1
           `,
           [req.params.id]
@@ -872,9 +886,27 @@ router.get(
           [req.params.id]
         );
 
+      // A movement that came off a sign-out sheet carries the sheet with it, so
+      // the detail screen can open the document the deduction came from.
+      const sheet =
+        row.source_document_type === 'STOCK_SHEET'
+          ? await db.get(
+              `
+                SELECT
+                  id, sheet_number, filename, mime_type, status,
+                  employee_name, job_reference, department, vehicle,
+                  issue_date, posted_at
+                FROM stock_sheets
+                WHERE id = $1
+              `,
+              [row.source_document_id]
+            )
+          : null;
+
       return res.json({
         transaction: row,
         adjustment: adjustment || null,
+        stock_sheet: sheet || null,
       });
 
     } catch (error) {
@@ -1531,12 +1563,16 @@ router.get(
             SELECT
               r.*,
               s.name AS supplier_name,
-              i.invoice_number
+              i.invoice_number,
+              sh.sheet_number
             FROM stock_review_queue r
             LEFT JOIN suppliers s ON s.id = r.supplier_id
             LEFT JOIN invoices i
               ON r.source_document_type = 'INVOICE'
              AND i.id = r.source_document_id
+            LEFT JOIN stock_sheets sh
+              ON r.source_document_type = 'STOCK_SHEET'
+             AND sh.id = r.source_document_id
             WHERE ($1 = 'all' OR r.status = $1)
             ORDER BY r.created_at DESC
             LIMIT 200
@@ -1770,6 +1806,993 @@ router.post(
 
       return res.status(500).json({
         error: `Unable to reconcile stock: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// STOCK SIGN-OUT SHEETS
+//
+// A sign-out sheet is a document — a photo, a scan or a spreadsheet — that
+// records stock taken out. It is read, matched and validated first, and only
+// deducts stock once a person approves it. Nothing here writes movements
+// directly; services/stockSheet posts through the same ledger as everything
+// else, atomically and once.
+// ============================================================================
+
+const SHEET_DIR = path.join(__dirname, '..', 'data', 'stock-sheets');
+
+if (!fs.existsSync(SHEET_DIR)) {
+  fs.mkdirSync(SHEET_DIR, { recursive: true });
+}
+
+const SHEET_EXTENSIONS = [
+  '.jpg', '.jpeg', '.png', '.webp', '.heic', '.pdf',
+  '.xlsx', '.xls', '.csv', '.tsv',
+];
+
+const sheetUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, SHEET_DIR),
+    filename: (req, file, cb) =>
+      cb(null, `${uuid()}${path.extname(file.originalname) || '.jpg'}`),
+  }),
+
+  limits: { fileSize: 20 * 1024 * 1024 },
+
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'image/heic',
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-excel',
+      'text/csv',
+      'text/plain',
+      'application/csv',
+      'application/octet-stream',
+    ];
+
+    const extension = path.extname(file.originalname).toLowerCase();
+
+    const ok =
+      allowedTypes.includes(file.mimetype) ||
+      SHEET_EXTENSIONS.includes(extension);
+
+    cb(
+      ok
+        ? null
+        : new Error(
+            'Unsupported file type — upload a photo, a PDF, or an Excel/CSV sheet'
+          ),
+      ok
+    );
+  },
+});
+
+const SHEET_HEADER_FIELDS = [
+  'employee_name',
+  'job_reference',
+  'department',
+  'vehicle',
+  'issue_date',
+  'notes',
+];
+
+/**
+ * Loads a sheet with its rows, product details and parsed match candidates.
+ */
+async function loadSheet(sheetId) {
+  const sheet =
+    await db.get(
+      `
+        SELECT
+          s.*,
+          l.code AS location_code,
+          l.name AS location_name,
+          c.name AS created_by_name,
+          p.name AS posted_by_name
+        FROM stock_sheets s
+        LEFT JOIN stock_locations l ON l.id = s.location_id
+        LEFT JOIN users c ON c.id = s.created_by
+        LEFT JOIN users p ON p.id = s.posted_by
+        WHERE s.id = $1
+      `,
+      [sheetId]
+    );
+
+  if (!sheet) return null;
+
+  const rows =
+    await db.all(
+      `
+        SELECT
+          r.*,
+          p.sku,
+          p.description AS product_description,
+          p.unit_of_measure AS product_unit,
+          p.is_active AS product_active,
+          u.name AS corrected_by_name
+        FROM stock_sheet_rows r
+        LEFT JOIN products p ON p.id = r.product_id
+        LEFT JOIN users u ON u.id = r.corrected_by
+        WHERE r.sheet_id = $1
+        ORDER BY r.row_number
+      `,
+      [sheetId]
+    );
+
+  return {
+    ...sheet,
+    header_confidence: safeParse(sheet.header_confidence, {}),
+    rows: rows.map((row) => ({
+      ...row,
+      quantity: row.quantity == null ? null : Number(row.quantity),
+      stock_before: row.stock_before == null ? null : Number(row.stock_before),
+      stock_after: row.stock_after == null ? null : Number(row.stock_after),
+      candidates: safeParse(row.candidates, []),
+    })),
+  };
+}
+
+function safeParse(value, fallback) {
+  if (value == null || value === '') return fallback;
+
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return fallback;
+  }
+}
+
+// ============================================================================
+// POST /api/stock/sheets
+//
+// Upload. The document is stored and read in the background so the browser can
+// show progress; the sheet's status is the single source of truth for where it
+// has got to.
+// ============================================================================
+
+router.post(
+  '/sheets',
+  requireAuth,
+  requireRole('admin', 'reviewer', 'processor'),
+  sheetUpload.single('file'),
+  async (req, res) => {
+    try {
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      const hash = sheets.fileHash(req.file.path);
+
+      // Duplicate protection: the same document uploaded twice is refused
+      // unless the person says it really is a second sign-out.
+      const duplicate =
+        await db.get(
+          `
+            SELECT id, sheet_number, status, created_at
+            FROM stock_sheets
+            WHERE file_hash = $1
+              AND status <> 'CANCELLED'
+            ORDER BY created_at DESC
+            LIMIT 1
+          `,
+          [hash]
+        );
+
+      const allowDuplicate =
+        req.body?.allow_duplicate === 'true' || req.body?.allow_duplicate === true;
+
+      if (duplicate && !allowDuplicate) {
+        fs.unlink(req.file.path, () => {});
+
+        return res.status(409).json({
+          error: `This document was already uploaded as ${duplicate.sheet_number}`,
+          duplicate_of: duplicate,
+        });
+      }
+
+      const sheetId = uuid();
+      const sheetNumber = await sheets.nextSheetNumber();
+
+      const relativePath =
+        path.relative(path.join(__dirname, '..'), req.file.path);
+
+      await db.run(
+        `
+          INSERT INTO stock_sheets
+            (id, sheet_number, filename, mime_type, file_path, file_hash,
+             status, location_id, employee_name, job_reference, notes, created_by)
+          VALUES ($1, $2, $3, $4, $5, $6, 'UPLOADED', $7, $8, $9, $10, $11)
+        `,
+        [
+          sheetId,
+          sheetNumber,
+          req.file.originalname,
+          req.file.mimetype,
+          relativePath,
+          hash,
+          req.body?.location_id || null,
+          req.body?.employee_name || null,
+          req.body?.job_reference || null,
+          req.body?.notes || null,
+          req.user.id,
+        ]
+      );
+
+      // Reading takes seconds; the upload response should not wait for it.
+      // A failure is recorded on the sheet itself, never thrown away.
+      sheets
+        .processSheet(sheetId)
+        .catch((error) => {
+          console.error('[stock/sheets/process]', sheetNumber, error.message);
+        });
+
+      return res.status(201).json({
+        sheet: {
+          id: sheetId,
+          sheet_number: sheetNumber,
+          status: 'PROCESSING',
+          filename: req.file.originalname,
+        },
+      });
+
+    } catch (error) {
+      console.error('[stock/sheets/upload]', error);
+
+      if (req.file) fs.unlink(req.file.path, () => {});
+
+      return res.status(500).json({
+        error: `Unable to upload the sign-out sheet: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// GET /api/stock/sheets/metrics
+//
+// Registered before /sheets/:id so "metrics" is not read as an id.
+// ============================================================================
+
+router.get(
+  '/sheets/metrics',
+  requireAuth,
+  async (req, res) => {
+    try {
+
+      const totals =
+        await db.get(
+          `
+            SELECT
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (
+                WHERE status IN ('UPLOADED', 'PROCESSING')
+              )::int AS processing,
+              COUNT(*) FILTER (WHERE status = 'REVIEW_REQUIRED')::int AS review,
+              COUNT(*) FILTER (WHERE status = 'READY')::int AS ready,
+              COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed,
+              COUNT(*) FILTER (WHERE status = 'POSTED')::int AS posted,
+              COUNT(*) FILTER (
+                WHERE status = 'POSTED'
+                  AND posted_at >= NOW() - INTERVAL '7 days'
+              )::int AS posted_this_week,
+              COUNT(*) FILTER (
+                WHERE created_at >= date_trunc('day', NOW())
+              )::int AS uploaded_today,
+              COUNT(*) FILTER (
+                WHERE status = 'POSTED'
+                  AND posted_at >= date_trunc('day', NOW())
+              )::int AS posted_today
+            FROM stock_sheets
+          `
+        );
+
+      const today =
+        await db.get(
+          `
+            SELECT
+              COALESCE(SUM(quantity), 0) AS units_issued,
+              COUNT(*)::int AS movements
+            FROM stock_transactions
+            WHERE source_document_type = 'STOCK_SHEET'
+              AND created_at >= date_trunc('day', NOW())
+          `
+        );
+
+      const recent =
+        await db.all(
+          `
+            SELECT
+              s.id, s.sheet_number, s.filename, s.status, s.employee_name,
+              s.job_reference, s.row_count, s.matched_count, s.review_count,
+              s.total_quantity, s.created_at, s.posted_at,
+              u.name AS created_by_name
+            FROM stock_sheets s
+            LEFT JOIN users u ON u.id = s.created_by
+            ORDER BY s.created_at DESC
+            LIMIT 8
+          `
+        );
+
+      const issued =
+        await db.get(
+          `
+            SELECT
+              COALESCE(SUM(quantity), 0) AS units_issued,
+              COUNT(*)::int AS movements
+            FROM stock_transactions
+            WHERE source_document_type = 'STOCK_SHEET'
+              AND created_at >= NOW() - INTERVAL '30 days'
+          `
+        );
+
+      const employees =
+        await db.all(
+          `
+            SELECT
+              COALESCE(NULLIF(TRIM(employee_name), ''), 'Unnamed') AS employee_name,
+              COUNT(*)::int AS movements,
+              COALESCE(SUM(quantity), 0) AS units
+            FROM stock_transactions
+            WHERE source_document_type = 'STOCK_SHEET'
+              AND created_at >= NOW() - INTERVAL '90 days'
+            GROUP BY 1
+            ORDER BY units DESC
+            LIMIT 5
+          `
+        );
+
+      const jobs =
+        await db.all(
+          `
+            SELECT
+              job_reference,
+              COUNT(*)::int AS movements,
+              COALESCE(SUM(quantity), 0) AS units
+            FROM stock_transactions
+            WHERE source_document_type = 'STOCK_SHEET'
+              AND job_reference IS NOT NULL
+              AND TRIM(job_reference) <> ''
+              AND created_at >= NOW() - INTERVAL '90 days'
+            GROUP BY job_reference
+            ORDER BY units DESC
+            LIMIT 5
+          `
+        );
+
+      const products =
+        await db.all(
+          `
+            SELECT
+              p.id,
+              p.sku,
+              p.description,
+              COALESCE(SUM(t.quantity), 0) AS units
+            FROM stock_transactions t
+            JOIN products p ON p.id = t.product_id
+            WHERE t.source_document_type = 'STOCK_SHEET'
+              AND t.created_at >= NOW() - INTERVAL '90 days'
+            GROUP BY p.id, p.sku, p.description
+            ORDER BY units DESC
+            LIMIT 5
+          `
+        );
+
+      return res.json({
+        totals: totals || {},
+        units_issued: Number(issued?.units_issued || 0),
+        movements: Number(issued?.movements || 0),
+        units_issued_today: Number(today?.units_issued || 0),
+        movements_today: Number(today?.movements || 0),
+        recent,
+        top_employees: employees.map((row) => ({
+          ...row,
+          units: Number(row.units),
+        })),
+        top_jobs: jobs.map((row) => ({ ...row, units: Number(row.units) })),
+        top_products: products.map((row) => ({
+          ...row,
+          units: Number(row.units),
+        })),
+        extraction: ai.providerStatus(),
+      });
+
+    } catch (error) {
+      console.error('[stock/sheets/metrics]', error);
+
+      return res.status(500).json({
+        error: `Unable to load sign-out metrics: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// GET /api/stock/sheets
+// ============================================================================
+
+router.get(
+  '/sheets',
+  requireAuth,
+  async (req, res) => {
+    try {
+
+      const limit = Math.min(Math.max(toNumber(req.query.limit, 50), 1), 200);
+      const page = Math.max(toNumber(req.query.page, 1), 1);
+      const offset = (page - 1) * limit;
+
+      const params = [];
+      let where = ' WHERE 1 = 1';
+
+      if (req.query.status && req.query.status !== 'all') {
+        params.push(String(req.query.status).toUpperCase());
+        where += ` AND s.status = $${params.length}`;
+      }
+
+      if (req.query.employee) {
+        params.push(`%${req.query.employee}%`);
+        where += ` AND s.employee_name ILIKE $${params.length}`;
+      }
+
+      if (req.query.q) {
+        params.push(`%${req.query.q}%`);
+        const p = `$${params.length}`;
+
+        where += `
+          AND (
+            s.sheet_number ILIKE ${p}
+            OR s.employee_name ILIKE ${p}
+            OR s.job_reference ILIKE ${p}
+            OR s.filename ILIKE ${p}
+          )
+        `;
+      }
+
+      const total =
+        await db.get(
+          `SELECT COUNT(*)::int AS c FROM stock_sheets s ${where}`,
+          params
+        );
+
+      params.push(limit, offset);
+
+      const rows =
+        await db.all(
+          `
+            SELECT
+              s.*,
+              u.name AS created_by_name
+            FROM stock_sheets s
+            LEFT JOIN users u ON u.id = s.created_by
+            ${where}
+            ORDER BY s.created_at DESC
+            LIMIT $${params.length - 1} OFFSET $${params.length}
+          `,
+          params
+        );
+
+      return res.json({
+        sheets: rows,
+        total: Number(total?.c || 0),
+        page,
+        limit,
+        pages: Math.max(1, Math.ceil(Number(total?.c || 0) / limit)),
+      });
+
+    } catch (error) {
+      console.error('[stock/sheets/list]', error);
+
+      return res.status(500).json({
+        error: `Unable to load sign-out sheets: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// GET /api/stock/sheets/:id
+// ============================================================================
+
+router.get(
+  '/sheets/:id',
+  requireAuth,
+  async (req, res) => {
+    try {
+
+      const sheet = await loadSheet(req.params.id);
+
+      if (!sheet) {
+        return res.status(404).json({ error: 'Stock sheet not found' });
+      }
+
+      return res.json({
+        sheet,
+        thresholds: {
+          accept: sheets.ACCEPT_THRESHOLD,
+          review: sheets.MANDATORY_REVIEW_THRESHOLD,
+        },
+      });
+
+    } catch (error) {
+      console.error('[stock/sheets/detail]', error);
+
+      return res.status(500).json({
+        error: `Unable to load sign-out sheet: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// GET /api/stock/sheets/:id/document
+//
+// The source document itself, so a movement can always be traced back to the
+// piece of paper it came from.
+// ============================================================================
+
+router.get(
+  '/sheets/:id/document',
+  requireAuth,
+  async (req, res) => {
+    try {
+
+      const sheet =
+        await db.get(
+          'SELECT file_path, mime_type FROM stock_sheets WHERE id = $1',
+          [req.params.id]
+        );
+
+      if (!sheet || !sheet.file_path) {
+        return res.status(404).json({ error: 'Stock sheet document not found' });
+      }
+
+      const absolutePath =
+        path.isAbsolute(sheet.file_path)
+          ? sheet.file_path
+          : path.join(__dirname, '..', sheet.file_path);
+
+      if (!fs.existsSync(absolutePath)) {
+        return res.status(404).json({
+          error: 'The sign-out sheet file could not be found on the server',
+        });
+      }
+
+      return res.sendFile(absolutePath);
+
+    } catch (error) {
+      console.error('[stock/sheets/document]', error);
+
+      return res.status(500).json({
+        error: `Unable to load the sign-out sheet document: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// PATCH /api/stock/sheets/:id
+//
+// Corrects what the extraction read from the header — who signed for it, which
+// job it was for, which store it came out of.
+// ============================================================================
+
+router.patch(
+  '/sheets/:id',
+  requireAuth,
+  requireRole('admin', 'reviewer', 'processor'),
+  async (req, res) => {
+    try {
+
+      const sheet =
+        await db.get('SELECT * FROM stock_sheets WHERE id = $1', [req.params.id]);
+
+      if (!sheet) {
+        return res.status(404).json({ error: 'Stock sheet not found' });
+      }
+
+      if (sheet.status === 'POSTED') {
+        return res.status(409).json({
+          error: 'This sheet has already been posted to stock and cannot be edited',
+        });
+      }
+
+      const updates = [];
+      const params = [];
+
+      SHEET_HEADER_FIELDS.forEach((field) => {
+        if (!(field in (req.body || {}))) return;
+
+        const value = req.body[field];
+
+        params.push(value === '' ? null : value);
+        updates.push(`${field} = $${params.length}`);
+      });
+
+      let locationChanged = false;
+
+      if ('location_id' in (req.body || {})) {
+        const locationId = req.body.location_id || null;
+
+        if (locationId) {
+          const location =
+            await db.get(
+              'SELECT id FROM stock_locations WHERE id = $1',
+              [locationId]
+            );
+
+          if (!location) {
+            return res.status(400).json({ error: 'That location does not exist' });
+          }
+        }
+
+        locationChanged = locationId !== sheet.location_id;
+
+        params.push(locationId);
+        updates.push(`location_id = $${params.length}`);
+      }
+
+      if (!updates.length) {
+        return res.status(400).json({ error: 'Nothing to update' });
+      }
+
+      params.push(req.params.id);
+
+      await db.run(
+        `
+          UPDATE stock_sheets
+          SET ${updates.join(', ')}, updated_at = NOW()
+          WHERE id = $${params.length}
+        `,
+        params
+      );
+
+      // Moving the sheet to another store changes what is available, so the
+      // whole sheet is re-checked rather than left showing stale figures.
+      if (locationChanged) {
+        await sheets.revalidateSheet(req.params.id);
+      }
+
+      return res.json({ sheet: await loadSheet(req.params.id) });
+
+    } catch (error) {
+      console.error('[stock/sheets/update]', error);
+
+      return res.status(500).json({
+        error: `Unable to update the sign-out sheet: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// PATCH /api/stock/sheets/:id/rows/:rowId
+//
+// A person corrects one line: the product it means, the quantity that was
+// written, or whether it belongs on this sheet at all. Picking a product is an
+// explicit confirmation, so the wording is remembered for next time.
+// ============================================================================
+
+router.patch(
+  '/sheets/:id/rows/:rowId',
+  requireAuth,
+  requireRole('admin', 'reviewer', 'processor'),
+  async (req, res) => {
+    try {
+
+      const sheet =
+        await db.get('SELECT * FROM stock_sheets WHERE id = $1', [req.params.id]);
+
+      if (!sheet) {
+        return res.status(404).json({ error: 'Stock sheet not found' });
+      }
+
+      if (sheet.status === 'POSTED') {
+        return res.status(409).json({
+          error: 'This sheet has already been posted to stock and cannot be edited',
+        });
+      }
+
+      const row =
+        await db.get(
+          'SELECT * FROM stock_sheet_rows WHERE id = $1 AND sheet_id = $2',
+          [req.params.rowId, req.params.id]
+        );
+
+      if (!row) {
+        return res.status(404).json({ error: 'Sheet line not found' });
+      }
+
+      const body = req.body || {};
+
+      const updates = [];
+      const params = [];
+
+      let confirmedProductId = null;
+
+      if ('product_id' in body) {
+        const productId = body.product_id || null;
+
+        if (productId) {
+          const product =
+            await db.get(
+              'SELECT id, is_active FROM products WHERE id = $1',
+              [productId]
+            );
+
+          if (!product) {
+            return res.status(400).json({ error: 'That product does not exist' });
+          }
+
+          if (product.is_active === false) {
+            return res.status(400).json({
+              error: 'That product is inactive — reactivate it first',
+            });
+          }
+
+          confirmedProductId = productId;
+        }
+
+        params.push(productId);
+        updates.push(`product_id = $${params.length}`);
+
+        // A person chose it, so the line is no longer a guess.
+        params.push(productId ? 1 : null);
+        updates.push(`match_confidence = $${params.length}`);
+
+        params.push(productId ? 'manual_review' : null);
+        updates.push(`match_method = $${params.length}`);
+      }
+
+      if ('quantity' in body) {
+        const quantity = toNumber(body.quantity, null);
+
+        if (quantity === null || !(quantity > 0)) {
+          return res.status(400).json({
+            error: 'Enter a quantity greater than zero',
+          });
+        }
+
+        params.push(quantity);
+        updates.push(`quantity = $${params.length}`);
+
+        params.push(1);
+        updates.push(`quantity_confidence = $${params.length}`);
+      }
+
+      if ('excluded' in body) {
+        const excluded =
+          body.excluded === true || body.excluded === 'true';
+
+        params.push(excluded ? 'EXCLUDED' : 'PENDING');
+        updates.push(`status = $${params.length}`);
+
+        params.push(
+          excluded ? 'Excluded from this sheet by a reviewer' : null
+        );
+        updates.push(`issue = $${params.length}`);
+      }
+
+      if (!updates.length) {
+        return res.status(400).json({ error: 'Nothing to update' });
+      }
+
+      params.push(req.user.id);
+      updates.push(`corrected_by = $${params.length}`);
+      updates.push('corrected_at = NOW()');
+
+      params.push(row.id);
+
+      await db.run(
+        `UPDATE stock_sheet_rows SET ${updates.join(', ')} WHERE id = $${params.length}`,
+        params
+      );
+
+      // Re-check every line against live stock so the totals on screen and the
+      // sheet's own status stay true after the correction.
+      await sheets.revalidateSheet(req.params.id);
+
+      // Learning happens only on an explicit correction, never on a guess the
+      // matcher made by itself.
+      if (confirmedProductId) {
+        await matching.rememberMatch({
+          supplierId: null,
+          sourceText: row.raw_description,
+          sourceCode: row.raw_product_code,
+          productId: confirmedProductId,
+          method: 'manual_review',
+          confidence: 1,
+          userId: req.user.id,
+        });
+      }
+
+      return res.json({ sheet: await loadSheet(req.params.id) });
+
+    } catch (error) {
+      console.error('[stock/sheets/rows/update]', error);
+
+      return res.status(500).json({
+        error: `Unable to update the sheet line: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// POST /api/stock/sheets/:id/retry
+//
+// Reads the document again — for a sheet that failed, or one whose extraction
+// should be redone after the product master changed.
+// ============================================================================
+
+router.post(
+  '/sheets/:id/retry',
+  requireAuth,
+  requireRole('admin', 'reviewer', 'processor'),
+  async (req, res) => {
+    try {
+
+      const sheet =
+        await db.get(
+          'SELECT id, status FROM stock_sheets WHERE id = $1',
+          [req.params.id]
+        );
+
+      if (!sheet) {
+        return res.status(404).json({ error: 'Stock sheet not found' });
+      }
+
+      if (sheet.status === 'POSTED') {
+        return res.status(409).json({
+          error: 'This sheet has already been posted to stock',
+        });
+      }
+
+      if (sheet.status === 'CANCELLED') {
+        return res.status(409).json({ error: 'This sheet was cancelled' });
+      }
+
+      await db.run(
+        `
+          UPDATE stock_sheets
+          SET status = 'PROCESSING', error_message = NULL, updated_at = NOW()
+          WHERE id = $1
+        `,
+        [req.params.id]
+      );
+
+      sheets
+        .processSheet(req.params.id)
+        .catch((error) => {
+          console.error('[stock/sheets/retry]', req.params.id, error.message);
+        });
+
+      return res.json({ retrying: true });
+
+    } catch (error) {
+      console.error('[stock/sheets/retry]', error);
+
+      return res.status(500).json({
+        error: `Unable to re-read the sign-out sheet: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// POST /api/stock/sheets/:id/approve
+//
+// The only route that deducts stock from a sign-out sheet. All-or-nothing: one
+// unresolved line blocks the whole sheet, and approving twice deducts once.
+// ============================================================================
+
+router.post(
+  '/sheets/:id/approve',
+  requireAuth,
+  requireRole('admin', 'reviewer'),
+  async (req, res) => {
+    try {
+
+      const result = await sheets.postSheet(req.params.id, req.user.id);
+
+      if (result.posted) {
+        return res.json({
+          posted: true,
+          transaction_count: result.transaction_count,
+          sheet: await loadSheet(req.params.id),
+        });
+      }
+
+      const messages = {
+        not_found: 'Stock sheet not found',
+        already_posted: 'This sheet has already been posted to stock',
+        cancelled: 'This sheet was cancelled and cannot be posted',
+        no_rows: 'This sheet has no lines to post',
+        no_movements: 'This sheet has no lines to post',
+        unresolved_rows:
+          'Every line must be matched before stock can be deducted',
+      };
+
+      const status = result.reason === 'not_found' ? 404 : 409;
+
+      return res.status(status).json({
+        posted: false,
+        reason: result.reason,
+        error: messages[result.reason] || 'This sheet could not be posted',
+        blocking: result.blocking || [],
+        sheet:
+          result.reason === 'not_found'
+            ? null
+            : await loadSheet(req.params.id),
+      });
+
+    } catch (error) {
+      console.error('[stock/sheets/approve]', error);
+
+      // A posting failure must leave stock exactly as it was; postDocument
+      // rolls the whole document back, so the sheet stays un-posted.
+      const status = error.code === 'INSUFFICIENT_STOCK' ? 409 : 400;
+
+      return res.status(status).json({
+        posted: false,
+        error: error.message,
+        available: error.available,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// POST /api/stock/sheets/:id/cancel
+// ============================================================================
+
+router.post(
+  '/sheets/:id/cancel',
+  requireAuth,
+  requireRole('admin', 'reviewer'),
+  async (req, res) => {
+    try {
+
+      const sheet =
+        await db.get(
+          'SELECT id, status FROM stock_sheets WHERE id = $1',
+          [req.params.id]
+        );
+
+      if (!sheet) {
+        return res.status(404).json({ error: 'Stock sheet not found' });
+      }
+
+      if (sheet.status === 'POSTED') {
+        return res.status(409).json({
+          error:
+            'This sheet has already been posted — reverse it with a stock adjustment instead',
+        });
+      }
+
+      await db.run(
+        `
+          UPDATE stock_sheets
+          SET status = 'CANCELLED',
+              error_message = $1,
+              updated_at = NOW()
+          WHERE id = $2
+        `,
+        [req.body?.reason || null, req.params.id]
+      );
+
+      return res.json({ cancelled: true, sheet: await loadSheet(req.params.id) });
+
+    } catch (error) {
+      console.error('[stock/sheets/cancel]', error);
+
+      return res.status(500).json({
+        error: `Unable to cancel the sign-out sheet: ${error.message}`,
       });
     }
   }

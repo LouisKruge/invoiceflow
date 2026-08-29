@@ -174,7 +174,7 @@ function cellText(cell) {
   return String(value);
 }
 
-async function parseWorkbook(filePath) {
+async function workbookGrid(filePath) {
   const workbook = new ExcelJS.Workbook();
 
   await workbook.xlsx.readFile(filePath);
@@ -204,8 +204,14 @@ async function parseWorkbook(filePath) {
     );
   });
 
+  return { grid, sheetName: sheet.name };
+}
+
+async function parseWorkbook(filePath) {
+  const { grid, sheetName } = await workbookGrid(filePath);
+
   if (!grid.length) {
-    return { headers: [], rows: [], sheetName: sheet.name };
+    return { headers: [], rows: [], sheetName };
   }
 
   // Stock sheets often start with a title or a blank line. The header is the
@@ -224,7 +230,34 @@ async function parseWorkbook(filePath) {
   return {
     headers: grid[headerIndex] || [],
     rows: grid.slice(headerIndex + 1),
-    sheetName: sheet.name,
+    sheetName,
+  };
+}
+
+/**
+ * Returns the sheet exactly as it is laid out, header rows and all.
+ *
+ * inspectSpreadsheet decides where the table starts, which is right for a
+ * stock list. A sign-out sheet often carries its employee and job above that
+ * table, so the caller needs the untouched grid to read them.
+ */
+async function readGrid(filePath, mimeType) {
+  const extension = path.extname(filePath).toLowerCase();
+
+  const isCsv =
+    extension === '.csv' ||
+    extension === '.tsv' ||
+    String(mimeType || '').includes('csv');
+
+  if (!isCsv) {
+    return workbookGrid(filePath);
+  }
+
+  const parsed = parseCsv(fs.readFileSync(filePath, 'utf8'));
+
+  return {
+    grid: parsed.headers.length ? [parsed.headers, ...parsed.rows] : [],
+    sheetName: null,
   };
 }
 
@@ -365,6 +398,7 @@ module.exports = {
   parseCsv,
   parseCsvLine,
   inspectSpreadsheet,
+  readGrid,
   extractRow,
   toNumber,
 };
