@@ -1821,7 +1821,65 @@ router.patch(
 
         }
 
-      }// ===========================================================================
+      }
+
+      // ----------------------------------------------------------------------
+      // STATUS
+      // ----------------------------------------------------------------------
+
+      const newStatus =
+        [
+          'approved',
+          'rejected'
+        ].includes(
+          refreshed.status
+        )
+          ? refreshed.status
+          : overallStatus(
+              validationResults,
+              confidence
+            );
+
+      await db.run(
+        `
+          UPDATE invoices
+          SET
+            status = $1,
+            updated_at = NOW()
+          WHERE id = $2
+        `,
+        [
+          newStatus,
+          req.params.id
+        ]
+      );
+
+      return res.json({
+
+        invoice:
+          await getInvoiceFull(
+            req.params.id
+          )
+
+      });
+
+    } catch (error) {
+
+      console.error(
+        '[invoices/update]',
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          `Unable to update invoice: ${error.message}`
+      });
+
+    }
+
+  }
+);
+
 // DELETE API ROUTE
 // ADD THIS TO routes/invoices.js
 // ===========================================================================
@@ -2105,63 +2163,6 @@ router.post(
       return res.status(500).json({
         error:
           `Unable to delete invoices: ${error.message}`
-      });
-
-    }
-
-  }
-);
-
-      // ----------------------------------------------------------------------
-      // STATUS
-      // ----------------------------------------------------------------------
-
-      const newStatus =
-        [
-          'approved',
-          'rejected'
-        ].includes(
-          refreshed.status
-        )
-          ? refreshed.status
-          : overallStatus(
-              validationResults,
-              confidence
-            );
-
-      await db.run(
-        `
-          UPDATE invoices
-          SET
-            status = $1,
-            updated_at = NOW()
-          WHERE id = $2
-        `,
-        [
-          newStatus,
-          req.params.id
-        ]
-      );
-
-      return res.json({
-
-        invoice:
-          await getInvoiceFull(
-            req.params.id
-          )
-
-      });
-
-    } catch (error) {
-
-      console.error(
-        '[invoices/update]',
-        error
-      );
-
-      return res.status(500).json({
-        error:
-          `Unable to update invoice: ${error.message}`
       });
 
     }
