@@ -26,6 +26,10 @@ const {
   lowConfidenceFields
 } = require('../services/validation');
 
+const {
+  postInvoiceToStock
+} = require('../services/invoiceStock');
+
 const router = express.Router();
 
 // ============================================================================
@@ -2227,12 +2231,69 @@ router.post(
         null
       );
 
+      // ----------------------------------------------------------------------
+      // STOCK
+      //
+      // Approval is the point at which an invoice becomes a receipt of goods,
+      // so this is where stock moves. Confident line matches post to the
+      // ledger; anything uncertain goes to the stock review queue rather than
+      // being guessed. A failure here must not undo the approval, so it is
+      // recorded and surfaced rather than thrown.
+      // ----------------------------------------------------------------------
+
+      let stockResult = null;
+
+      try {
+
+        stockResult =
+          await postInvoiceToStock(
+            req.params.id,
+            req.user.id
+          );
+
+        await log(
+          req.params.id,
+          'stock_posted',
+          req.user.id,
+          {
+            posted: stockResult.posted,
+            posted_count: stockResult.posted_count || 0,
+            queued_count: stockResult.queued_count || 0,
+            skipped_count: stockResult.skipped_count || 0,
+            reason: stockResult.reason || null
+          }
+        );
+
+      } catch (stockError) {
+
+        console.error(
+          '[invoices/approve] Stock posting failed:',
+          stockError
+        );
+
+        stockResult = {
+          posted: false,
+          error: stockError.message
+        };
+
+        await log(
+          req.params.id,
+          'error',
+          req.user.id,
+          {
+            message: `Stock posting failed: ${stockError.message}`
+          }
+        );
+      }
+
       return res.json({
 
         invoice:
           await getInvoiceFull(
             req.params.id
-          )
+          ),
+
+        stock: stockResult
 
       });
 

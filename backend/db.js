@@ -371,6 +371,389 @@ async function initializeDatabase() {
   `);
 
   // -------------------------------------------------------------------------
+  // STOCK
+  //
+  // The inventory model is an event ledger, not a quantity column. Documents
+  // produce events, events are appended to stock_transactions, and current
+  // stock is derived from those events. stock_balances is a materialized cache
+  // of that derivation and must always reconcile against the ledger.
+  // -------------------------------------------------------------------------
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stock_locations (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Product master. The id is the canonical identifier for every movement;
+    -- descriptions vary between suppliers and documents and are never the key.
+    CREATE TABLE IF NOT EXISTS products (
+      id TEXT PRIMARY KEY,
+
+      sku TEXT,
+      product_code TEXT,
+      barcode TEXT,
+
+      description TEXT NOT NULL,
+
+      -- Lower-cased, punctuation-stripped, token-sorted form of the
+      -- description. Matching compares this, never the raw text.
+      normalized_description TEXT,
+
+      category TEXT,
+      unit_of_measure TEXT NOT NULL DEFAULT 'ea',
+
+      reorder_level NUMERIC NOT NULL DEFAULT 0,
+      unit_cost NUMERIC NOT NULL DEFAULT 0,
+
+      supplier_id TEXT,
+      supplier_product_code TEXT,
+
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (supplier_id)
+        REFERENCES suppliers(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (created_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    -- The immutable ledger. Rows are appended, never updated in place: a
+    -- correction is another row (STOCK_ADJUSTMENT), not an edit.
+    CREATE TABLE IF NOT EXISTS stock_transactions (
+      id TEXT PRIMARY KEY,
+
+      product_id TEXT NOT NULL,
+      location_id TEXT,
+
+      transaction_type TEXT NOT NULL CHECK (
+        transaction_type IN (
+          'OPENING_BALANCE',
+          'PURCHASE_RECEIPT',
+          'STOCK_ISSUE',
+          'STOCK_RETURN',
+          'STOCK_ADJUSTMENT',
+          'STOCK_TRANSFER',
+          'STOCK_COUNT'
+        )
+      ),
+
+      -- quantity is always a positive magnitude; direction carries the sign,
+      -- so a row can never accidentally mean the opposite of what it says.
+      direction SMALLINT NOT NULL CHECK (direction IN (-1, 1)),
+      quantity NUMERIC NOT NULL CHECK (quantity >= 0),
+
+      signed_quantity NUMERIC GENERATED ALWAYS AS (quantity * direction) STORED,
+
+      unit_cost NUMERIC,
+      total_value NUMERIC GENERATED ALWAYS AS (quantity * COALESCE(unit_cost, 0)) STORED,
+
+      -- What caused this movement, and which line of it.
+      source_document_type TEXT,
+      source_document_id TEXT,
+      source_line_id TEXT,
+
+      supplier_id TEXT,
+      employee_name TEXT,
+      job_reference TEXT,
+
+      reason TEXT,
+      notes TEXT,
+
+      match_confidence NUMERIC,
+
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE RESTRICT,
+
+      FOREIGN KEY (location_id)
+        REFERENCES stock_locations(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (supplier_id)
+        REFERENCES suppliers(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (created_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    -- Materialized current stock. Derived from the ledger, never authoritative.
+    CREATE TABLE IF NOT EXISTS stock_balances (
+      product_id TEXT NOT NULL,
+      location_id TEXT NOT NULL,
+      quantity NUMERIC NOT NULL DEFAULT 0,
+      last_movement_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      PRIMARY KEY (product_id, location_id),
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (location_id)
+        REFERENCES stock_locations(id)
+        ON DELETE CASCADE
+    );
+
+    -- One row per document that has posted stock. The unique constraint is the
+    -- idempotency gate: a second attempt to post the same document fails here
+    -- rather than doubling the stock.
+    CREATE TABLE IF NOT EXISTS stock_document_postings (
+      id TEXT PRIMARY KEY,
+      document_type TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      transaction_count INTEGER NOT NULL DEFAULT 0,
+      posted_by TEXT,
+      posted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      UNIQUE (document_type, document_id),
+
+      FOREIGN KEY (posted_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS stock_imports (
+      id TEXT PRIMARY KEY,
+      filename TEXT,
+      mime_type TEXT,
+      file_path TEXT,
+
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'mapped', 'committed', 'failed', 'cancelled')
+      ),
+
+      sheet_name TEXT,
+      detected_columns TEXT,
+      column_mapping TEXT,
+      location_id TEXT,
+
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      imported_rows INTEGER NOT NULL DEFAULT 0,
+      skipped_rows INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT,
+
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      committed_at TIMESTAMPTZ,
+
+      FOREIGN KEY (location_id)
+        REFERENCES stock_locations(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (created_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS stock_import_rows (
+      id TEXT PRIMARY KEY,
+      import_id TEXT NOT NULL,
+      row_number INTEGER NOT NULL,
+
+      raw_data TEXT,
+
+      sku TEXT,
+      description TEXT,
+      category TEXT,
+      unit_of_measure TEXT,
+      quantity NUMERIC,
+      unit_cost NUMERIC,
+      supplier_name TEXT,
+      supplier_product_code TEXT,
+      barcode TEXT,
+      reorder_level NUMERIC,
+
+      product_id TEXT,
+      transaction_id TEXT,
+
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'imported', 'skipped', 'failed')
+      ),
+      message TEXT,
+
+      FOREIGN KEY (import_id)
+        REFERENCES stock_imports(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE SET NULL
+    );
+
+    -- Extra metadata for a manual correction. The movement itself is the
+    -- linked ledger row; this holds the human reason and any evidence.
+    CREATE TABLE IF NOT EXISTS stock_adjustments (
+      id TEXT PRIMARY KEY,
+      transaction_id TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      quantity NUMERIC NOT NULL,
+      direction SMALLINT NOT NULL CHECK (direction IN (-1, 1)),
+      reason TEXT NOT NULL,
+      notes TEXT,
+      document_path TEXT,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (transaction_id)
+        REFERENCES stock_transactions(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (created_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    -- Learned mappings. Once a person confirms that a supplier's wording means
+    -- a given product, the same wording resolves automatically next time.
+    CREATE TABLE IF NOT EXISTS document_product_matches (
+      id TEXT PRIMARY KEY,
+      supplier_id TEXT,
+      source_text TEXT NOT NULL,
+      normalized_text TEXT NOT NULL,
+      source_code TEXT,
+      product_id TEXT NOT NULL,
+      match_method TEXT,
+      confidence NUMERIC,
+      times_used INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (supplier_id)
+        REFERENCES suppliers(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (created_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    -- Lines that could not be matched confidently. They wait here instead of
+    -- being guessed into the ledger.
+    CREATE TABLE IF NOT EXISTS stock_review_queue (
+      id TEXT PRIMARY KEY,
+
+      source_document_type TEXT NOT NULL,
+      source_document_id TEXT NOT NULL,
+      source_line_id TEXT,
+
+      raw_description TEXT,
+      raw_code TEXT,
+      quantity NUMERIC,
+      unit_cost NUMERIC,
+
+      supplier_id TEXT,
+      location_id TEXT,
+
+      candidates TEXT,
+      best_confidence NUMERIC,
+
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'resolved', 'dismissed')
+      ),
+
+      resolved_product_id TEXT,
+      resolved_transaction_id TEXT,
+      resolved_by TEXT,
+      resolved_at TIMESTAMPTZ,
+
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (supplier_id)
+        REFERENCES suppliers(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (location_id)
+        REFERENCES stock_locations(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (resolved_product_id)
+        REFERENCES products(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (resolved_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
+    CREATE INDEX IF NOT EXISTS idx_products_code ON products(product_code);
+    CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
+    CREATE INDEX IF NOT EXISTS idx_products_supplier ON products(supplier_id);
+    CREATE INDEX IF NOT EXISTS idx_products_supplier_code ON products(supplier_product_code);
+    CREATE INDEX IF NOT EXISTS idx_products_norm_desc ON products(normalized_description);
+    CREATE INDEX IF NOT EXISTS idx_products_active ON products(is_active);
+
+    CREATE INDEX IF NOT EXISTS idx_stock_tx_product ON stock_transactions(product_id);
+    CREATE INDEX IF NOT EXISTS idx_stock_tx_location ON stock_transactions(location_id);
+    CREATE INDEX IF NOT EXISTS idx_stock_tx_type ON stock_transactions(transaction_type);
+    CREATE INDEX IF NOT EXISTS idx_stock_tx_created ON stock_transactions(created_at);
+    CREATE INDEX IF NOT EXISTS idx_stock_tx_source
+      ON stock_transactions(source_document_type, source_document_id);
+
+    -- A given document line may only move a given product once.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_tx_source_line
+      ON stock_transactions(source_document_type, source_document_id, source_line_id)
+      WHERE source_document_id IS NOT NULL
+        AND source_line_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_balances_product ON stock_balances(product_id);
+    CREATE INDEX IF NOT EXISTS idx_import_rows_import ON stock_import_rows(import_id);
+    CREATE INDEX IF NOT EXISTS idx_review_status ON stock_review_queue(status);
+    CREATE INDEX IF NOT EXISTS idx_review_source
+      ON stock_review_queue(source_document_type, source_document_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dpm_supplier_text
+      ON document_product_matches(COALESCE(supplier_id, ''), normalized_text);
+  `);
+
+  // Line items carry their resolved product so an invoice can be re-examined
+  // later without re-running the matcher.
+  await pool.query(`
+    ALTER TABLE invoice_line_items
+      ADD COLUMN IF NOT EXISTS product_id TEXT,
+      ADD COLUMN IF NOT EXISTS match_confidence NUMERIC,
+      ADD COLUMN IF NOT EXISTS match_method TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_line_items_product
+      ON invoice_line_items(product_id);
+  `);
+
+  // Every deployment needs somewhere for stock to live. More locations can be
+  // added later; this one is the default target for movements that do not
+  // name one.
+  await pool.query(`
+    INSERT INTO stock_locations (id, code, name, is_default)
+    VALUES ('loc-main', 'MAIN', 'Main Warehouse', TRUE)
+    ON CONFLICT (code) DO NOTHING;
+  `);
+
+  // -------------------------------------------------------------------------
   // MIGRATIONS
   //
   // CREATE TABLE IF NOT EXISTS never alters an existing table, so columns

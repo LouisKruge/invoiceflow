@@ -1047,6 +1047,168 @@
   }
 
   // ===========================================================================
+  // STOCK
+  // ===========================================================================
+
+  function stockQuery(params = {}) {
+    const clean =
+      Object.fromEntries(
+        Object.entries(params).filter(
+          ([, value]) =>
+            value !== undefined && value !== null && value !== ''
+        )
+      );
+
+    const query = new URLSearchParams(clean).toString();
+
+    return query ? `?${query}` : '';
+  }
+
+  async function stockOverview() {
+    return request('/stock/overview');
+  }
+
+  async function listProducts(params = {}) {
+    return request(`/stock/products${stockQuery(params)}`);
+  }
+
+  async function getProduct(id) {
+    if (!id) throw new Error('Product ID is required.');
+
+    return request(`/stock/products/${encodeURIComponent(id)}`);
+  }
+
+  async function createProduct(fields) {
+    return request('/stock/products', {
+      method: 'POST',
+      body: JSON.stringify(fields || {}),
+    });
+  }
+
+  async function updateProduct(id, fields) {
+    if (!id) throw new Error('Product ID is required.');
+
+    return request(`/stock/products/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(fields || {}),
+    });
+  }
+
+  async function productHistory(id) {
+    if (!id) throw new Error('Product ID is required.');
+
+    return request(`/stock/products/${encodeURIComponent(id)}/history`);
+  }
+
+  async function listStockTransactions(params = {}) {
+    return request(`/stock/transactions${stockQuery(params)}`);
+  }
+
+  async function getStockTransaction(id) {
+    if (!id) throw new Error('Transaction ID is required.');
+
+    return request(`/stock/transactions/${encodeURIComponent(id)}`);
+  }
+
+  async function createStockAdjustment(fields) {
+    return request('/stock/adjustments', {
+      method: 'POST',
+      body: JSON.stringify(fields || {}),
+    });
+  }
+
+  async function listStockLocations() {
+    return request('/stock/locations');
+  }
+
+  async function listStockReview(status) {
+    return request(`/stock/review${stockQuery({ status })}`);
+  }
+
+  async function resolveStockReview(id, body) {
+    if (!id) throw new Error('Review item ID is required.');
+
+    return request(`/stock/review/${encodeURIComponent(id)}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    });
+  }
+
+  async function matchStockProduct(body) {
+    return request('/stock/match', {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    });
+  }
+
+  async function reconcileStock() {
+    return request('/stock/reconcile', { method: 'POST' });
+  }
+
+  async function listStockImports() {
+    return request('/stock/imports');
+  }
+
+  /**
+   * Uploads a stock spreadsheet and returns the detected columns plus a
+   * suggested mapping. Nothing is written until commitStockImport is called.
+   */
+  async function uploadStockImport(file) {
+    if (!token()) {
+      invalidateSession();
+
+      return Promise.reject(
+        new Error('Your session has expired. Please sign in again.')
+      );
+    }
+
+    const form = new FormData();
+
+    form.append('file', file);
+
+    const response =
+      await fetch(`${BASE}/stock/imports`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token()}` },
+        body: form,
+      });
+
+    if (response.status === 401 || response.status === 403) {
+      // 403 here means the role is not allowed to import, not a dead session.
+      if (response.status === 401) invalidateSession();
+
+      const body = await response.json().catch(() => ({}));
+
+      throw new Error(
+        body.error ||
+        (response.status === 403
+          ? 'You do not have permission to import stock.'
+          : 'Your session has expired. Please sign in again.')
+      );
+    }
+
+    const body = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(body.error || 'Unable to read that spreadsheet.');
+    }
+
+    return body;
+  }
+
+  async function commitStockImport(importId, body) {
+    if (!importId) throw new Error('Import ID is required.');
+
+    return request(
+      `/stock/imports/${encodeURIComponent(importId)}/commit`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body || {}),
+      }
+    );
+  }
+
+  // ===========================================================================
   // SUPPLIERS
   // ===========================================================================
 
@@ -1319,6 +1481,25 @@
     // Suppliers
     listSuppliers,
     getSupplier,
+
+    // Stock
+    stockOverview,
+    listProducts,
+    getProduct,
+    createProduct,
+    updateProduct,
+    productHistory,
+    listStockTransactions,
+    getStockTransaction,
+    createStockAdjustment,
+    listStockLocations,
+    listStockReview,
+    resolveStockReview,
+    matchStockProduct,
+    reconcileStock,
+    listStockImports,
+    uploadStockImport,
+    commitStockImport,
 
     // Exports
     exportAllUrl,

@@ -313,6 +313,24 @@
 
     '#/settings':
       renderSettingsPage,
+
+    '#/stock':
+      renderStockOverviewPage,
+
+    '#/stock/products':
+      () => renderProductsPage(),
+
+    '#/stock/transactions':
+      () => renderStockTransactionsPage(),
+
+    '#/stock/adjustments':
+      renderStockAdjustmentsPage,
+
+    '#/stock/import':
+      renderStockImportPage,
+
+    '#/stock/review':
+      renderStockReviewPage,
   };
 
   let routerRunning =
@@ -472,6 +490,16 @@
     const supplierMatch =
       hash.match(
         /^#\/suppliers\/(.+)$/
+      );
+
+    const productMatch =
+      hash.match(
+        /^#\/stock\/products\/(.+)$/
+      );
+
+    const stockTxMatch =
+      hash.match(
+        /^#\/stock\/transactions\/(.+)$/
       );
 
     // -----------------------------------------------------------------------
@@ -710,6 +738,22 @@
           () =>
             renderSupplierDetailPage(
               supplierMatch[1]
+            );
+
+      } else if (productMatch) {
+
+        routeHandler =
+          () =>
+            renderProductDetailPage(
+              productMatch[1]
+            );
+
+      } else if (stockTxMatch) {
+
+        routeHandler =
+          () =>
+            renderStockTransactionDetailPage(
+              stockTxMatch[1]
             );
       }
     }
@@ -1334,6 +1378,9 @@ function bindInvoiceListEvents(container) {
     let approvalsCount =
       0;
 
+    let stockReviewCount =
+      0;
+
     try {
       if (
         !hasFunction(
@@ -1352,11 +1399,22 @@ function bindInvoiceListEvents(container) {
         exceptionResponse,
         duplicateResponse,
         approvalResponse,
+        stockReviewResponse,
       ] = await Promise.all([
         API.listInvoices({ status: 'exception' }),
         API.listInvoices({ status: 'duplicate' }),
         API.listInvoices({ status: 'review_required' }),
+        // The stock module may not be reachable on an older backend, so its
+        // count must never stop the shell from rendering.
+        hasFunction(API, 'listStockReview')
+          ? API.listStockReview('pending').catch(() => ({ items: [] }))
+          : Promise.resolve({ items: [] }),
       ]);
+
+      stockReviewCount =
+        Array.isArray(stockReviewResponse?.items)
+          ? stockReviewResponse.items.length
+          : 0;
 
       exceptionsCount =
         (
@@ -1426,6 +1484,7 @@ function bindInvoiceListEvents(container) {
     AppState.navCounts = {
       exceptions: exceptionsCount,
       approvals: approvalsCount,
+      stockReview: stockReviewCount,
     };
 
     root.innerHTML =
@@ -1434,7 +1493,10 @@ function bindInvoiceListEvents(container) {
         AppState.user,
         exceptionsCount,
         contentHtml,
-        { approvals: approvalsCount }
+        {
+          approvals: approvalsCount,
+          stockReview: stockReviewCount,
+        }
       );
 
     applyTheme(currentTheme());
@@ -1678,6 +1740,12 @@ function bindInvoiceListEvents(container) {
     { title: 'Go to Reports',     route: '#/reports',    icon: 'reports' },
     { title: 'Go to Settings',    route: '#/settings',   icon: 'settings' },
     { title: 'Upload invoice',    route: '#/capture',    icon: 'upload' },
+    { title: 'Go to Stock Overview',  route: '#/stock',              icon: 'stock' },
+    { title: 'Go to Products',        route: '#/stock/products',     icon: 'products' },
+    { title: 'Go to Stock Transactions', route: '#/stock/transactions', icon: 'ledger' },
+    { title: 'Adjust stock',          route: '#/stock/adjustments',  icon: 'adjust' },
+    { title: 'Import stock',          route: '#/stock/import',       icon: 'importFile' },
+    { title: 'Go to Stock Review',    route: '#/stock/review',       icon: 'review' },
     { title: 'Export invoices to Excel', action: 'export', icon: 'download' },
     { title: 'Toggle theme',      action: 'theme',       icon: 'moon' },
   ];
@@ -5019,6 +5087,911 @@ function bindInvoiceListEvents(container) {
     }
 
     bindShellEvents();
+  }
+
+  // ===========================================================================
+  // STOCK
+  //
+  // These pages use the same mountShell / render / bind pattern as the invoice
+  // screens, and the same toasts, dialogs and error handling.
+  // ===========================================================================
+
+  const StockState = {
+    productFilters: { q: '', status: '', category: '', sort: '', order: '', page: 1 },
+    txFilters: { q: '', type: '', page: 1 },
+  };
+
+  async function renderStockOverviewPage() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading stock…</div>',
+        '#/stock'
+      );
+
+    if (!mounted) return;
+
+    try {
+
+      const data = await API.stockOverview();
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML = renderStockOverview(data);
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-transaction-id]')
+        .forEach((row) => {
+          row.onclick =
+            () => {
+              location.hash = `#/stock/transactions/${row.dataset.transactionId}`;
+            };
+        });
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load the stock overview.');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Products
+  // -------------------------------------------------------------------------
+
+  async function renderProductsPage() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading products…</div>',
+        '#/stock/products'
+      );
+
+    if (!mounted) return;
+
+    await loadProducts();
+  }
+
+  async function loadProducts() {
+    try {
+
+      const data = await API.listProducts(StockState.productFilters);
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML = renderProducts(data, StockState.productFilters);
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-product-id]')
+        .forEach((row) => {
+          row.onclick =
+            () => {
+              location.hash = `#/stock/products/${row.dataset.productId}`;
+            };
+        });
+
+      const search = document.getElementById('product-search');
+
+      if (search) {
+        let timer;
+
+        search.oninput =
+          () => {
+            clearTimeout(timer);
+
+            timer =
+              setTimeout(
+                () => {
+                  StockState.productFilters.q = search.value;
+                  StockState.productFilters.page = 1;
+
+                  loadProducts().then(() => {
+                    const next = document.getElementById('product-search');
+
+                    if (next) {
+                      next.focus();
+                      next.setSelectionRange(next.value.length, next.value.length);
+                    }
+                  });
+                },
+                300
+              );
+          };
+      }
+
+      const category = document.getElementById('product-category');
+
+      if (category) {
+        category.onchange =
+          () => {
+            StockState.productFilters.category = category.value;
+            StockState.productFilters.page = 1;
+            loadProducts();
+          };
+      }
+
+      content
+        .querySelectorAll('[data-stock-status]')
+        .forEach((chip) => {
+          chip.onclick =
+            () => {
+              StockState.productFilters.status = chip.dataset.stockStatus;
+              StockState.productFilters.page = 1;
+              loadProducts();
+            };
+        });
+
+      // Clicking a sortable header toggles direction on the second click.
+      content
+        .querySelectorAll('th[data-sort]')
+        .forEach((th) => {
+          th.style.cursor = 'pointer';
+
+          th.onclick =
+            () => {
+              const key = th.dataset.sort;
+
+              StockState.productFilters.order =
+                StockState.productFilters.sort === key &&
+                StockState.productFilters.order !== 'desc'
+                  ? 'desc'
+                  : 'asc';
+
+              StockState.productFilters.sort = key;
+
+              loadProducts();
+            };
+        });
+
+      bindPager(() => loadProducts(), StockState.productFilters);
+
+      const newProduct = document.getElementById('btn-new-product');
+
+      if (newProduct) {
+        newProduct.onclick = () => openNewProductDialog();
+      }
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load products.');
+    }
+  }
+
+  function bindPager(reload, filters) {
+    const prev = document.getElementById('page-prev');
+    const next = document.getElementById('page-next');
+
+    if (prev) {
+      prev.onclick =
+        () => {
+          filters.page = Math.max(1, (filters.page || 1) - 1);
+          reload();
+        };
+    }
+
+    if (next) {
+      next.onclick =
+        () => {
+          filters.page = (filters.page || 1) + 1;
+          reload();
+        };
+    }
+  }
+
+  async function openNewProductDialog() {
+    const host = document.createElement('div');
+
+    host.innerHTML = `
+      <div class="modal-backdrop" id="product-backdrop">
+        <div class="modal-card">
+          <h3>New product</h3>
+          <div class="field">
+            <label>Description</label>
+            <input id="np-description" placeholder="e.g. SKF 6205-2RS Bearing" />
+          </div>
+          <div class="field">
+            <label>SKU / product code</label>
+            <input id="np-sku" placeholder="Optional" />
+          </div>
+          <div style="display:flex;gap:12px;">
+            <div class="field" style="flex:1;">
+              <label>Opening quantity</label>
+              <input id="np-qty" type="number" min="0" step="0.01" placeholder="0" />
+            </div>
+            <div class="field" style="flex:1;">
+              <label>Unit cost</label>
+              <input id="np-cost" type="number" min="0" step="0.01" placeholder="0.00" />
+            </div>
+          </div>
+          <div style="display:flex;gap:12px;">
+            <div class="field" style="flex:1;">
+              <label>Category</label>
+              <input id="np-category" placeholder="Optional" />
+            </div>
+            <div class="field" style="flex:1;">
+              <label>Reorder level</label>
+              <input id="np-reorder" type="number" min="0" step="1" placeholder="0" />
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-secondary" id="np-cancel">Cancel</button>
+            <button class="btn btn-primary" id="np-save">Create product</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const backdrop = host.firstElementChild;
+
+    document.body.appendChild(backdrop);
+
+    const close = () => backdrop.remove();
+
+    backdrop.querySelector('#np-cancel').onclick = close;
+
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) close();
+    });
+
+    backdrop.querySelector('#np-save').onclick =
+      async () => {
+        const description = backdrop.querySelector('#np-description').value.trim();
+
+        if (!description) {
+          toast('A product description is required.', 'error');
+          return;
+        }
+
+        try {
+
+          await API.createProduct({
+            description,
+            sku: backdrop.querySelector('#np-sku').value.trim() || null,
+            opening_quantity: backdrop.querySelector('#np-qty').value || 0,
+            unit_cost: backdrop.querySelector('#np-cost').value || 0,
+            category: backdrop.querySelector('#np-category').value.trim() || null,
+            reorder_level: backdrop.querySelector('#np-reorder').value || 0,
+          });
+
+          close();
+
+          toast('Product created', 'success');
+
+          await loadProducts();
+
+        } catch (error) {
+          handleApiError(error, 'Unable to create the product.');
+        }
+      };
+
+    backdrop.querySelector('#np-description').focus();
+  }
+
+  // -------------------------------------------------------------------------
+  // Product detail
+  // -------------------------------------------------------------------------
+
+  async function renderProductDetailPage(id) {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading product…</div>',
+        '#/stock/products'
+      );
+
+    if (!mounted) return;
+
+    try {
+
+      const [detail, history] =
+        await Promise.all([
+          API.getProduct(id),
+          API.productHistory(id),
+        ]);
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML = renderProductDetail(detail, history);
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-transaction-id]')
+        .forEach((row) => {
+          row.onclick =
+            () => {
+              location.hash = `#/stock/transactions/${row.dataset.transactionId}`;
+            };
+        });
+
+      // Drill straight through to the invoice that caused a movement.
+      content
+        .querySelectorAll('[data-invoice-id]')
+        .forEach((link) => {
+          link.onclick =
+            (event) => {
+              event.stopPropagation();
+              location.hash = `#/invoices/${link.dataset.invoiceId}`;
+            };
+        });
+
+      const adjust = document.getElementById('btn-adjust-product');
+
+      if (adjust) {
+        adjust.onclick =
+          () => {
+            StockState.adjustProductId = adjust.dataset.productId;
+            StockState.adjustProductLabel = detail.product.description;
+            location.hash = '#/stock/adjustments';
+          };
+      }
+
+    } catch (error) {
+
+      if (handleApiError(error, 'Unable to load the product.')) return;
+
+      location.hash = '#/stock/products';
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Transactions
+  // -------------------------------------------------------------------------
+
+  async function renderStockTransactionsPage() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading stock transactions…</div>',
+        '#/stock/transactions'
+      );
+
+    if (!mounted) return;
+
+    await loadStockTransactions();
+  }
+
+  async function loadStockTransactions() {
+    try {
+
+      const data = await API.listStockTransactions(StockState.txFilters);
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML = renderStockTransactions(data, StockState.txFilters);
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-transaction-id]')
+        .forEach((row) => {
+          row.onclick =
+            () => {
+              location.hash = `#/stock/transactions/${row.dataset.transactionId}`;
+            };
+        });
+
+      content
+        .querySelectorAll('[data-tx-type]')
+        .forEach((chip) => {
+          chip.onclick =
+            () => {
+              StockState.txFilters.type = chip.dataset.txType;
+              StockState.txFilters.page = 1;
+              loadStockTransactions();
+            };
+        });
+
+      const search = document.getElementById('tx-search');
+
+      if (search) {
+        let timer;
+
+        search.oninput =
+          () => {
+            clearTimeout(timer);
+
+            timer =
+              setTimeout(
+                () => {
+                  StockState.txFilters.q = search.value;
+                  StockState.txFilters.page = 1;
+
+                  loadStockTransactions().then(() => {
+                    const next = document.getElementById('tx-search');
+
+                    if (next) {
+                      next.focus();
+                      next.setSelectionRange(next.value.length, next.value.length);
+                    }
+                  });
+                },
+                300
+              );
+          };
+      }
+
+      bindPager(() => loadStockTransactions(), StockState.txFilters);
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load stock transactions.');
+    }
+  }
+
+  async function renderStockTransactionDetailPage(id) {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading transaction…</div>',
+        '#/stock/transactions'
+      );
+
+    if (!mounted) return;
+
+    try {
+
+      const data = await API.getStockTransaction(id);
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML = renderStockTransactionDetail(data);
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-invoice-id]')
+        .forEach((link) => {
+          link.onclick =
+            () => {
+              location.hash = `#/invoices/${link.dataset.invoiceId}`;
+            };
+        });
+
+    } catch (error) {
+
+      if (handleApiError(error, 'Unable to load the transaction.')) return;
+
+      location.hash = '#/stock/transactions';
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Adjustments
+  // -------------------------------------------------------------------------
+
+  async function renderStockAdjustmentsPage() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading adjustments…</div>',
+        '#/stock/adjustments'
+      );
+
+    if (!mounted) return;
+
+    try {
+
+      const recent =
+        await API.listStockTransactions({
+          type: 'STOCK_ADJUSTMENT',
+          limit: 20,
+        });
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML =
+        renderStockAdjustments([], recent.transactions || []);
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-transaction-id]')
+        .forEach((row) => {
+          row.onclick =
+            () => {
+              location.hash = `#/stock/transactions/${row.dataset.transactionId}`;
+            };
+        });
+
+      bindAdjustmentForm();
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load stock adjustments.');
+    }
+  }
+
+  function bindAdjustmentForm() {
+    const search = document.getElementById('adj-product-search');
+    const results = document.getElementById('adj-product-results');
+    const hidden = document.getElementById('adj-product-id');
+
+    if (!search || !results || !hidden) return;
+
+    // Arriving from a product page pre-selects that product.
+    if (StockState.adjustProductId) {
+      hidden.value = StockState.adjustProductId;
+      search.value = StockState.adjustProductLabel || '';
+
+      StockState.adjustProductId = null;
+      StockState.adjustProductLabel = null;
+    }
+
+    let timer;
+
+    search.oninput =
+      () => {
+        hidden.value = '';
+
+        clearTimeout(timer);
+
+        timer =
+          setTimeout(
+            async () => {
+              const term = search.value.trim();
+
+              if (term.length < 2) {
+                results.innerHTML = '';
+                return;
+              }
+
+              try {
+
+                const data =
+                  await API.listProducts({ q: term, limit: 6 });
+
+                results.innerHTML =
+                  (data.products || [])
+                    .map((p) => `
+                      <button
+                        class="palette-item"
+                        data-pick="${escapeHtml(p.id)}"
+                        style="width:100%;"
+                      >
+                        <span class="pi-text">
+                          <span class="t">${escapeHtml(p.description)}</span>
+                          <span class="s">
+                            ${escapeHtml(p.sku || 'No SKU')} · ${p.current_quantity} on hand
+                          </span>
+                        </span>
+                      </button>
+                    `)
+                    .join('') ||
+                  '<div class="cell-muted" style="font-size:12.5px;padding:8px 2px;">No products match.</div>';
+
+                results
+                  .querySelectorAll('[data-pick]')
+                  .forEach((button) => {
+                    button.onclick =
+                      () => {
+                        hidden.value = button.dataset.pick;
+                        search.value =
+                          button.querySelector('.t').textContent.trim();
+                        results.innerHTML = '';
+                      };
+                  });
+
+              } catch (error) {
+                console.warn('[Stock] Product lookup failed:', error);
+              }
+            },
+            250
+          );
+      };
+
+    const post = document.getElementById('btn-post-adjustment');
+
+    if (!post) return;
+
+    post.onclick =
+      async () => {
+        const productId = hidden.value;
+        const quantity = Number(document.getElementById('adj-quantity').value);
+        const reason = document.getElementById('adj-reason').value;
+
+        if (!productId) {
+          toast('Choose a product first.', 'error');
+          return;
+        }
+
+        if (!quantity || quantity <= 0) {
+          toast('Enter a quantity greater than zero.', 'error');
+          return;
+        }
+
+        if (!reason) {
+          toast('Choose a reason for the adjustment.', 'error');
+          return;
+        }
+
+        const direction = document.getElementById('adj-direction').value;
+
+        const confirmed =
+          await confirmDialog({
+            title: 'Post this adjustment?',
+            body:
+              `This will ${direction === '-1' ? 'decrease' : 'increase'} stock by ` +
+              `${quantity} and record it permanently in the ledger as "${reason}".`,
+            confirmLabel: 'Post adjustment',
+            danger: direction === '-1',
+          });
+
+        if (!confirmed) return;
+
+        post.disabled = true;
+
+        try {
+
+          await API.createStockAdjustment({
+            product_id: productId,
+            quantity,
+            direction: Number(direction),
+            reason,
+            notes: document.getElementById('adj-notes').value.trim() || null,
+          });
+
+          toast('Adjustment posted', 'success');
+
+          await renderStockAdjustmentsPage();
+
+        } catch (error) {
+          handleApiError(error, 'Unable to post the adjustment.');
+        } finally {
+          post.disabled = false;
+        }
+      };
+  }
+
+  // -------------------------------------------------------------------------
+  // Import
+  // -------------------------------------------------------------------------
+
+  async function renderStockImportPage() {
+    const mounted =
+      await mountShell(
+        renderStockImport(),
+        '#/stock/import'
+      );
+
+    if (!mounted) return;
+
+    const dropzone = document.getElementById('stock-dropzone');
+    const stage = document.getElementById('import-stage');
+
+    const fileInput = document.createElement('input');
+
+    fileInput.type = 'file';
+    fileInput.className = 'file-input-hidden';
+    fileInput.accept = '.xlsx,.xls,.csv,.tsv';
+
+    document.body.appendChild(fileInput);
+
+    async function handleFile(file) {
+      if (!file) return;
+
+      stage.innerHTML =
+        '<div class="loading-inline">Reading the spreadsheet…</div>';
+
+      try {
+
+        const inspection = await API.uploadStockImport(file);
+
+        stage.innerHTML = renderImportMapping(inspection);
+
+        bindShellEvents();
+
+        document.getElementById('btn-cancel-import').onclick =
+          () => {
+            stage.innerHTML = '';
+          };
+
+        document.getElementById('btn-commit-import').onclick =
+          async () => {
+            // The mapping sent is whatever the dropdowns currently say, not
+            // the original guess.
+            const mapping = {};
+
+            document
+              .querySelectorAll('.map-select')
+              .forEach((select) => {
+                mapping[select.dataset.column] = select.value || null;
+              });
+
+            const chosen = Object.values(mapping).filter(Boolean);
+
+            if (!chosen.includes('description') && !chosen.includes('sku')) {
+              toast(
+                'Map at least a description or SKU column before importing.',
+                'error'
+              );
+              return;
+            }
+
+            if (!chosen.includes('quantity')) {
+              const proceed =
+                await confirmDialog({
+                  title: 'No quantity column mapped',
+                  body:
+                    'Products will be created but no opening balances will be ' +
+                    'recorded, so every product will start at zero. Continue?',
+                  confirmLabel: 'Import without quantities',
+                });
+
+              if (!proceed) return;
+            }
+
+            stage.innerHTML =
+              '<div class="loading-inline">Importing stock…</div>';
+
+            try {
+
+              const result =
+                await API.commitStockImport(inspection.import_id, { mapping });
+
+              // Someone who has just imported stock wants to see all of it,
+              // not whatever the products list was last filtered to.
+              StockState.productFilters = {
+                q: '', status: '', category: '', sort: '', order: '', page: 1,
+              };
+
+              stage.innerHTML = renderImportResult(result);
+
+              bindShellEvents();
+
+              toast(
+                `${result.imported} product${result.imported === 1 ? '' : 's'} imported`,
+                'success'
+              );
+
+            } catch (error) {
+              stage.innerHTML = '';
+              handleApiError(error, 'Unable to import the stock sheet.');
+            }
+          };
+
+      } catch (error) {
+        stage.innerHTML = '';
+        handleApiError(error, 'Unable to read that spreadsheet.');
+      }
+    }
+
+    if (dropzone) {
+      ['dragenter', 'dragover'].forEach((type) => {
+        dropzone.addEventListener(type, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dropzone.classList.add('dragover');
+        });
+      });
+
+      ['dragleave', 'drop'].forEach((type) => {
+        dropzone.addEventListener(type, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+
+          if (type === 'drop' || !dropzone.contains(event.relatedTarget)) {
+            dropzone.classList.remove('dragover');
+          }
+        });
+      });
+
+      dropzone.addEventListener('drop', (event) => {
+        handleFile(event.dataTransfer?.files?.[0]);
+      });
+    }
+
+    fileInput.addEventListener('change', (event) => {
+      handleFile(event.target.files?.[0]);
+      fileInput.value = '';
+    });
+
+    const select = document.getElementById('btn-select-sheet');
+
+    if (select) {
+      select.onclick =
+        (event) => {
+          event.preventDefault();
+          fileInput.click();
+        };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Review queue
+  // -------------------------------------------------------------------------
+
+  async function renderStockReviewPage() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading stock review…</div>',
+        '#/stock/review'
+      );
+
+    if (!mounted) return;
+
+    try {
+
+      const data = await API.listStockReview('pending');
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML = renderStockReview(data.items || []);
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-resolve]')
+        .forEach((button) => {
+          button.onclick =
+            async () => {
+              const id = button.dataset.resolve;
+
+              const chosen =
+                content.querySelector(`input[name="review-${id}"]:checked`);
+
+              if (!chosen) {
+                toast('Choose which product this line refers to.', 'error');
+                return;
+              }
+
+              button.disabled = true;
+
+              try {
+
+                await API.resolveStockReview(id, { product_id: chosen.value });
+
+                toast('Matched — stock updated and remembered', 'success');
+
+                await renderStockReviewPage();
+
+              } catch (error) {
+                button.disabled = false;
+                handleApiError(error, 'Unable to resolve that line.');
+              }
+            };
+        });
+
+      content
+        .querySelectorAll('[data-dismiss]')
+        .forEach((button) => {
+          button.onclick =
+            async () => {
+              const confirmed =
+                await confirmDialog({
+                  title: 'Not a stock item?',
+                  body:
+                    'This line will be dismissed and no stock movement will be ' +
+                    'recorded for it.',
+                  confirmLabel: 'Dismiss line',
+                });
+
+              if (!confirmed) return;
+
+              try {
+
+                await API.resolveStockReview(button.dataset.dismiss, { dismiss: true });
+
+                toast('Line dismissed', 'success');
+
+                await renderStockReviewPage();
+
+              } catch (error) {
+                handleApiError(error, 'Unable to dismiss that line.');
+              }
+            };
+        });
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load the stock review queue.');
+    }
   }
 
   // ===========================================================================
