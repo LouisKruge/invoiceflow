@@ -20,12 +20,22 @@ if (!DATABASE_URL) {
   );
 }
 
+// Managed Postgres (Neon, Render, Supabase) requires SSL, so it stays the
+// default. A local server usually has no TLS at all and would refuse the
+// connection outright, so allow it to be turned off explicitly — either with
+// ?sslmode=disable in the URL or PGSSL=disable in the environment.
+const sslDisabled =
+  /[?&]sslmode=disable/i.test(DATABASE_URL) ||
+  String(process.env.PGSSL || '').toLowerCase() === 'disable';
+
 const pool = new Pool({
   connectionString: DATABASE_URL,
 
-  ssl: {
-    rejectUnauthorized: false
-  },
+  ssl: sslDisabled
+    ? false
+    : {
+        rejectUnauthorized: false
+      },
 
   max: 10,
 
@@ -162,6 +172,8 @@ async function initializeDatabase() {
       due_date TEXT,
 
       purchase_order_number TEXT,
+
+      account_code TEXT,
 
       subtotal NUMERIC,
 
@@ -356,6 +368,22 @@ async function initializeDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_validation_invoice
       ON invoice_validation_results(invoice_id);
+  `);
+
+  // -------------------------------------------------------------------------
+  // MIGRATIONS
+  //
+  // CREATE TABLE IF NOT EXISTS never alters an existing table, so columns
+  // added after a database was first created must be applied separately.
+  // Each statement is idempotent and safe to run on every boot.
+  // -------------------------------------------------------------------------
+
+  await pool.query(`
+    ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS account_code TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_invoices_account_code
+      ON invoices(account_code);
   `);
 
   console.log('[db] PostgreSQL schema ready.');

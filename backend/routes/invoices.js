@@ -406,12 +406,175 @@ async function getInvoiceFull(
   }
 
   // --------------------------------------------------------------------------
+  // INTELLIGENCE
+  //
+  // What the system can say about this invoice beyond the fields it read:
+  // whether the supplier is known, whether the PO exists, and how the amount
+  // compares with what this supplier has historically charged.
+  // --------------------------------------------------------------------------
+
+  const intelligence = [];
+
+  // Supplier match
+  intelligence.push(
+    invoice.supplier_id
+      ? {
+          key: 'supplier_match',
+          state: 'ok',
+          title: 'Supplier matched',
+          detail: invoice.supplier_name
+        }
+      : {
+          key: 'supplier_match',
+          state: 'missing',
+          title: 'Supplier not matched',
+          detail:
+            'No supplier record is linked to this invoice.'
+        }
+  );
+
+  // Account code
+  intelligence.push(
+    invoice.account_code
+      ? {
+          key: 'account_code',
+          state: 'ok',
+          title: 'Account code captured',
+          detail: invoice.account_code
+        }
+      : {
+          key: 'account_code',
+          state: 'missing',
+          title: 'No account code found',
+          detail:
+            'No customer account code was printed or read on this invoice.'
+        }
+  );
+
+  // Purchase order match
+  if (invoice.purchase_order_number) {
+
+    const po =
+      await db.get(
+        `
+          SELECT po_number, total_amount, status
+          FROM purchase_orders
+          WHERE po_number = $1
+        `,
+        [invoice.purchase_order_number]
+      );
+
+    intelligence.push(
+      po
+        ? {
+            key: 'po_match',
+            state: 'ok',
+            title: 'Purchase order matched',
+            detail: po.po_number
+          }
+        : {
+            key: 'po_match',
+            state: 'warning',
+            title: 'Purchase order not on file',
+            detail:
+              `${invoice.purchase_order_number} is referenced on the ` +
+              'invoice but does not exist in the purchase order register.'
+          }
+    );
+
+  } else {
+
+    intelligence.push({
+      key: 'po_match',
+      state: 'missing',
+      title: 'No purchase order referenced',
+      detail:
+        'This invoice does not quote a purchase order number.'
+    });
+
+  }
+
+  // Price variance against this supplier's history
+  if (
+    invoice.supplier_id &&
+    invoice.total_amount != null
+  ) {
+
+    const history =
+      await db.get(
+        `
+          SELECT
+            AVG(total_amount) AS avg_total,
+            COUNT(*)::int AS c
+          FROM invoices
+          WHERE supplier_id = $1
+            AND id <> $2
+            AND status != 'rejected'
+            AND total_amount IS NOT NULL
+        `,
+        [invoice.supplier_id, id]
+      );
+
+    const priorAverage =
+      history?.avg_total != null
+        ? Number(history.avg_total)
+        : null;
+
+    // One prior invoice is not an average worth comparing against.
+    if (
+      priorAverage &&
+      priorAverage > 0 &&
+      Number(history.c) >= 2
+    ) {
+
+      const current =
+        Number(invoice.total_amount);
+
+      const difference =
+        current - priorAverage;
+
+      const pct =
+        Math.round(
+          (difference / priorAverage) * 1000
+        ) / 10;
+
+      intelligence.push({
+        key: 'price_variance',
+        state:
+          Math.abs(pct) >= 15
+            ? 'warning'
+            : 'ok',
+        title:
+          Math.abs(pct) >= 15
+            ? 'Price variance detected'
+            : 'In line with supplier history',
+        detail:
+          Math.abs(pct) >= 15
+            ? `This invoice is ${Math.abs(pct).toFixed(1)}% ` +
+              `${difference > 0 ? 'higher' : 'lower'} than this ` +
+              "supplier's previous average."
+            : `Within ${Math.abs(pct).toFixed(1)}% of this ` +
+              "supplier's previous average.",
+        previous_average: priorAverage,
+        current_amount: current,
+        difference,
+        variance_pct: pct,
+        sample_size: Number(history.c)
+      });
+
+    }
+
+  }
+
+  // --------------------------------------------------------------------------
   // RETURN COMPLETE INVOICE
   // --------------------------------------------------------------------------
 
   return {
 
     ...invoice,
+
+    intelligence,
 
     field_confidence:
       fieldConfidence,
@@ -743,22 +906,23 @@ router.post(
             invoice_date = $7,
             due_date = $8,
             purchase_order_number = $9,
+            account_code = $10,
 
-            subtotal = $10,
-            vat_amount = $11,
-            total_amount = $12,
+            subtotal = $11,
+            vat_amount = $12,
+            total_amount = $13,
 
-            currency = $13,
-            payment_terms = $14,
+            currency = $14,
+            payment_terms = $15,
 
-            status = $15,
-            overall_confidence = $16,
-            field_confidence = $17,
-            ai_raw_response = $18,
+            status = $16,
+            overall_confidence = $17,
+            field_confidence = $18,
+            ai_raw_response = $19,
 
             updated_at = NOW()
 
-          WHERE id = $19
+          WHERE id = $20
         `,
         [
 
@@ -779,6 +943,8 @@ router.post(
           f.due_date || null,
 
           f.purchase_order_number || null,
+
+          f.account_code || null,
 
           f.subtotal ?? null,
 
@@ -1088,13 +1254,64 @@ router.get(
         q,
         status,
         dateFrom,
-        dateTo
+        dateTo,
+        withIssues
       } = req.query;
+
+      // The exceptions screen groups invoices by what is actually wrong with
+      // them, so it asks for the top failing validation rule alongside each
+      // row. The ordinary list does not pay for those lookups.
+      const issueColumns =
+        String(withIssues) === '1'
+          ? `,
+            (
+              SELECT v.message
+              FROM invoice_validation_results v
+              WHERE v.invoice_id = i.id
+                AND v.passed = 0
+              ORDER BY
+                CASE v.severity
+                  WHEN 'error' THEN 0
+                  WHEN 'warning' THEN 1
+                  ELSE 2
+                END,
+                v.id
+              LIMIT 1
+            ) AS issue_message,
+            (
+              SELECT v.rule_code
+              FROM invoice_validation_results v
+              WHERE v.invoice_id = i.id
+                AND v.passed = 0
+              ORDER BY
+                CASE v.severity
+                  WHEN 'error' THEN 0
+                  WHEN 'warning' THEN 1
+                  ELSE 2
+                END,
+                v.id
+              LIMIT 1
+            ) AS issue_rule,
+            (
+              SELECT v.severity
+              FROM invoice_validation_results v
+              WHERE v.invoice_id = i.id
+                AND v.passed = 0
+              ORDER BY
+                CASE v.severity
+                  WHEN 'error' THEN 0
+                  WHEN 'warning' THEN 1
+                  ELSE 2
+                END,
+                v.id
+              LIMIT 1
+            ) AS issue_severity`
+          : '';
 
       let sql =
         `
-          SELECT *
-          FROM invoices
+          SELECT i.*${issueColumns}
+          FROM invoices i
           WHERE 1 = 1
         `;
 
@@ -1112,7 +1329,7 @@ router.get(
         params.push(status);
 
         sql +=
-          ` AND status = $${params.length}`;
+          ` AND i.status = $${params.length}`;
 
       }
 
@@ -1125,7 +1342,7 @@ router.get(
         params.push(dateFrom);
 
         sql +=
-          ` AND DATE(invoice_date) >= DATE($${params.length})`;
+          ` AND DATE(i.invoice_date) >= DATE($${params.length})`;
 
       }
 
@@ -1138,7 +1355,7 @@ router.get(
         params.push(dateTo);
 
         sql +=
-          ` AND DATE(invoice_date) <= DATE($${params.length})`;
+          ` AND DATE(i.invoice_date) <= DATE($${params.length})`;
 
       }
 
@@ -1158,11 +1375,12 @@ router.get(
 
         sql += `
           AND (
-            invoice_number ILIKE ${p}
-            OR supplier_name ILIKE ${p}
-            OR supplier_vat_number ILIKE ${p}
-            OR purchase_order_number ILIKE ${p}
-            OR CAST(total_amount AS TEXT) ILIKE ${p}
+            i.invoice_number ILIKE ${p}
+            OR i.supplier_name ILIKE ${p}
+            OR i.supplier_vat_number ILIKE ${p}
+            OR i.purchase_order_number ILIKE ${p}
+            OR i.account_code ILIKE ${p}
+            OR CAST(i.total_amount AS TEXT) ILIKE ${p}
           )
         `;
 
@@ -1177,7 +1395,7 @@ router.get(
 
       sql +=
         `
-          ORDER BY updated_at DESC NULLS LAST
+          ORDER BY i.updated_at DESC NULLS LAST
           LIMIT 500
         `;
 
@@ -1340,6 +1558,8 @@ const EDITABLE_FIELDS = [
   'due_date',
 
   'purchase_order_number',
+
+  'account_code',
 
   'subtotal',
 
@@ -1606,6 +1826,136 @@ router.patch(
 // ADD THIS TO routes/invoices.js
 // ===========================================================================
 
+// ----------------------------------------------------------------------------
+// DELETE HELPER
+//
+// Removes an invoice, everything hanging off it, and the scanned document on
+// disk. Child rows are deleted explicitly rather than relying on the schema's
+// ON DELETE CASCADE so the behaviour is identical on a database created before
+// those constraints existed.
+// ----------------------------------------------------------------------------
+
+async function deleteInvoiceById(invoiceId) {
+
+  const invoice =
+    await db.get(
+      `
+        SELECT id
+        FROM invoices
+        WHERE id = $1
+      `,
+      [invoiceId]
+    );
+
+  if (!invoice) {
+    return false;
+  }
+
+  // Collect the document paths before the rows disappear.
+  const documents =
+    await db.all(
+      `
+        SELECT file_path
+        FROM invoice_documents
+        WHERE invoice_id = $1
+      `,
+      [invoiceId]
+    );
+
+  await db.run(
+    `
+      DELETE FROM invoice_validation_results
+      WHERE invoice_id = $1
+    `,
+    [invoiceId]
+  );
+
+  await db.run(
+    `
+      DELETE FROM invoice_line_items
+      WHERE invoice_id = $1
+    `,
+    [invoiceId]
+  );
+
+  await db.run(
+    `
+      DELETE FROM invoice_processing_logs
+      WHERE invoice_id = $1
+    `,
+    [invoiceId]
+  );
+
+  await db.run(
+    `
+      DELETE FROM invoice_documents
+      WHERE invoice_id = $1
+    `,
+    [invoiceId]
+  );
+
+  await db.run(
+    `
+      DELETE FROM goods_received_notes
+      WHERE invoice_id = $1
+    `,
+    [invoiceId]
+  );
+
+  await db.run(
+    `
+      DELETE FROM invoices
+      WHERE id = $1
+    `,
+    [invoiceId]
+  );
+
+  // The database record is gone either way — a leftover file is not worth
+  // failing the request over, so cleanup errors are logged, not thrown.
+  for (const doc of documents) {
+
+    if (!doc.file_path) {
+      continue;
+    }
+
+    try {
+
+      const absolute =
+        path.isAbsolute(doc.file_path)
+          ? doc.file_path
+          : path.join(
+              __dirname,
+              '..',
+              doc.file_path
+            );
+
+      // Never delete outside the uploads directory.
+      if (
+        absolute.startsWith(UPLOAD_DIR) &&
+        fs.existsSync(absolute)
+      ) {
+        fs.unlinkSync(absolute);
+      }
+
+    } catch (fileError) {
+
+      console.warn(
+        '[invoices/delete] Could not remove document file:',
+        fileError.message
+      );
+
+    }
+
+  }
+
+  return true;
+
+}
+
+// ============================================================================
+// DELETE /api/invoices/:id
+// ============================================================================
+
 router.delete(
   '/:id',
   requireAuth,
@@ -1617,17 +1967,12 @@ router.delete(
 
     try {
 
-      const invoice =
-        await db.get(
-          `
-            SELECT *
-            FROM invoices
-            WHERE id = $1
-          `,
-          [req.params.id]
+      const deleted =
+        await deleteInvoiceById(
+          req.params.id
         );
 
-      if (!invoice) {
+      if (!deleted) {
 
         return res.status(404).json({
           error:
@@ -1636,44 +1981,8 @@ router.delete(
 
       }
 
-      await db.run(
-        `
-          DELETE FROM invoice_validation_results
-          WHERE invoice_id = $1
-        `,
-        [req.params.id]
-      );
-
-      await db.run(
-        `
-          DELETE FROM invoice_line_items
-          WHERE invoice_id = $1
-        `,
-        [req.params.id]
-      );
-
-      await db.run(
-        `
-          DELETE FROM invoice_processing_logs
-          WHERE invoice_id = $1
-        `,
-        [req.params.id]
-      );
-
-      await db.run(
-        `
-          DELETE FROM invoice_documents
-          WHERE invoice_id = $1
-        `,
-        [req.params.id]
-      );
-
-      await db.run(
-        `
-          DELETE FROM invoices
-          WHERE id = $1
-        `,
-        [req.params.id]
+      console.log(
+        `[invoices/delete] Invoice ${req.params.id} deleted by ${req.user.id}`
       );
 
       return res.json({
@@ -1691,6 +2000,111 @@ router.delete(
       return res.status(500).json({
         error:
           `Unable to delete invoice: ${error.message}`
+      });
+
+    }
+
+  }
+);
+
+// ============================================================================
+// POST /api/invoices/bulk-delete
+//
+// Deleting a multi-select from the invoices table in one request instead of
+// one request per row.
+// ============================================================================
+
+router.post(
+  '/bulk-delete',
+  requireAuth,
+  requireRole(
+    'admin',
+    'reviewer'
+  ),
+  async (req, res) => {
+
+    try {
+
+      const ids =
+        Array.isArray(req.body?.ids)
+          ? req.body.ids
+              .filter(
+                (id) =>
+                  typeof id === 'string' &&
+                  id.trim()
+              )
+              .map((id) => id.trim())
+          : [];
+
+      if (!ids.length) {
+
+        return res.status(400).json({
+          error:
+            'No invoices were selected for deletion'
+        });
+
+      }
+
+      if (ids.length > 200) {
+
+        return res.status(400).json({
+          error:
+            'Too many invoices selected — delete at most 200 at a time'
+        });
+
+      }
+
+      const deleted = [];
+      const failed = [];
+
+      for (const id of ids) {
+
+        try {
+
+          const ok =
+            await deleteInvoiceById(id);
+
+          if (ok) {
+            deleted.push(id);
+          } else {
+            failed.push(id);
+          }
+
+        } catch (error) {
+
+          console.error(
+            `[invoices/bulk-delete] ${id}:`,
+            error
+          );
+
+          failed.push(id);
+
+        }
+
+      }
+
+      console.log(
+        `[invoices/bulk-delete] ${deleted.length} deleted, ` +
+        `${failed.length} failed, by ${req.user.id}`
+      );
+
+      return res.json({
+        success: true,
+        deleted,
+        failed,
+        deleted_count: deleted.length
+      });
+
+    } catch (error) {
+
+      console.error(
+        '[invoices/bulk-delete]',
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          `Unable to delete invoices: ${error.message}`
       });
 
     }
@@ -2081,21 +2495,22 @@ router.post(
             invoice_date = $7,
             due_date = $8,
             purchase_order_number = $9,
+            account_code = $10,
 
-            subtotal = $10,
-            vat_amount = $11,
-            total_amount = $12,
+            subtotal = $11,
+            vat_amount = $12,
+            total_amount = $13,
 
-            currency = $13,
-            payment_terms = $14,
+            currency = $14,
+            payment_terms = $15,
 
-            status = $15,
-            overall_confidence = $16,
-            field_confidence = $17,
+            status = $16,
+            overall_confidence = $17,
+            field_confidence = $18,
 
             updated_at = NOW()
 
-          WHERE id = $18
+          WHERE id = $19
         `,
         [
 
@@ -2116,6 +2531,8 @@ router.post(
           f.due_date || null,
 
           f.purchase_order_number || null,
+
+          f.account_code || null,
 
           f.subtotal ?? null,
 

@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 const db = require('../db');
 const {
@@ -189,10 +190,14 @@ router.post(
           `
         );
 
+      // The first account runs the system; everyone after it starts as a
+      // processor, which can capture and correct invoices but not approve or
+      // delete them. 'user' is not one of the roles the schema's CHECK
+      // constraint allows, so it would reject the insert outright.
       const role =
         Number(userCount?.count || 0) === 0
           ? 'admin'
-          : 'user';
+          : 'processor';
 
       // ---------------------------------------------------------------------
       // Hash password
@@ -212,6 +217,7 @@ router.post(
         await db.get(
           `
             INSERT INTO users (
+              id,
               name,
               email,
               password_hash,
@@ -223,7 +229,8 @@ router.post(
               $2,
               $3,
               $4,
-              $5
+              $5,
+              $6
             )
             RETURNING
               id,
@@ -234,6 +241,9 @@ router.post(
               created_at
           `,
           [
+            // users.id is a TEXT primary key with no database default, so the
+            // id has to be supplied here — the same as every other table.
+            crypto.randomUUID(),
             normalizedName,
             normalizedEmail,
             passwordHash,

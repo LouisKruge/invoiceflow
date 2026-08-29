@@ -440,6 +440,53 @@
   }
 
   // ===========================================================================
+  // BULK DELETE
+  // ===========================================================================
+
+  async function deleteInvoices(ids) {
+    const list =
+      Array.isArray(ids)
+        ? ids.filter(Boolean)
+        : [];
+
+    if (!list.length) {
+      throw new Error(
+        'No invoices were selected for deletion.'
+      );
+    }
+
+    console.log(
+      '[InvoiceFlow] Deleting invoices:',
+      list.length
+    );
+
+    const response =
+      await request(
+        '/invoices/bulk-delete',
+        {
+          method: 'POST',
+
+          body:
+            JSON.stringify({
+              ids: list
+            })
+        }
+      );
+
+    if (
+      !response ||
+      response.success === false
+    ) {
+      throw new Error(
+        response?.error ||
+        'The server did not confirm the deletion.'
+      );
+    }
+
+    return response;
+  }
+
+  // ===========================================================================
   // INVOICE DOCUMENT
   // ===========================================================================
 
@@ -531,8 +578,10 @@
     'image/heif'
   ];
 
+  // Must match the multer limit in backend/routes/invoices.js — a larger value
+  // here just moves the rejection to after the upload has been sent.
   const MAX_FILE_SIZE =
-    25 * 1024 * 1024;
+    15 * 1024 * 1024;
 
   function validateInvoiceFile(file) {
     if (!file) {
@@ -561,7 +610,7 @@
       MAX_FILE_SIZE
     ) {
       throw new Error(
-        'Invoice file is too large. Maximum file size is 25 MB.'
+        'Invoice file is too large. Maximum file size is 15 MB.'
       );
     }
 
@@ -1005,6 +1054,18 @@
     return request('/suppliers');
   }
 
+  async function getSupplier(id) {
+    if (!id) {
+      throw new Error(
+        'Supplier ID is required.'
+      );
+    }
+
+    return request(
+      `/suppliers/${encodeURIComponent(id)}`
+    );
+  }
+
   // ===========================================================================
   // EXPORTS
   // ===========================================================================
@@ -1234,6 +1295,7 @@
     listInvoices,
     getInvoice,
     deleteInvoice,
+    deleteInvoices,
 
     // Documents
     documentUrl,
@@ -1256,6 +1318,7 @@
 
     // Suppliers
     listSuppliers,
+    getSupplier,
 
     // Exports
     exportAllUrl,

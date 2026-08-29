@@ -1,0 +1,10 @@
+node_modules/
+
+.env
+.env.local
+
+# SQLite leftovers and uploaded invoice documents
+backend/data/
+
+*.log
+.DS_Store
