@@ -29,6 +29,7 @@ async function fetchInvoiceRowsForExport(
       i.invoice_date,
       i.due_date,
       i.purchase_order_number,
+      i.account_code,
       i.subtotal,
       i.vat_amount,
       i.total_amount,

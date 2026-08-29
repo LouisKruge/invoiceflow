@@ -62,6 +62,7 @@ const REQUIRED_FIELDS = [
   'invoice_date',
   'due_date',
   'purchase_order_number',
+  'account_code',
   'subtotal',
   'vat_amount',
   'total_amount',
@@ -94,6 +95,7 @@ The JSON must have exactly this structure:
   "invoice_date": string|null,
   "due_date": string|null,
   "purchase_order_number": string|null,
+  "account_code": string|null,
   "subtotal": number|null,
   "vat_amount": number|null,
   "total_amount": number|null,
@@ -117,6 +119,7 @@ The JSON must have exactly this structure:
     "invoice_date": number,
     "due_date": number,
     "purchase_order_number": number,
+    "account_code": number,
     "subtotal": number,
     "vat_amount": number,
     "total_amount": number,
@@ -146,6 +149,18 @@ RULES:
 15. Do not create line items that are not visible.
 16. Preserve supplier names and invoice numbers as printed wherever possible.
 17. Extract purchase/order numbers into purchase_order_number.
+17a. Extract the customer/trading ACCOUNT CODE into account_code.
+17b. The account code is the supplier's internal code for the customer being
+     invoiced. It is usually a short alphanumeric code such as EVE001, ABC123,
+     CASH001 or MTN0042, and is normally printed near the top of the invoice
+     beside a label such as "Account", "Account Code", "Account No",
+     "Acc No", "A/C", "Customer Code", "Client Code", "Debtor Code" or
+     "Customer Account".
+17c. Return account_code exactly as printed, uppercase, with no spaces around it.
+17d. account_code is NOT the invoice number, NOT the purchase order number,
+     NOT the VAT number and NOT a bank account number. If the only number you
+     can find is one of those, return null for account_code.
+17e. If no account code is printed on the invoice, return null.
 18. If information is unreadable, return null.
 19. Do not infer information from other invoices.
 20. Do not create fake supplier information.
@@ -1235,6 +1250,27 @@ function normalizeFieldValue(
     )
       .trim()
       .toUpperCase();
+
+  }
+
+  // Account code — codes like "eve 001" or "Acc: EVE001" are printed
+  // inconsistently, so normalize to a bare uppercase token. Returning null
+  // for a label-only match keeps a meaningless value out of the record.
+  if (
+    field === 'account_code'
+  ) {
+
+    const code =
+      String(value)
+        .replace(
+          /^\s*(account(\s+(code|number|no\.?))?|acc(ount)?\s*no\.?|a\/c|customer\s+(code|account)|client\s+code|debtor\s+code)\s*[:#-]?\s*/i,
+          ''
+        )
+        .replace(/\s+/g, '')
+        .toUpperCase()
+        .trim();
+
+    return code || null;
 
   }
 

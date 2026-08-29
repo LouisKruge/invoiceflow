@@ -305,6 +305,9 @@
     '#/suppliers':
       renderSuppliersPage,
 
+    '#/approvals':
+      renderApprovalsPage,
+
     '#/reports':
       renderReportsPage,
 
@@ -464,6 +467,11 @@
     const reviewMatch =
       hash.match(
         /^#\/review\/(.+)$/
+      );
+
+    const supplierMatch =
+      hash.match(
+        /^#\/suppliers\/(.+)$/
       );
 
     // -----------------------------------------------------------------------
@@ -694,6 +702,14 @@
           () =>
             renderInvoiceDetailPage(
               reviewMatch[1]
+            );
+
+      } else if (supplierMatch) {
+
+        routeHandler =
+          () =>
+            renderSupplierDetailPage(
+              supplierMatch[1]
             );
       }
     }
@@ -1315,6 +1331,9 @@ function bindInvoiceListEvents(container) {
     let exceptionsCount =
       0;
 
+    let approvalsCount =
+      0;
+
     try {
       if (
         !hasFunction(
@@ -1327,17 +1346,33 @@ function bindInvoiceListEvents(container) {
         );
       }
 
-      const response =
-        await API.listInvoices({
-          status:
-            'exception',
-        });
+      // Exceptions and duplicates both land in the exceptions queue, and
+      // review_required is what the approvals queue is counting.
+      const [
+        exceptionResponse,
+        duplicateResponse,
+        approvalResponse,
+      ] = await Promise.all([
+        API.listInvoices({ status: 'exception' }),
+        API.listInvoices({ status: 'duplicate' }),
+        API.listInvoices({ status: 'review_required' }),
+      ]);
 
       exceptionsCount =
-        Array.isArray(
-          response?.invoices
-        )
-          ? response.invoices.length
+        (
+          Array.isArray(exceptionResponse?.invoices)
+            ? exceptionResponse.invoices.length
+            : 0
+        ) +
+        (
+          Array.isArray(duplicateResponse?.invoices)
+            ? duplicateResponse.invoices.length
+            : 0
+        );
+
+      approvalsCount =
+        Array.isArray(approvalResponse?.invoices)
+          ? approvalResponse.invoices.length
           : 0;
 
     } catch (error) {
@@ -1383,17 +1418,88 @@ function bindInvoiceListEvents(container) {
       return false;
     }
 
+    // Views decide what to offer (delete, approve) from the signed-in user.
+    if (typeof window.setViewUser === 'function') {
+      setViewUser(AppState.user);
+    }
+
+    AppState.navCounts = {
+      exceptions: exceptionsCount,
+      approvals: approvalsCount,
+    };
+
     root.innerHTML =
       renderShell(
         activeRoute,
         AppState.user,
         exceptionsCount,
-        contentHtml
+        contentHtml,
+        { approvals: approvalsCount }
       );
+
+    applyTheme(currentTheme());
 
     bindShellEvents();
 
     return true;
+  }
+
+  // ===========================================================================
+  // THEME
+  //
+  // Light and dark are both first-class; the choice is remembered per device.
+  // ===========================================================================
+
+  const THEME_KEY = 'invoiceflow.theme';
+
+  function currentTheme() {
+    try {
+      const stored =
+        localStorage.getItem(THEME_KEY);
+
+      if (stored === 'light' || stored === 'dark') {
+        return stored;
+      }
+    } catch (error) {
+      // Storage can be unavailable (private mode); fall through to the default.
+    }
+
+    return window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light';
+  }
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute(
+      'data-theme',
+      theme
+    );
+
+    const toggle =
+      document.getElementById('theme-toggle');
+
+    if (toggle && typeof Icons !== 'undefined') {
+      toggle.innerHTML =
+        theme === 'dark'
+          ? Icons.sun
+          : Icons.moon;
+    }
+  }
+
+  function toggleTheme() {
+    const next =
+      currentTheme() === 'dark'
+        ? 'light'
+        : 'dark';
+
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch (error) {
+      // Not being able to persist the choice should not block applying it.
+    }
+
+    applyTheme(next);
   }
 
   function bindShellEvents() {
@@ -1432,17 +1538,34 @@ function bindInvoiceListEvents(container) {
         };
     }
 
-    const fab =
+    const themeToggle =
       document.getElementById(
-        'fab-capture'
+        'theme-toggle'
       );
 
-    if (fab) {
-      fab.onclick =
-        () => {
-          location.hash =
-            '#/capture';
-        };
+    if (themeToggle) {
+      themeToggle.onclick =
+        () => toggleTheme();
+    }
+
+    const searchTrigger =
+      document.getElementById(
+        'search-trigger'
+      );
+
+    if (searchTrigger) {
+      searchTrigger.onclick =
+        () => openPalette();
+    }
+
+    const settingsThemeToggle =
+      document.getElementById(
+        'settings-theme-toggle'
+      );
+
+    if (settingsThemeToggle) {
+      settingsThemeToggle.onclick =
+        () => toggleTheme();
     }
 
     const mobileNavBtn =
@@ -1454,6 +1577,570 @@ function bindInvoiceListEvents(container) {
       mobileNavBtn.onclick =
         () => openMobileNav();
     }
+  }
+
+  // ===========================================================================
+  // EXPORT
+  // ===========================================================================
+
+  function exportFilename(prefix) {
+    return `invoiceflow-${prefix}-${new Date()
+      .toISOString()
+      .slice(0, 10)}.xlsx`;
+  }
+
+  async function exportAllInvoices(button) {
+    if (button) button.disabled = true;
+
+    try {
+
+      await downloadAuthenticated(
+        API.exportAllUrl(),
+        exportFilename('export')
+      );
+
+      toast('Export downloaded', 'success');
+
+    } catch (error) {
+
+      handleApiError(error, 'Export failed.');
+
+    } finally {
+
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function exportSelectedInvoices(ids, button) {
+    if (!ids.length) {
+      toast('Select at least one invoice first.', 'error');
+      return;
+    }
+
+    if (button) button.disabled = true;
+
+    try {
+
+      const response =
+        await API.exportSelected(ids);
+
+      if (response instanceof Response) {
+
+        if (!response.ok) {
+          throw new Error('Export failed.');
+        }
+
+        triggerDownload(
+          await response.blob(),
+          exportFilename('selected')
+        );
+
+      } else if (response?.url) {
+
+        await downloadAuthenticated(
+          response.url,
+          exportFilename('selected')
+        );
+
+      } else {
+
+        throw new Error('The export response was invalid.');
+      }
+
+      toast('Selected invoices exported', 'success');
+
+    } catch (error) {
+
+      handleApiError(
+        error,
+        'Selected invoice export failed.'
+      );
+
+    } finally {
+
+      if (button) button.disabled = false;
+    }
+  }
+
+  // ===========================================================================
+  // COMMAND PALETTE
+  //
+  // Ctrl/Cmd+K searches invoices and jumps to any screen. Invoice results come
+  // from the same search endpoint the invoices table uses.
+  // ===========================================================================
+
+  const PALETTE_ACTIONS = [
+    { title: 'Go to Overview',    route: '#/dashboard',  icon: 'overview' },
+    { title: 'Go to Invoices',    route: '#/invoices',   icon: 'invoices' },
+    { title: 'Go to Exceptions',  route: '#/exceptions', icon: 'exceptions' },
+    { title: 'Go to Approvals',   route: '#/approvals',  icon: 'approvals' },
+    { title: 'Go to Suppliers',   route: '#/suppliers',  icon: 'suppliers' },
+    { title: 'Go to Reports',     route: '#/reports',    icon: 'reports' },
+    { title: 'Go to Settings',    route: '#/settings',   icon: 'settings' },
+    { title: 'Upload invoice',    route: '#/capture',    icon: 'upload' },
+    { title: 'Export invoices to Excel', action: 'export', icon: 'download' },
+    { title: 'Toggle theme',      action: 'theme',       icon: 'moon' },
+  ];
+
+  const Palette = {
+    open: false,
+    query: '',
+    results: [],
+    activeIndex: 0,
+    searchToken: 0,
+  };
+
+  function paletteActions(query) {
+    const q = query.trim().toLowerCase();
+
+    return PALETTE_ACTIONS
+      .filter(
+        (action) =>
+          !q ||
+          action.title.toLowerCase().includes(q)
+      )
+      .map(
+        (action) => ({
+          ...action,
+          type: 'action',
+        })
+      );
+  }
+
+  function paintPalette() {
+    const existing =
+      document.getElementById('palette-backdrop');
+
+    const html =
+      renderPalette(
+        Palette.query,
+        Palette.results,
+        Palette.activeIndex
+      );
+
+    if (existing) {
+      // Re-render only the results so the input keeps focus and caret.
+      const host =
+        document.createElement('div');
+
+      host.innerHTML = html;
+
+      existing.querySelector('#palette-results').innerHTML =
+        host.querySelector('#palette-results').innerHTML;
+
+      bindPaletteResults();
+
+      return;
+    }
+
+    const host =
+      document.createElement('div');
+
+    host.innerHTML = html;
+
+    document.body.appendChild(host.firstElementChild);
+
+    const input =
+      document.getElementById('palette-input');
+
+    input.focus();
+
+    input.addEventListener('input', () => {
+      Palette.query = input.value;
+      Palette.activeIndex = 0;
+
+      refreshPaletteResults();
+    });
+
+    document
+      .getElementById('palette-backdrop')
+      .addEventListener('click', (event) => {
+        if (event.target.id === 'palette-backdrop') {
+          closePalette();
+        }
+      });
+
+    bindPaletteResults();
+  }
+
+  function bindPaletteResults() {
+    document
+      .querySelectorAll('.palette-item')
+      .forEach((item) => {
+        item.onclick =
+          () =>
+            runPaletteItem(
+              Palette.results[Number(item.dataset.index)]
+            );
+      });
+  }
+
+  async function refreshPaletteResults() {
+    const query = Palette.query;
+
+    // Actions resolve instantly; invoices need a round trip.
+    Palette.results = paletteActions(query);
+
+    paintPalette();
+
+    if (query.trim().length < 2) {
+      return;
+    }
+
+    const token = ++Palette.searchToken;
+
+    try {
+
+      const response =
+        await API.listInvoices({ q: query.trim() });
+
+      // A slower earlier request must not overwrite a newer result set.
+      if (token !== Palette.searchToken || !Palette.open) {
+        return;
+      }
+
+      const invoices =
+        (Array.isArray(response?.invoices) ? response.invoices : [])
+          .slice(0, 6)
+          .map(
+            (invoice) => ({
+              type: 'invoice',
+              icon: 'invoices',
+              id: invoice.id,
+              title:
+                invoice.invoice_number || 'Unnumbered invoice',
+              subtitle:
+                [
+                  invoice.supplier_name,
+                  invoice.account_code
+                ]
+                  .filter(Boolean)
+                  .join(' · '),
+              amount:
+                fmtMoney(
+                  invoice.total_amount,
+                  invoice.currency
+                ),
+            })
+          );
+
+      Palette.results =
+        invoices.concat(paletteActions(query));
+
+      Palette.activeIndex =
+        Math.min(
+          Palette.activeIndex,
+          Math.max(0, Palette.results.length - 1)
+        );
+
+      paintPalette();
+
+    } catch (error) {
+      console.warn(
+        '[Palette] Invoice search failed:',
+        error
+      );
+    }
+  }
+
+  function runPaletteItem(item) {
+    if (!item) return;
+
+    closePalette();
+
+    if (item.type === 'invoice') {
+      location.hash = `#/invoices/${item.id}`;
+      return;
+    }
+
+    if (item.action === 'theme') {
+      toggleTheme();
+      return;
+    }
+
+    if (item.action === 'export') {
+      exportAllInvoices();
+      return;
+    }
+
+    if (item.route) {
+      location.hash = item.route;
+    }
+  }
+
+  function openPalette() {
+    if (Palette.open) return;
+
+    Palette.open = true;
+    Palette.query = '';
+    Palette.activeIndex = 0;
+    Palette.results = paletteActions('');
+
+    paintPalette();
+  }
+
+  function closePalette() {
+    Palette.open = false;
+    Palette.searchToken += 1;
+
+    const backdrop =
+      document.getElementById('palette-backdrop');
+
+    if (backdrop) {
+      backdrop.remove();
+    }
+  }
+
+  document.addEventListener('keydown', (event) => {
+    const key =
+      (event.key || '').toLowerCase();
+
+    if (key === 'k' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+
+      if (!AppState.user) return;
+
+      if (Palette.open) {
+        closePalette();
+      } else {
+        openPalette();
+      }
+
+      return;
+    }
+
+    if (!Palette.open) return;
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closePalette();
+      return;
+    }
+
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+
+      if (!Palette.results.length) return;
+
+      Palette.activeIndex =
+        (
+          Palette.activeIndex +
+          (event.key === 'ArrowDown' ? 1 : -1) +
+          Palette.results.length
+        ) % Palette.results.length;
+
+      paintPalette();
+
+      const active =
+        document.querySelector('.palette-item.active');
+
+      if (active && active.scrollIntoView) {
+        active.scrollIntoView({ block: 'nearest' });
+      }
+
+      return;
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+
+      runPaletteItem(
+        Palette.results[Palette.activeIndex]
+      );
+    }
+  });
+
+  // ===========================================================================
+  // CONFIRM DIALOG
+  //
+  // Resolves true/false rather than taking callbacks, so destructive flows read
+  // top to bottom.
+  // ===========================================================================
+
+  function confirmDialog(options) {
+    return new Promise((resolve) => {
+
+      const host =
+        document.createElement('div');
+
+      host.innerHTML =
+        renderConfirm(options);
+
+      const backdrop =
+        host.firstElementChild;
+
+      document.body.appendChild(backdrop);
+
+      const finish = (result) => {
+        document.removeEventListener('keydown', onKey);
+        backdrop.remove();
+        resolve(result);
+      };
+
+      const onKey = (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(false);
+        }
+      };
+
+      document.addEventListener('keydown', onKey);
+
+      backdrop.addEventListener('click', (event) => {
+        if (event.target === backdrop) {
+          finish(false);
+        }
+      });
+
+      backdrop
+        .querySelector('#confirm-cancel')
+        .addEventListener('click', () => finish(false));
+
+      const okButton =
+        backdrop.querySelector('#confirm-ok');
+
+      okButton.addEventListener('click', () => finish(true));
+
+      okButton.focus();
+
+    });
+  }
+
+  // ===========================================================================
+  // DELETE
+  // ===========================================================================
+
+  /**
+   * Confirms and deletes one invoice.
+   * @returns {Promise<boolean>} whether the invoice was deleted
+   */
+  async function deleteInvoice(id, label) {
+    if (!id) return false;
+
+    const confirmed =
+      await confirmDialog({
+        title: 'Delete invoice',
+        body:
+          `${label || 'This invoice'} and its document, extracted fields ` +
+          'and processing history will be permanently deleted. This cannot ' +
+          'be undone.',
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+
+    if (!confirmed) return false;
+
+    try {
+
+      await API.deleteInvoice(id);
+
+      toast('Invoice deleted', 'success');
+
+      return true;
+
+    } catch (error) {
+
+      handleApiError(
+        error,
+        'Unable to delete invoice.'
+      );
+
+      return false;
+    }
+  }
+
+  /**
+   * Confirms and deletes a multi-select in a single request.
+   * @returns {Promise<boolean>} whether anything was deleted
+   */
+  async function deleteInvoices(ids) {
+    if (!ids || !ids.length) return false;
+
+    const confirmed =
+      await confirmDialog({
+        title:
+          `Delete ${ids.length} invoice${ids.length === 1 ? '' : 's'}`,
+        body:
+          `${ids.length} invoice${ids.length === 1 ? '' : 's'}, along with ` +
+          'their documents, extracted fields and processing history, will be ' +
+          'permanently deleted. This cannot be undone.',
+        confirmLabel: `Delete ${ids.length}`,
+        danger: true,
+      });
+
+    if (!confirmed) return false;
+
+    try {
+
+      const response =
+        await API.deleteInvoices(ids);
+
+      const deleted =
+        Number(response?.deleted_count ?? ids.length);
+
+      const failed =
+        Array.isArray(response?.failed)
+          ? response.failed.length
+          : 0;
+
+      if (failed) {
+        toast(
+          `${deleted} deleted, ${failed} could not be deleted.`,
+          'error'
+        );
+      } else {
+        toast(
+          `${deleted} invoice${deleted === 1 ? '' : 's'} deleted`,
+          'success'
+        );
+      }
+
+      return deleted > 0;
+
+    } catch (error) {
+
+      handleApiError(
+        error,
+        'Unable to delete the selected invoices.'
+      );
+
+      return false;
+    }
+  }
+
+  /**
+   * Wires every [data-delete] button inside a container.
+   * @param {Element} container
+   * @param {Function} onDeleted - called after a successful delete
+   */
+  function bindDeleteButtons(container, onDeleted) {
+    if (!container) return;
+
+    container
+      .querySelectorAll('[data-delete]')
+      .forEach((button) => {
+
+        button.onclick =
+          async (event) => {
+            // These sit inside clickable rows.
+            event.stopPropagation();
+            event.preventDefault();
+
+            button.disabled = true;
+
+            const deleted =
+              await deleteInvoice(
+                button.dataset.delete,
+                button.dataset.label
+              );
+
+            button.disabled = false;
+
+            if (deleted && typeof onDeleted === 'function') {
+              await onDeleted();
+            }
+          };
+      });
   }
 
   // ===========================================================================
@@ -1476,90 +2163,61 @@ function bindInvoiceListEvents(container) {
       );
 
     backdrop.className =
-      'modal-backdrop mobile-nav-backdrop';
+      'mobile-nav-backdrop';
 
-    backdrop.style.justifyContent =
-      'flex-start';
+    const counts =
+      AppState.navCounts ||
+      { exceptions: 0, approvals: 0 };
 
-    backdrop.style.alignItems =
-      'stretch';
-
-    backdrop.style.padding =
-      '0';
-
-    const items = [
-      ['#/dashboard', 'Dashboard'],
-      ['#/invoices', 'Invoices'],
-      ['#/capture', 'Capture Invoice'],
-      ['#/suppliers', 'Suppliers'],
-      ['#/exceptions', 'Exceptions'],
-      ['#/reports', 'Reports'],
-      ['#/settings', 'Settings'],
-    ];
-
-    const xIcon =
-      window.Icons &&
-      window.Icons.x
-        ? window.Icons.x
-        : '×';
-
+    // The mobile drawer mirrors the sidebar rather than keeping its own list,
+    // so the two can never drift apart.
     backdrop.innerHTML = `
-      <div
-        style="
-          background:var(--ink-900);
-          width:78%;
-          max-width:280px;
-          padding:20px 16px;
-          color:#fff;
-          min-height:100vh;
-        "
-      >
+      <div class="mobile-nav-panel">
+
         <div
           style="
             display:flex;
+            align-items:flex-start;
             justify-content:space-between;
-            align-items:center;
-            margin-bottom:20px;
+            padding:20px 20px 16px;
           "
         >
-          <div style="font-weight:800;">
-            InvoiceFlow
+          <div>
+            <div
+              style="
+                font-size:13.5px;
+                font-weight:700;
+                letter-spacing:.14em;
+                text-transform:uppercase;
+              "
+            >InvoiceFlow</div>
+            <div
+              style="font-size:11px;color:var(--ink-faint);margin-top:2px;"
+            >Finance Intelligence</div>
           </div>
 
-          <button
-            class="icon-btn"
-            style="color:#fff"
-            id="close-mobile-nav"
-            type="button"
-          >
-            ${xIcon}
+          <button class="icon-btn" id="close-mobile-nav" type="button">
+            ${Icons.x}
           </button>
         </div>
 
-        ${items
-          .map(
-            ([route, label]) => `
-              <button
-                class="nav-item"
-                data-route="${route}"
-                style="color:#fff"
-                type="button"
-              >
-                ${label}
-              </button>
-            `
-          )
-          .join('')}
+        <div class="sidebar-rule"></div>
 
-        <div class="nav-divider"></div>
+        <nav class="sidebar-nav">
+          ${navMarkup(
+            location.hash || '#/dashboard',
+            counts
+          )}
+        </nav>
 
-        <button
-          class="logout-btn"
-          id="mobile-logout-btn"
-          type="button"
-        >
-          Sign out
-        </button>
+        <div class="sidebar-foot">
+          <button
+            class="btn btn-secondary btn-block"
+            id="mobile-logout-btn"
+            type="button"
+          >Sign out</button>
+        </div>
+
       </div>
     `;
 
@@ -2327,24 +2985,32 @@ function bindInvoiceListEvents(container) {
 
       content.innerHTML =
         renderDashboard(
-          data
+          data,
+          AppState.user
         );
 
       bindShellEvents();
 
-      document
+      // Recent activity rows and the needs-attention list both open the
+      // invoice they name.
+      content
         .querySelectorAll(
-          '#recent-table tbody tr[data-id]'
+          '#recent-table tbody tr[data-id], .attention-row[data-id]'
         )
         .forEach(
-          (tr) => {
-            tr.onclick =
+          (row) => {
+            row.onclick =
               () => {
                 location.hash =
-                  `#/invoices/${tr.dataset.id}`;
+                  `#/invoices/${row.dataset.id}`;
               };
           }
         );
+
+      bindDeleteButtons(
+        content,
+        () => renderDashboardPage()
+      );
 
     } catch (error) {
       handleApiError(
@@ -2358,6 +3024,9 @@ function bindInvoiceListEvents(container) {
   // CAPTURE
   // ===========================================================================
 
+  // Files staged on the upload screen, before processing starts.
+  let stagedFiles = [];
+
   async function renderCapturePage() {
     const mounted =
       await mountShell(
@@ -2369,437 +3038,192 @@ function bindInvoiceListEvents(container) {
       return;
     }
 
-    // =========================================================================
-    // TAKE PHOTO
-    // =========================================================================
+    stagedFiles = [];
 
-    const takePhotoBtn =
-      document.getElementById(
-        'btn-take-photo'
-      );
+    const dropzone =
+      document.getElementById('dropzone');
 
-    if (takePhotoBtn) {
-      takePhotoBtn.onclick =
-        () => {
-          if (
-            typeof window.Camera ===
-              'undefined' ||
-            typeof window.Camera.open !==
-              'function'
-          ) {
-            toast(
-              'Camera is not available on this device.',
-              'error'
+    // -------------------------------------------------------------------------
+    // Hidden file input
+    // -------------------------------------------------------------------------
+
+    const fileInput =
+      document.createElement('input');
+
+    fileInput.type = 'file';
+    fileInput.multiple = true;
+    fileInput.className = 'file-input-hidden';
+
+    fileInput.accept =
+      'application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif';
+
+    document.body.appendChild(fileInput);
+
+    // -------------------------------------------------------------------------
+    // Staging
+    //
+    // Files are validated as they arrive so an unsupported file is reported
+    // immediately rather than after a failed upload.
+    // -------------------------------------------------------------------------
+
+    function addFiles(list) {
+      const incoming =
+        Array.from(list || []);
+
+      if (!incoming.length) return;
+
+      const accepted = [];
+      const rejected = [];
+
+      incoming.forEach((file) => {
+        try {
+          API.validateInvoiceFile(file);
+
+          const duplicate =
+            stagedFiles.some(
+              (staged) =>
+                staged.name === file.name &&
+                staged.size === file.size
             );
 
-            return;
+          if (!duplicate) {
+            accepted.push(file);
           }
 
-          Camera.open({
-            onCapture: (
-              file
-            ) => {
-              if (file) {
-                runCapture(
-                  file
-                );
-              }
-            },
+        } catch (error) {
+          rejected.push(`${file.name} — ${error.message}`);
+        }
+      });
 
-            onCancel: () => {},
-          });
-        };
+      if (rejected.length) {
+        toast(
+          rejected.length === 1
+            ? rejected[0]
+            : `${rejected.length} files skipped.`,
+          'error'
+        );
+      }
+
+      if (!accepted.length) return;
+
+      stagedFiles = stagedFiles.concat(accepted);
+
+      paintStagedFiles();
     }
 
-    // =========================================================================
-    // BULK UPLOAD
-    // =========================================================================
-    //
-    // This uses the standard browser file input.
-    //
-    // IMPORTANT:
-    //
-    // The previous implementation had:
-    //
-    //     fileInput.multiple = false;
-    //
-    // and then processed only:
-    //
-    //     files[0]
-    //
-    // This version supports multiple invoices.
-    //
-    // The selected files are processed one at a time through the existing:
-    //
-    //     API.captureInvoice(file)
-    //
-    // endpoint.
-    //
-    // Supported:
-    //
-    // - PDF
-    // - JPG
-    // - JPEG
-    // - PNG
-    // - WEBP
-    // - GIF
-    // - BMP
-    // - HEIC
-    // - HEIF
-    //
-    // =========================================================================
+    function paintStagedFiles() {
+      const slot =
+        document.getElementById('selected-files');
+
+      if (!slot) return;
+
+      slot.innerHTML =
+        renderSelectedFiles(stagedFiles);
+
+      slot
+        .querySelectorAll('[data-remove-index]')
+        .forEach((button) => {
+          button.onclick =
+            () => {
+              stagedFiles.splice(
+                Number(button.dataset.removeIndex),
+                1
+              );
+
+              paintStagedFiles();
+            };
+        });
+
+      const clearBtn =
+        document.getElementById('btn-clear-files');
+
+      if (clearBtn) {
+        clearBtn.onclick =
+          () => {
+            stagedFiles = [];
+            paintStagedFiles();
+          };
+      }
+
+      const processBtn =
+        document.getElementById('btn-process-files');
+
+      if (processBtn) {
+        processBtn.onclick =
+          async () => {
+            const files = stagedFiles.slice();
+
+            stagedFiles = [];
+
+            if (files.length === 1) {
+              await runCapture(files[0]);
+            } else {
+              await runBulkCapture(files);
+            }
+          };
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Drag and drop
+    // -------------------------------------------------------------------------
+
+    if (dropzone) {
+
+      ['dragenter', 'dragover'].forEach((type) => {
+        dropzone.addEventListener(type, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+
+          dropzone.classList.add('dragover');
+        });
+      });
+
+      ['dragleave', 'drop'].forEach((type) => {
+        dropzone.addEventListener(type, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+
+          // dragleave fires when moving between child elements too, so only
+          // clear the state when the cursor has actually left the zone.
+          if (
+            type === 'drop' ||
+            !dropzone.contains(event.relatedTarget)
+          ) {
+            dropzone.classList.remove('dragover');
+          }
+        });
+      });
+
+      dropzone.addEventListener('drop', (event) => {
+        addFiles(event.dataTransfer?.files);
+      });
+    }
+
+    // Dropping anywhere else on the page should not navigate away from the app.
+    const blockDrop = (event) => event.preventDefault();
+
+    window.addEventListener('dragover', blockDrop);
+    window.addEventListener('drop', blockDrop);
+
+    fileInput.addEventListener('change', (event) => {
+      addFiles(event.target.files);
+
+      // Allows the same file to be picked again after being removed.
+      fileInput.value = '';
+    });
+
+    // -------------------------------------------------------------------------
+    // Buttons
+    // -------------------------------------------------------------------------
 
     const uploadBtn =
-      document.getElementById(
-        'btn-upload-invoice'
-      );
+      document.getElementById('btn-upload-invoice');
 
     if (uploadBtn) {
-
-      // -----------------------------------------------------------------------
-      // Prevent duplicate hidden inputs if this route gets rendered repeatedly.
-      // -----------------------------------------------------------------------
-
-      const existingInput =
-        document.getElementById(
-          'invoice-file-input'
-        );
-
-      if (existingInput) {
-        existingInput.remove();
-      }
-
-      // -----------------------------------------------------------------------
-      // Create native browser file input.
-      // -----------------------------------------------------------------------
-
-      const fileInput =
-        document.createElement(
-          'input'
-        );
-
-      fileInput.type =
-        'file';
-
-      fileInput.id =
-        'invoice-file-input';
-
-      fileInput.name =
-        'invoice';
-
-      fileInput.accept =
-        'image/*,.pdf,application/pdf';
-
-      // -----------------------------------------------------------------------
-      // IMPORTANT:
-      // Allow multiple files to be selected.
-      // -----------------------------------------------------------------------
-
-      fileInput.multiple =
-        true;
-
-      fileInput.style.position =
-        'fixed';
-
-      fileInput.style.left =
-        '-9999px';
-
-      fileInput.style.top =
-        '-9999px';
-
-      fileInput.style.width =
-        '1px';
-
-      fileInput.style.height =
-        '1px';
-
-      fileInput.style.opacity =
-        '0';
-
-      fileInput.setAttribute(
-        'aria-hidden',
-        'true'
-      );
-
-      document.body.appendChild(
-        fileInput
-      );
-
-      // -----------------------------------------------------------------------
-      // File validation helper.
-      // -----------------------------------------------------------------------
-
-      function validateInvoiceFile(
-        file
-      ) {
-        if (!file) {
-          return {
-            valid: false,
-            message:
-              'No file was selected.',
-          };
-        }
-
-        const fileName =
-          String(
-            file.name ||
-            ''
-          ).toLowerCase();
-
-        const isPdf =
-          file.type ===
-            'application/pdf' ||
-          fileName.endsWith(
-            '.pdf'
-          );
-
-        const isImage =
-          file.type.startsWith(
-            'image/'
-          ) ||
-          /\.(jpg|jpeg|png|webp|gif|bmp|heic|heif)$/i.test(
-            fileName
-          );
-
-        if (
-          !isPdf &&
-          !isImage
-        ) {
-          return {
-            valid: false,
-            message:
-              'Please select a PDF or image invoice.',
-          };
-        }
-
-        // ---------------------------------------------------------------------
-        // 25 MB per-file frontend limit.
-        // ---------------------------------------------------------------------
-
-        const maxFileSize =
-          25 *
-          1024 *
-          1024;
-
-        if (
-          file.size >
-          maxFileSize
-        ) {
-          return {
-            valid: false,
-            message:
-              'The invoice file is too large. Maximum size is 25 MB.',
-          };
-        }
-
-        if (
-          file.size <= 0
-        ) {
-          return {
-            valid: false,
-            message:
-              'The selected file is empty.',
-          };
-        }
-
-        return {
-          valid: true,
-        };
-      }
-
-      // -----------------------------------------------------------------------
-      // When the user selects one or more files.
-      // -----------------------------------------------------------------------
-
-      fileInput.addEventListener(
-        'change',
-        async (event) => {
-          try {
-            const fileList =
-              event.target.files;
-
-            if (
-              !fileList ||
-              !fileList.length
-            ) {
-              console.log(
-                '[Capture] File picker closed without selecting files.'
-              );
-
-              return;
-            }
-
-            const files =
-              Array.from(
-                fileList
-              );
-
-            console.log(
-              '[Capture] Invoice files selected:',
-              files.map(
-                (file) => ({
-                  name:
-                    file.name,
-
-                  type:
-                    file.type,
-
-                  size:
-                    file.size,
-
-                  lastModified:
-                    file.lastModified,
-                })
-              )
-            );      
-
-            // -----------------------------------------------------------------
-            // Validate every selected file before processing anything.
-            // -----------------------------------------------------------------
-
-            const validFiles = [];
-
-            const invalidFiles = [];
-
-            files.forEach(
-              (file) => {
-                const validation =
-                  validateInvoiceFile(
-                    file
-                  );
-
-                if (
-                  validation.valid
-                ) {
-                  validFiles.push(
-                    file
-                  );
-                } else {
-                  invalidFiles.push({
-                    file,
-                    message:
-                      validation.message,
-                  });
-                }
-              }
-            );
-
-            // -----------------------------------------------------------------
-            // Tell the user about invalid files.
-            // -----------------------------------------------------------------
-
-            if (
-              invalidFiles.length
-            ) {
-              console.warn(
-                '[Capture] Invalid invoice files:',
-                invalidFiles
-              );
-
-              const invalidNames =
-                invalidFiles
-                  .map(
-                    (item) =>
-                      item.file.name
-                  )
-                  .slice(
-                    0,
-                    3
-                  );
-
-              const suffix =
-                invalidFiles.length > 3
-                  ? ` and ${invalidFiles.length - 3} more`
-                  : '';
-
-              toast(
-                `${invalidFiles.length} file${
-                  invalidFiles.length === 1
-                    ? ''
-                    : 's'
-                } skipped: ${
-                  invalidNames.join(
-                    ', '
-                  )
-                }${suffix}`,
-                'error'
-              );
-            }
-
-            if (
-              !validFiles.length
-            ) {
-              toast(
-                'No valid invoice files were selected.',
-                'error'
-              );
-
-              return;
-            }
-
-            // -----------------------------------------------------------------
-            // Single file:
-            //
-            // Keep the original behaviour and send directly into the
-            // single-invoice processing flow.
-            // -----------------------------------------------------------------
-
-            if (
-              validFiles.length === 1
-            ) {
-              await runCapture(
-                validFiles[0]
-              );
-
-              return;
-            }
-
-            // -----------------------------------------------------------------
-            // Multiple files:
-            //
-            // Process them sequentially.
-            // -----------------------------------------------------------------
-
-            await runBulkCapture(
-              validFiles
-            );
-
-          } catch (error) {
-            console.error(
-              '[Capture] Error handling selected invoice files:',
-              error
-            );
-
-            toast(
-              error?.message ||
-              'Unable to read the selected invoice files.',
-              'error'
-            );
-
-          } finally {
-            // -----------------------------------------------------------------
-            // Clear the input.
-            //
-            // This allows the user to select the exact same files again.
-            // -----------------------------------------------------------------
-
-            fileInput.value =
-              '';
-          }
-        }
-      );
-
-      // -----------------------------------------------------------------------
-      // Open the browser's native file picker.
-      // -----------------------------------------------------------------------
-
       uploadBtn.onclick =
         (event) => {
           event.preventDefault();
-
-          console.log(
-            '[Capture] Opening browser file picker for bulk invoice upload...'
-          );
 
           try {
             fileInput.click();
@@ -2815,6 +3239,36 @@ function bindInvoiceListEvents(container) {
               'error'
             );
           }
+        };
+    }
+
+    const takePhotoBtn =
+      document.getElementById('btn-take-photo');
+
+    if (takePhotoBtn) {
+      takePhotoBtn.onclick =
+        () => {
+          if (
+            typeof window.Camera === 'undefined' ||
+            typeof window.Camera.open !== 'function'
+          ) {
+            toast(
+              'Camera is not available on this device.',
+              'error'
+            );
+
+            return;
+          }
+
+          Camera.open({
+            onCapture: (file) => {
+              if (file) {
+                runCapture(file);
+              }
+            },
+
+            onCancel: () => {},
+          });
         };
     }
   }
@@ -2834,6 +3288,9 @@ function bindInvoiceListEvents(container) {
  //  * That means the backend does not have to understand a multipart array.
   // * The frontend simply sends each invoice through the same proven pipeline.
  //  */
+  // File list for the batch currently being processed.
+  let bulkFiles = [];
+
   async function runBulkCapture(
     files
   ) {
@@ -2857,6 +3314,9 @@ function bindInvoiceListEvents(container) {
       Array.from(
         files
       );
+
+    // The progress screen needs the names of files it has not reached yet.
+    bulkFiles = invoiceFiles;
 
     const total =
       invoiceFiles.length;
@@ -3112,6 +3572,12 @@ function bindInvoiceListEvents(container) {
   // BULK PROCESSING UI
   // ===========================================================================
 
+  /**
+   * Paints the batch progress screen.
+   *
+   * Signature is kept as-is for runBulkCapture; the file names for the
+   * not-yet-started rows come from bulkFiles, which runBulkCapture sets.
+   */
   function renderBulkProcessing(
     completed,
     total,
@@ -3122,425 +3588,84 @@ function bindInvoiceListEvents(container) {
     statusMessage
   ) {
     const safeTotal =
-      Math.max(
-        Number(total) || 0,
-        1
-      );
+      Math.max(Number(total) || 0, 1);
 
-    const safeCompleted =
-      Math.min(
-        Math.max(
-          Number(completed) || 0,
-          0
-        ),
-        safeTotal
-      );
-
-    const percentage =
-      Math.round(
-        (
-          safeCompleted /
-          safeTotal
-        ) *
-        100
-      );
-
-    const currentFileName =
-      currentFile?.name ||
-      '';
-
-    const failedResults =
+    const finished =
       Array.isArray(results)
-        ? results.filter(
-            (result) =>
-              !result.success
-          )
+        ? results
         : [];
 
-    const successResults =
-      Array.isArray(results)
-        ? results.filter(
-            (result) =>
-              result.success
-          )
-        : [];
+    const items = [];
 
-    root.innerHTML = `
-      <div
-        style="
-          min-height:100vh;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          padding:32px 20px;
-          background:#f6f8fb;
-          box-sizing:border-box;
-          font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-        "
-      >
+    // Everything already attempted, in the order it was processed.
+    finished.forEach((result) => {
+      items.push({
+        name: result.fileName,
 
-        <div
-          style="
-            width:100%;
-            max-width:680px;
-            background:#fff;
-            border:1px solid #e4e7ec;
-            border-radius:20px;
-            padding:32px;
-            box-sizing:border-box;
-            box-shadow:0 20px 60px rgba(16,24,40,.08);
-          "
-        >
+        invoice_number:
+          result.invoice?.invoice_number ||
+          result.fileName,
 
-          <div
-            style="
-              display:flex;
-              align-items:flex-start;
-              justify-content:space-between;
-              gap:20px;
-              margin-bottom:28px;
-            "
-          >
+        state:
+          result.success
+            ? 'done'
+            : 'failed',
 
-            <div>
+        message:
+          result.success
+            ? 'Extracted · Validated'
+            : result.error,
+      });
+    });
 
-              <div
-                style="
-                  font-size:12px;
-                  font-weight:800;
-                  letter-spacing:.12em;
-                  text-transform:uppercase;
-                  color:#667085;
-                  margin-bottom:8px;
-                "
-              >
-                InvoiceFlow
-              </div>
+    // The one in flight.
+    if (finished.length < safeTotal) {
+      items.push({
+        name:
+          currentFile?.name ||
+          bulkFiles[finished.length]?.name ||
+          `Invoice ${finished.length + 1}`,
 
-              <h1
-                style="
-                  margin:0;
-                  font-size:28px;
-                  line-height:1.15;
-                  color:#101828;
-                "
-              >
-                Processing invoices
-              </h1>
+        state: 'active',
 
-              <p
-                style="
-                  margin:8px 0 0;
-                  color:#667085;
-                  font-size:15px;
-                "
-              >
-                ${escapeHtml(statusMessage || 'Processing...')}
-              </p>
+        message:
+          statusMessage ||
+          'Extracting invoice data…',
+      });
+    }
 
-            </div>
+    // Everything still queued.
+    for (
+      let index = items.length;
+      index < safeTotal;
+      index++
+    ) {
+      items.push({
+        name:
+          bulkFiles[index]?.name ||
+          `Invoice ${index + 1}`,
 
-            <div
-              style="
-                min-width:76px;
-                text-align:right;
-              "
-            >
-              <div
-                style="
-                  font-size:26px;
-                  font-weight:800;
-                  color:#101828;
-                "
-              >
-                ${percentage}%
-              </div>
+        state: 'pending',
+      });
+    }
 
-              <div
-                style="
-                  font-size:12px;
-                  color:#667085;
-                "
-              >
-                ${safeCompleted} / ${safeTotal}
-              </div>
-            </div>
-
-          </div>
-
-          <div
-            style="
-              width:100%;
-              height:10px;
-              background:#eaecf0;
-              border-radius:999px;
-              overflow:hidden;
-              margin-bottom:24px;
-            "
-          >
-            <div
-              style="
-                width:${percentage}%;
-                height:100%;
-                background:#111827;
-                border-radius:999px;
-                transition:width .3s ease;
-              "
-            ></div>
-          </div>
-
-          ${
-            currentFileName
-              ? `
-                <div
-                  style="
-                    padding:16px;
-                    border:1px solid #eaecf0;
-                    border-radius:14px;
-                    background:#f9fafb;
-                    margin-bottom:20px;
-                  "
-                >
-                  <div
-                    style="
-                      font-size:12px;
-                      font-weight:700;
-                      color:#667085;
-                      margin-bottom:5px;
-                    "
-                  >
-                    CURRENT INVOICE
-                  </div>
-
-                  <div
-                    style="
-                      font-size:15px;
-                      font-weight:700;
-                      color:#101828;
-                      word-break:break-word;
-                    "
-                  >
-                    ${escapeHtml(currentFileName)}
-                  </div>
-                </div>
-              `
-              : ''
-          }
-
-          <div
-            style="
-              display:grid;
-              grid-template-columns:repeat(3,minmax(0,1fr));
-              gap:12px;
-              margin-bottom:24px;
-            "
-          >
-
-            <div
-              style="
-                padding:16px;
-                border:1px solid #eaecf0;
-                border-radius:14px;
-              "
-            >
-              <div
-                style="
-                  font-size:12px;
-                  color:#667085;
-                  margin-bottom:4px;
-                "
-              >
-                Total
-              </div>
-
-              <div
-                style="
-                  font-size:22px;
-                  font-weight:800;
-                  color:#101828;
-                "
-              >
-                ${safeTotal}
-              </div>
-            </div>
-
-            <div
-              style="
-                padding:16px;
-                border:1px solid #eaecf0;
-                border-radius:14px;
-              "
-            >
-              <div
-                style="
-                  font-size:12px;
-                  color:#667085;
-                  margin-bottom:4px;
-                "
-              >
-                Successful
-              </div>
-
-              <div
-                style="
-                  font-size:22px;
-                  font-weight:800;
-                  color:#101828;
-                "
-              >
-                ${Number(successful) || 0}
-              </div>
-            </div>
-
-            <div
-              style="
-                padding:16px;
-                border:1px solid #eaecf0;
-                border-radius:14px;
-              "
-            >
-              <div
-                style="
-                  font-size:12px;
-                  color:#667085;
-                  margin-bottom:4px;
-                "
-              >
-                Failed
-              </div>
-
-              <div
-                style="
-                  font-size:22px;
-                  font-weight:800;
-                  color:#101828;
-                "
-              >
-                ${Number(failed) || 0}
-              </div>
-            </div>
-
-          </div>
-
-          ${
-            failedResults.length
-              ? `
-                <div
-                  style="
-                    margin-top:8px;
-                    padding:16px;
-                    border-radius:14px;
-                    background:#fff7f7;
-                    border:1px solid #fecdca;
-                  "
-                >
-
-                  <div
-                    style="
-                      font-size:13px;
-                      font-weight:800;
-                      color:#b42318;
-                      margin-bottom:10px;
-                    "
-                  >
-                    Failed invoices
-                  </div>
-
-                  <div
-                    style="
-                      display:flex;
-                      flex-direction:column;
-                      gap:8px;
-                    "
-                  >
-                    ${failedResults
-                      .slice(
-                        0,
-                        8
-                      )
-                      .map(
-                        (result) => `
-                          <div
-                            style="
-                              font-size:13px;
-                              color:#7a271a;
-                              word-break:break-word;
-                            "
-                          >
-                            <strong>
-                              ${escapeHtml(
-                                result.fileName
-                              )}
-                            </strong>
-                            — 
-                            ${escapeHtml(
-                              result.error
-                            )}
-                          </div>
-                        `
-                      )
-                      .join('')}
-                  </div>
-
-                  ${
-                    failedResults.length > 8
-                      ? `
-                        <div
-                          style="
-                            margin-top:8px;
-                            font-size:12px;
-                            color:#b42318;
-                          "
-                        >
-                          ${
-                            failedResults.length - 8
-                          } more failed invoice${
-                            failedResults.length - 8 === 1
-                              ? ''
-                              : 's'
-                          }.
-                        </div>
-                      `
-                      : ''
-                  }
-
-                </div>
-              `
-              : ''
-          }
-
-          ${
-            successResults.length &&
-            safeCompleted === safeTotal
-              ? `
-                <div
-                  style="
-                    margin-top:16px;
-                    padding:14px 16px;
-                    border-radius:12px;
-                    background:#f6fef9;
-                    border:1px solid #abefc6;
-                    color:#067647;
-                    font-size:14px;
-                    font-weight:700;
-                  "
-                >
-                  Batch complete. Returning to invoices...
-                </div>
-              `
-              : ''
-          }
-
-        </div>
-
-      </div>
-    `;
+    root.innerHTML =
+      renderBatchProgress(items);
   }
 
- 
   // ===========================================================================
   // SINGLE INVOICE PROCESSING
   // ===========================================================================
+
+  // The stages the capture screen walks through. These mirror what the backend
+  // actually does with the upload: store it, read it, check it, save it.
+  const PROCESSING_STAGES = [
+    'Uploading invoice',
+    'Reading the document',
+    'Extracting invoice data',
+    'Validating totals and duplicates',
+    'Saving invoice',
+  ];
 
   async function runCapture(
     file
@@ -3754,6 +3879,157 @@ function bindInvoiceListEvents(container) {
   // REVIEW PAINT
   // ===========================================================================
 
+  // ===========================================================================
+  // DOCUMENT VIEWER
+  //
+  // The scanned invoice sits beside the extracted fields, with zoom and rotate
+  // so a faint line on a photographed page can actually be checked.
+  // ===========================================================================
+
+  async function mountDocumentViewer(invoice) {
+    const stage =
+      document.getElementById('doc-stage');
+
+    if (!stage) return;
+
+    let url;
+
+    try {
+
+      url =
+        await API.fetchDocumentBlob(invoice.id);
+
+    } catch (error) {
+
+      if (isAuthError(error)) {
+        handleSessionExpired(
+          'Your session expired while loading the invoice document.'
+        );
+
+        return;
+      }
+
+      console.warn(
+        '[Detail] Could not load invoice document:',
+        error
+      );
+
+      stage.innerHTML =
+        '<div class="doc-empty">Could not load document</div>';
+
+      return;
+    }
+
+    if (!url) {
+      stage.innerHTML =
+        '<div class="doc-empty">No document on file</div>';
+
+      return;
+    }
+
+    const isPdf =
+      stage.dataset.pdf === '1';
+
+    if (isPdf) {
+      // PDFs render in the browser's own viewer, which brings its own controls.
+      stage.style.padding = '0';
+
+      stage.innerHTML =
+        `<iframe src="${url}" title="Invoice document"></iframe>`;
+
+    } else {
+
+      stage.innerHTML =
+        `<img id="doc-image" src="${url}" alt="Invoice document" />`;
+    }
+
+    const image =
+      document.getElementById('doc-image');
+
+    const zoomLabel =
+      document.getElementById('doc-zoom-label');
+
+    let zoom = 1;
+    let rotation = 0;
+
+    function applyTransform() {
+      if (!image) return;
+
+      image.style.width = `${zoom * 100}%`;
+
+      image.style.transform =
+        `rotate(${rotation}deg)`;
+
+      if (zoomLabel) {
+        zoomLabel.textContent =
+          `${Math.round(zoom * 100)}%`;
+      }
+    }
+
+    if (image) {
+      image.style.width = '100%';
+      applyTransform();
+    }
+
+    const zoomIn =
+      document.getElementById('doc-zoom-in');
+
+    const zoomOut =
+      document.getElementById('doc-zoom-out');
+
+    const rotate =
+      document.getElementById('doc-rotate');
+
+    const download =
+      document.getElementById('doc-download');
+
+    // Zoom and rotate act on the image; with a PDF the embedded viewer owns them.
+    [zoomIn, zoomOut, rotate].forEach((button) => {
+      if (button) button.disabled = !image;
+    });
+
+    if (zoomIn) {
+      zoomIn.onclick =
+        () => {
+          zoom = Math.min(4, zoom + 0.25);
+          applyTransform();
+        };
+    }
+
+    if (zoomOut) {
+      zoomOut.onclick =
+        () => {
+          zoom = Math.max(0.5, zoom - 0.25);
+          applyTransform();
+        };
+    }
+
+    if (rotate) {
+      rotate.onclick =
+        () => {
+          rotation = (rotation + 90) % 360;
+          applyTransform();
+        };
+    }
+
+    if (download) {
+      download.onclick =
+        () => {
+          const link =
+            document.createElement('a');
+
+          link.href = url;
+
+          link.download =
+            `${invoice.invoice_number || 'invoice'}-document`;
+
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+        };
+    }
+  }
+
   async function paintReview(
     invoice,
     warning
@@ -3768,7 +4044,7 @@ function bindInvoiceListEvents(container) {
     }
 
     content.innerHTML =
-      renderReview(
+      renderInvoiceDetail(
         invoice,
         {
           warning,
@@ -3777,72 +4053,34 @@ function bindInvoiceListEvents(container) {
 
     bindShellEvents();
 
-    const docImgWrap =
+    await mountDocumentViewer(invoice);
+
+    // -------------------------------------------------------------------------
+    // Delete
+    // -------------------------------------------------------------------------
+
+    const deleteBtn =
       document.getElementById(
-        'review-doc-image'
+        'btn-delete-invoice'
       );
 
-    if (docImgWrap) {
-      try {
-        const url =
-          await API.fetchDocumentBlob(
-            invoice.id
-          );
+    if (deleteBtn) {
+      deleteBtn.onclick =
+        async () => {
+          deleteBtn.disabled = true;
 
-        if (url) {
-          const current =
-            document.getElementById(
-              'review-doc-image'
+          const deleted =
+            await deleteInvoice(
+              deleteBtn.dataset.id,
+              deleteBtn.dataset.label
             );
 
-          if (current) {
-            current.outerHTML = `
-              <img
-                id="review-doc-image"
-                src="${url}"
-                alt="Original invoice document"
-                style="max-width:100%;height:auto;"
-              />
-            `;
+          deleteBtn.disabled = false;
+
+          if (deleted) {
+            location.hash = '#/invoices';
           }
-        } else {
-          const current =
-            document.getElementById(
-              'review-doc-image'
-            );
-
-          if (current) {
-            current.textContent =
-              'No document on file';
-          }
-        }
-
-      } catch (error) {
-        if (
-          isAuthError(error)
-        ) {
-          handleSessionExpired(
-            'Your session expired while loading the invoice document.'
-          );
-
-          return;
-        }
-
-        console.warn(
-          '[Review] Could not load invoice document:',
-          error
-        );
-
-        const current =
-          document.getElementById(
-            'review-doc-image'
-          );
-
-        if (current) {
-          current.textContent =
-            'Could not load document';
-        }
-      }
+        };
     }
 
     // -------------------------------------------------------------------------
@@ -4100,129 +4338,40 @@ function bindInvoiceListEvents(container) {
   // REJECT MODAL
   // ===========================================================================
 
-  function confirmReject(
-    id
-  ) {
-    const backdrop =
-      document.createElement(
-        'div'
+  async function confirmReject(id) {
+    const confirmed =
+      await confirmDialog({
+        title: 'Reject this invoice?',
+        body:
+          'This marks the invoice as rejected and removes it from the ' +
+          'approval queue. The record and its history are kept.',
+        confirmLabel: 'Reject invoice',
+        danger: true,
+      });
+
+    if (!confirmed) return;
+
+    try {
+
+      const response =
+        await API.rejectInvoice(id);
+
+      if (!response || !response.invoice) {
+        throw new Error(
+          'The server did not return the rejected invoice.'
+        );
+      }
+
+      toast('Invoice rejected', 'success');
+
+      await paintReview(response.invoice);
+
+    } catch (error) {
+
+      handleApiError(
+        error,
+        'Unable to reject invoice.'
       );
-
-    backdrop.className =
-      'modal-backdrop';
-
-    backdrop.innerHTML = `
-      <div class="modal-card">
-
-        <h3>
-          Reject this invoice?
-        </h3>
-
-        <p>
-          This marks the invoice as rejected
-          and removes it from approval queues.
-          This can be reviewed later in the archive.
-        </p>
-
-        <div class="modal-actions">
-
-          <button
-            class="btn btn-ghost"
-            id="cancel-reject"
-            type="button"
-          >
-            Cancel
-          </button>
-
-          <button
-            class="btn btn-danger-ghost"
-            id="confirm-reject"
-            type="button"
-            style="
-              background:var(--bad-600);
-              color:#fff;
-            "
-          >
-            Reject Invoice
-          </button>
-
-        </div>
-
-      </div>
-    `;
-
-    document.body.appendChild(
-      backdrop
-    );
-
-    const cancelBtn =
-      backdrop.querySelector(
-        '#cancel-reject'
-      );
-
-    if (cancelBtn) {
-      cancelBtn.onclick =
-        () =>
-          backdrop.remove();
-    }
-
-    const confirmBtn =
-      backdrop.querySelector(
-        '#confirm-reject'
-      );
-
-    if (confirmBtn) {
-      confirmBtn.onclick =
-        async () => {
-          confirmBtn.disabled =
-            true;
-
-          confirmBtn.textContent =
-            'Rejecting…';
-
-          try {
-            const response =
-              await API.rejectInvoice(
-                id
-              );
-
-            if (
-              !response ||
-              !response.invoice
-            ) {
-              throw new Error(
-                'The server did not return the rejected invoice.'
-              );
-            }
-
-            backdrop.remove();
-
-            toast(
-              'Invoice rejected',
-              'success'
-            );
-
-            await paintReview(
-              response.invoice
-            );
-
-          } catch (error) {
-            if (
-              handleApiError(
-                error,
-                'Unable to reject invoice.'
-              )
-            ) {
-              return;
-            }
-
-            confirmBtn.disabled =
-              false;
-
-            confirmBtn.textContent =
-              'Reject Invoice';
-          }
-        };
     }
   }
 
@@ -4268,121 +4417,284 @@ function bindInvoiceListEvents(container) {
     );
   }
 
- async function loadAndPaintInvoices(
-  filters,
-  title,
-  isExceptionView
-) {
-  try {
-    const params = {
-      q: filters.q,
+  async function loadAndPaintInvoices(
+    filters,
+    title,
+    isExceptionView
+  ) {
+    try {
 
-      status:
+      const params = {
+        // The exceptions screen has no search box, so it must not inherit a
+        // query left behind on the invoices table — that would show an empty
+        // list with nothing on screen explaining why.
+        q:
+          isExceptionView
+            ? undefined
+            : filters.q,
+
+        status:
+          isExceptionView
+            ? undefined
+            : (
+                filters.status === 'all'
+                  ? undefined
+                  : filters.status
+              ),
+
+        // Ask the server for each row's top failing rule so the exceptions
+        // screen can group by, and name, the actual problem.
+        withIssues:
+          isExceptionView
+            ? '1'
+            : undefined,
+      };
+
+      const response =
+        await API.listInvoices(params);
+
+      const invoices =
+        Array.isArray(response?.invoices)
+          ? response.invoices
+          : [];
+
+      const finalList =
         isExceptionView
-          ? undefined
-          : (
-              filters.status === 'all'
-                ? undefined
-                : filters.status
-            ),
-    };
+          ? invoices.filter(
+              (invoice) =>
+                ['exception', 'duplicate'].includes(invoice.status)
+            )
+          : invoices;
 
-    const response =
-      await API.listInvoices(
-        params
-      );
+      const content =
+        document.querySelector('.content');
 
-    const invoices =
-      Array.isArray(
-        response?.invoices
-      )
-        ? response.invoices
-        : [];
+      if (!content) {
+        return;
+      }
 
-    const finalList =
-      isExceptionView
-        ? invoices.filter(
-            (invoice) =>
-              [
-                'exception',
-                'duplicate',
-              ].includes(
-                invoice.status
-              )
-          )
-        : invoices;
+      // The exceptions screen is its own view: grouped by what a person has
+      // to do about each invoice rather than a flat table.
+      if (isExceptionView) {
 
-    const content =
-      document.querySelector(
-        '.content'
-      );
+        content.innerHTML =
+          renderExceptions(finalList);
 
-    if (!content) {
-      return;
-    }
+        bindShellEvents();
 
-    content.innerHTML =
-      renderInvoicesList(
-        finalList,
+        content
+          .querySelectorAll('.attention-row[data-id]')
+          .forEach((row) => {
+            row.onclick =
+              () => {
+                location.hash =
+                  `#/invoices/${row.dataset.id}`;
+              };
+          });
+
+        bindDeleteButtons(
+          content,
+          () =>
+            loadAndPaintInvoices(
+              filters,
+              title,
+              isExceptionView
+            )
+        );
+
+        return;
+      }
+
+      content.innerHTML =
+        renderInvoicesList(
+          finalList,
+          filters,
+          title || 'Invoices'
+        );
+
+      bindShellEvents();
+
+      bindInvoicesListEvents(
         filters,
-        title ||
-          'Invoices'
+        title,
+        isExceptionView
       );
 
-    bindShellEvents();
+    } catch (error) {
 
-    bindInvoicesListEvents(
-      filters,
-      title,
-      isExceptionView
-    );
+      console.error(
+        '[InvoiceFlow] Failed to load invoices:',
+        error
+      );
 
-  } catch (error) {
-
-    console.error(
-      '[InvoiceFlow] Failed to load invoices:',
-      error
-    );
-
-    toast(
-      error.message ||
-        'Unable to load invoices.',
-      'error'
-    );
+      toast(
+        error.message ||
+          'Unable to load invoices.',
+        'error'
+      );
+    }
   }
-}
+
   function bindInvoicesListEvents(
     filters,
     title,
     isExceptionView
   ) {
-    document
-      .querySelectorAll(
-        'table.data-table tbody tr[data-id]'
-      )
-      .forEach(
-        (tr) => {
-          tr.onclick =
-            () => {
-              location.hash =
-                `#/invoices/${tr.dataset.id}`;
-            };
-        }
+    const content =
+      document.querySelector('.content');
+
+    if (!content) return;
+
+    const reload =
+      () =>
+        loadAndPaintInvoices(
+          filters,
+          title,
+          isExceptionView
+        );
+
+    // -------------------------------------------------------------------------
+    // Row navigation
+    //
+    // Only the data cells open the invoice — the checkbox and the delete
+    // button live in the same row and must not navigate.
+    // -------------------------------------------------------------------------
+
+    content
+      .querySelectorAll('tbody tr[data-id]')
+      .forEach((tr) => {
+        tr
+          .querySelectorAll('.clickable-cell')
+          .forEach((cell) => {
+            cell.onclick =
+              () => {
+                location.hash =
+                  `#/invoices/${tr.dataset.id}`;
+              };
+          });
+      });
+
+    // -------------------------------------------------------------------------
+    // Selection + bulk actions
+    // -------------------------------------------------------------------------
+
+    const checkAll =
+      document.getElementById('check-all');
+
+    const rowChecks =
+      Array.from(
+        content.querySelectorAll('.row-check')
       );
 
+    const selectedIds =
+      () =>
+        rowChecks
+          .filter((checkbox) => checkbox.checked)
+          .map((checkbox) => checkbox.dataset.id);
+
+    function paintBulkBar() {
+      const ids = selectedIds();
+
+      const slot =
+        document.getElementById('bulk-bar-slot');
+
+      if (!slot) return;
+
+      slot.innerHTML =
+        renderBulkBar(ids.length);
+
+      rowChecks.forEach((checkbox) => {
+        checkbox
+          .closest('tr')
+          .classList
+          .toggle('selected', checkbox.checked);
+      });
+
+      if (checkAll) {
+        checkAll.checked =
+          ids.length > 0 &&
+          ids.length === rowChecks.length;
+
+        checkAll.indeterminate =
+          ids.length > 0 &&
+          ids.length < rowChecks.length;
+      }
+
+      const exportSelectedBtn =
+        document.getElementById('btn-export-selected');
+
+      if (exportSelectedBtn) {
+        exportSelectedBtn.onclick =
+          () =>
+            exportSelectedInvoices(
+              selectedIds(),
+              exportSelectedBtn
+            );
+      }
+
+      const deleteSelectedBtn =
+        document.getElementById('btn-delete-selected');
+
+      if (deleteSelectedBtn) {
+        deleteSelectedBtn.onclick =
+          async () => {
+            deleteSelectedBtn.disabled = true;
+
+            const deleted =
+              await deleteInvoices(selectedIds());
+
+            deleteSelectedBtn.disabled = false;
+
+            if (deleted) {
+              await reload();
+            }
+          };
+      }
+    }
+
+    rowChecks.forEach((checkbox) => {
+      checkbox.onclick =
+        (event) => event.stopPropagation();
+
+      checkbox.onchange =
+        () => paintBulkBar();
+    });
+
+    if (checkAll) {
+      checkAll.onclick =
+        (event) => event.stopPropagation();
+
+      checkAll.onchange =
+        () => {
+          rowChecks.forEach((checkbox) => {
+            checkbox.checked = checkAll.checked;
+          });
+
+          paintBulkBar();
+        };
+    }
+
+    paintBulkBar();
+
+    // -------------------------------------------------------------------------
+    // Per-row delete
+    // -------------------------------------------------------------------------
+
+    bindDeleteButtons(content, reload);
+
+    // -------------------------------------------------------------------------
+    // Search
+    // -------------------------------------------------------------------------
+
     const searchInput =
-      document.getElementById(
-        'invoice-search'
-      );
+      document.getElementById('invoice-search');
 
     if (searchInput) {
       let timer;
 
       searchInput.oninput =
         () => {
-          clearTimeout(
-            timer
-          );
+          clearTimeout(timer);
 
           timer =
             setTimeout(
@@ -4394,156 +4706,111 @@ function bindInvoiceListEvents(container) {
                   AppState.invoiceFilters,
                   title,
                   isExceptionView
-                );
+                ).then(() => {
+                  // Keep typing where it left off after the re-render.
+                  const next =
+                    document.getElementById('invoice-search');
+
+                  if (next) {
+                    next.focus();
+
+                    next.setSelectionRange(
+                      next.value.length,
+                      next.value.length
+                    );
+                  }
+                });
               },
               300
             );
         };
     }
 
-    document
-      .querySelectorAll(
-        '.chip[data-status]'
-      )
-      .forEach(
-        (chip) => {
-          chip.onclick =
-            () => {
-              AppState.invoiceFilters.status =
-                chip.dataset.status;
+    // -------------------------------------------------------------------------
+    // Status filters
+    // -------------------------------------------------------------------------
 
-              loadAndPaintInvoices(
-                AppState.invoiceFilters,
-                title,
-                isExceptionView
-              );
-            };
-        }
-      );
+    content
+      .querySelectorAll('.filter-chip[data-status]')
+      .forEach((chip) => {
+        chip.onclick =
+          () => {
+            AppState.invoiceFilters.status =
+              chip.dataset.status;
+
+            loadAndPaintInvoices(
+              AppState.invoiceFilters,
+              title,
+              isExceptionView
+            );
+          };
+      });
+
+    // -------------------------------------------------------------------------
+    // Export all
+    // -------------------------------------------------------------------------
 
     const exportAllBtn =
-      document.getElementById(
-        'btn-export-all'
-      );
+      document.getElementById('btn-export-all');
 
     if (exportAllBtn) {
       exportAllBtn.onclick =
-        async () => {
-          exportAllBtn.disabled =
-            true;
-
-          try {
-            await downloadAuthenticated(
-              API.exportAllUrl(),
-              'invoiceflow-export.xlsx'
-            );
-
-            toast(
-              'Export downloaded',
-              'success'
-            );
-
-          } catch (error) {
-            handleApiError(
-              error,
-              'Export failed.'
-            );
-
-          } finally {
-            exportAllBtn.disabled =
-              false;
-          }
-        };
+        () => exportAllInvoices(exportAllBtn);
     }
+  }
 
-    const exportSelectedBtn =
-      document.getElementById(
-        'btn-export-selected'
+  // ===========================================================================
+  // APPROVALS
+  // ===========================================================================
+
+  async function renderApprovalsPage() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading approvals…</div>',
+        '#/approvals'
       );
 
-    if (exportSelectedBtn) {
-      exportSelectedBtn.onclick =
-        async () => {
-          const ids =
-            Array.from(
-              document.querySelectorAll(
-                '.row-check:checked'
-              )
-            ).map(
-              (checkbox) =>
-                checkbox.dataset.id
-            );
+    if (!mounted) {
+      return;
+    }
 
-          if (!ids.length) {
-            toast(
-              'Select at least one invoice first.',
-              'error'
-            );
+    try {
 
-            return;
-          }
+      const response =
+        await API.listInvoices({
+          status: 'review_required',
+        });
 
-          exportSelectedBtn.disabled =
-            true;
+      const invoices =
+        Array.isArray(response?.invoices)
+          ? response.invoices
+          : [];
 
-          try {
-            const response =
-              await API.exportSelected(
-                ids
-              );
+      const content =
+        document.querySelector('.content');
 
-            if (
-              response instanceof
-              Response
-            ) {
-              if (!response.ok) {
-                throw new Error(
-                  'Export failed.'
-                );
-              }
+      if (!content) return;
 
-              const blob =
-                await response.blob();
+      content.innerHTML =
+        renderApprovals(invoices);
 
-              triggerDownload(
-                blob,
-                `invoiceflow-selected-${new Date()
-                  .toISOString()
-                  .slice(0, 10)}.xlsx`
-              );
+      bindShellEvents();
 
-            } else if (
-              response?.url
-            ) {
-              await downloadAuthenticated(
-                response.url,
-                `invoiceflow-selected-${new Date()
-                  .toISOString()
-                  .slice(0, 10)}.xlsx`
-              );
+      content
+        .querySelectorAll('tbody tr[data-id]')
+        .forEach((tr) => {
+          tr.onclick =
+            () => {
+              location.hash =
+                `#/invoices/${tr.dataset.id}`;
+            };
+        });
 
-            } else {
-              throw new Error(
-                'The export response was invalid.'
-              );
-            }
-
-            toast(
-              'Selected invoices exported',
-              'success'
-            );
-
-          } catch (error) {
-            handleApiError(
-              error,
-              'Selected invoice export failed.'
-            );
-
-          } finally {
-            exportSelectedBtn.disabled =
-              false;
-          }
-        };
+    } catch (error) {
+      handleApiError(
+        error,
+        'Unable to load approvals.'
+      );
     }
   }
 
@@ -4593,11 +4860,75 @@ function bindInvoiceListEvents(container) {
 
       bindShellEvents();
 
+      content
+        .querySelectorAll('tr[data-supplier-id]')
+        .forEach((tr) => {
+          tr.onclick =
+            () => {
+              location.hash =
+                `#/suppliers/${tr.dataset.supplierId}`;
+            };
+        });
+
     } catch (error) {
       handleApiError(
         error,
         'Unable to load suppliers.'
       );
+    }
+  }
+
+  // ===========================================================================
+  // SUPPLIER DETAIL
+  // ===========================================================================
+
+  async function renderSupplierDetailPage(id) {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading supplier…</div>',
+        '#/suppliers'
+      );
+
+    if (!mounted) {
+      return;
+    }
+
+    try {
+
+      const data =
+        await API.getSupplier(id);
+
+      if (!data || !data.supplier) {
+        throw new Error('Supplier not found.');
+      }
+
+      const content =
+        document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML =
+        renderSupplierDetail(data);
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('tbody tr[data-id]')
+        .forEach((tr) => {
+          tr.onclick =
+            () => {
+              location.hash =
+                `#/invoices/${tr.dataset.id}`;
+            };
+        });
+
+    } catch (error) {
+
+      if (handleApiError(error, 'Unable to load supplier.')) {
+        return;
+      }
+
+      location.hash = '#/suppliers';
     }
   }
 
@@ -4652,6 +4983,14 @@ function bindInvoiceListEvents(container) {
         );
 
       bindShellEvents();
+
+      const exportAllBtn =
+        document.getElementById('btn-export-all');
+
+      if (exportAllBtn) {
+        exportAllBtn.onclick =
+          () => exportAllInvoices(exportAllBtn);
+      }
 
     } catch (error) {
       handleApiError(

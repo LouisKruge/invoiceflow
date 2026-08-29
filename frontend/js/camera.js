@@ -511,20 +511,19 @@ const Camera = (() => {
 
     bar.innerHTML = `
       <button
-        class="btn btn-ghost"
+        class="btn btn-secondary btn-lg"
         data-r="retake"
         type="button"
-        style="background:#fff"
       >
         Retake
       </button>
 
       <button
-        class="btn btn-accent"
+        class="btn btn-primary btn-lg"
         data-r="keep"
         type="button"
       >
-        Use Photo
+        Use photo
       </button>
     `;
 

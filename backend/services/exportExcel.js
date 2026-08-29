@@ -30,6 +30,7 @@ async function buildInvoiceWorkbook(invoices, lineItemsByInvoice) {
     { header: 'Invoice Date', key: 'invoice_date', width: 14 },
     { header: 'Due Date', key: 'due_date', width: 14 },
     { header: 'PO Number', key: 'purchase_order_number', width: 14 },
+    { header: 'Account Code', key: 'account_code', width: 14 },
     { header: 'Subtotal', key: 'subtotal', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'VAT', key: 'vat_amount', width: 12, style: { numFmt: '#,##0.00' } },
     { header: 'Total', key: 'total_amount', width: 14, style: { numFmt: '#,##0.00' } },
@@ -41,7 +42,7 @@ async function buildInvoiceWorkbook(invoices, lineItemsByInvoice) {
   ];
   styleHeader(sheet.getRow(1));
   invoices.forEach(inv => sheet.addRow(inv));
-  sheet.autoFilter = { from: 'A1', to: 'N1' };
+  sheet.autoFilter = { from: 'A1', to: 'O1' };
 
   const liSheet = wb.addWorksheet('Line Items');
   liSheet.columns = [
