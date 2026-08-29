@@ -66,6 +66,18 @@ const Icons = {
   file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3h8L18 6.5V21h-11.5z"/></svg>',
 
   filter: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 6.5h16M7 12h10M10 17.5h4"/></svg>',
+
+  stock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5L12 3.5l8.5 4v9L12 20.5l-8.5-4z"/><path d="M3.5 7.5L12 11.5l8.5-4M12 11.5v9"/></svg>',
+
+  products: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1"/></svg>',
+
+  ledger: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v13H4z"/><path d="M8 5.5v13M4 10h16M4 14h16"/></svg>',
+
+  adjust: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 8h10M18 8h2M4 16h4M12 16h8"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/></svg>',
+
+  importFile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3h8L18 6.5V21h-11.5z"/><path d="M12 16V9.5M12 9.5L9.5 12M12 9.5L14.5 12"/></svg>',
+
+  review: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20.5 20.5l-4.7-4.7M11 8v3.5M11 14h.01"/></svg>',
 };
 
 // ---------------------------------------------------------------------------
@@ -467,6 +479,14 @@ const NAV_GROUPS = [
     ['#/suppliers', 'suppliers', 'Suppliers'],
     ['#/approvals', 'approvals', 'Approvals'],
   ]],
+  ['Stock', [
+    ['#/stock', 'stock', 'Stock Overview'],
+    ['#/stock/products', 'products', 'Products'],
+    ['#/stock/transactions', 'ledger', 'Transactions'],
+    ['#/stock/adjustments', 'adjust', 'Adjustments'],
+    ['#/stock/import', 'importFile', 'Import Stock'],
+    ['#/stock/review', 'review', 'Stock Review'],
+  ]],
   ['Intelligence', [
     ['#/reports', 'reports', 'Reports'],
   ]],
@@ -481,6 +501,12 @@ const ROUTE_TITLES = {
   '#/reports': 'Reports',
   '#/settings': 'Settings',
   '#/capture': 'Upload Invoices',
+  '#/stock': 'Stock Overview',
+  '#/stock/products': 'Products',
+  '#/stock/transactions': 'Stock Transactions',
+  '#/stock/adjustments': 'Stock Adjustments',
+  '#/stock/import': 'Import Stock',
+  '#/stock/review': 'Stock Review',
 };
 
 function routeTitle(route) {
@@ -488,6 +514,8 @@ function routeTitle(route) {
 
   if (route && route.startsWith('#/invoices/')) return 'Invoice';
   if (route && route.startsWith('#/suppliers/')) return 'Supplier';
+  if (route && route.startsWith('#/stock/products/')) return 'Product';
+  if (route && route.startsWith('#/stock/transactions/')) return 'Stock Transaction';
 
   return 'InvoiceFlow';
 }
@@ -515,7 +543,9 @@ function navMarkup(route, counts) {
             ? counts.exceptions
             : r === '#/approvals'
               ? counts.approvals
-              : 0;
+              : r === '#/stock/review'
+                ? counts.stockReview
+                : 0;
 
         return navItem(
           r,
@@ -523,7 +553,7 @@ function navMarkup(route, counts) {
           label,
           route === r,
           count,
-          r === '#/exceptions' && Boolean(count)
+          (r === '#/exceptions' || r === '#/stock/review') && Boolean(count)
         );
       }).join('')}
     `)
@@ -538,6 +568,7 @@ function renderShell(route, user, exceptionsCount, contentHtml, counts = {}) {
   const navCounts = {
     exceptions: exceptionsCount || 0,
     approvals: counts.approvals || 0,
+    stockReview: counts.stockReview || 0,
   };
 
   return `
@@ -2359,4 +2390,1033 @@ function renderConfirm({ title, body, confirmLabel, danger }) {
       </div>
     </div>
   </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// STOCK
+//
+// Built from the same components as the rest of InvoiceFlow: the KPI row, the
+// data table, the monochrome status marks, the detail blocks. Stock status
+// reuses the status-mark vocabulary rather than introducing colours of its own.
+// ---------------------------------------------------------------------------
+
+const STOCK_STATUS_LABELS = {
+  IN_STOCK: 'In stock',
+  LOW_STOCK: 'Low stock',
+  OUT_OF_STOCK: 'Out of stock',
+};
+
+// In stock reads as settled (filled), low as needing a look (hollow), and out
+// of stock as the one condition that genuinely stops work (square, critical).
+function stockStatusMark(status) {
+  const cls = ({
+    IN_STOCK: 'status-approved',
+    LOW_STOCK: 'status-review_required',
+    OUT_OF_STOCK: 'status-exception',
+  })[status] || 'status-processing';
+
+  return `
+    <span class="status ${cls}">
+      <span class="mark"></span>${esc(STOCK_STATUS_LABELS[status] || status)}
+    </span>
+  `;
+}
+
+const TRANSACTION_LABELS = {
+  OPENING_BALANCE: 'Opening balance',
+  PURCHASE_RECEIPT: 'Purchase receipt',
+  STOCK_ISSUE: 'Stock issue',
+  STOCK_RETURN: 'Stock return',
+  STOCK_ADJUSTMENT: 'Adjustment',
+  STOCK_TRANSFER: 'Transfer',
+  STOCK_COUNT: 'Stock count',
+};
+
+function transactionLabel(type) {
+  return TRANSACTION_LABELS[type] || type || '—';
+}
+
+// A movement is shown with its sign, because the sign is the whole point.
+function signedQuantity(row) {
+  const value = Number(row.signed_quantity ?? (row.quantity * (row.direction || 1)));
+
+  const text = `${value > 0 ? '+' : ''}${value.toLocaleString('en-US')}`;
+
+  return `<span class="${value < 0 ? 'cell-muted' : ''}">${esc(text)}</span>`;
+}
+
+function fmtQty(n, unit) {
+  if (n === null || n === undefined) return '—';
+
+  const value = Number(n);
+
+  if (!Number.isFinite(value)) return '—';
+
+  return `${value.toLocaleString('en-US')}${unit ? ` ${esc(unit)}` : ''}`;
+}
+
+// --------------------------------- Overview ---------------------------------
+
+function renderStockOverview(data) {
+  const recent = data.recent_transactions || [];
+
+  const rows = recent
+    .map(row => `
+      <tr class="clickable" data-transaction-id="${esc(row.id)}">
+        <td class="cell-id">${esc(row.sku || '—')}</td>
+        <td class="cell-strong">${esc(row.product_description || '—')}</td>
+        <td>${esc(transactionLabel(row.transaction_type))}</td>
+        <td class="cell-num">${signedQuantity(row)}</td>
+        <td class="cell-muted">${esc(row.created_by_name || 'System')}</td>
+        <td class="cell-muted">${esc(timeAgo(row.created_at))}</td>
+      </tr>
+    `)
+    .join('');
+
+  return `
+  <div class="page-head">
+    <div>
+      <h1>Stock overview</h1>
+      <p class="sub">Every quantity here is derived from the stock ledger.</p>
+    </div>
+
+    <div class="page-actions">
+      <button class="btn btn-secondary" data-route="#/stock/adjustments">
+        ${Icons.adjust} Adjust stock
+      </button>
+      <button class="btn btn-primary" data-route="#/stock/import">
+        ${Icons.importFile} Import stock
+      </button>
+    </div>
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi">
+      <div class="label">Total products</div>
+      <div class="value">${data.total_products ?? 0}</div>
+      <div class="foot">On the product master</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Stock units</div>
+      <div class="value">${Number(data.total_units || 0).toLocaleString('en-US')}</div>
+      <div class="foot">Across all locations</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Inventory value</div>
+      <div class="value">${fmtMoneyCompact(data.total_value)}</div>
+      <div class="foot">Quantity × unit cost</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Needs ordering</div>
+      <div class="value">${(data.low_stock ?? 0) + (data.out_of_stock ?? 0)}</div>
+      <div class="foot ${data.out_of_stock ? 'critical' : ''}">
+        ${data.low_stock ?? 0} low · ${data.out_of_stock ?? 0} out
+      </div>
+    </div>
+  </div>
+
+  ${
+    data.pending_review
+      ? `
+        <div class="section">
+          <div class="attention-row" data-route="#/stock/review">
+            <div class="attention-main">
+              <div class="title">
+                ${data.pending_review} stock line${data.pending_review === 1 ? '' : 's'} awaiting review
+              </div>
+              <div class="issue critical">
+                ${Icons.warning}
+                These lines could not be matched to a product confidently, so no stock was moved.
+              </div>
+            </div>
+            <div class="attention-cta">Review ${Icons.arrowRight}</div>
+          </div>
+        </div>
+      `
+      : ''
+  }
+
+  <div class="section">
+    <div class="section-head">
+      <h2>Recent stock movements</h2>
+      <button class="section-link" data-route="#/stock/transactions">View all →</button>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>SKU</th>
+            <th>Product</th>
+            <th>Movement</th>
+            <th class="th-num">Qty</th>
+            <th>By</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            rows ||
+            `
+              <tr>
+                <td colspan="6">
+                  <div class="empty-state">
+                    ${Icons.stock}
+                    <p>No stock movements yet.</p>
+                    <div class="hint">Import your stock spreadsheet to establish opening balances.</div>
+                  </div>
+                </td>
+              </tr>
+            `
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+// --------------------------------- Products ---------------------------------
+
+const STOCK_FILTERS = [
+  ['', 'All'],
+  ['IN_STOCK', 'In stock'],
+  ['LOW_STOCK', 'Low stock'],
+  ['OUT_OF_STOCK', 'Out of stock'],
+];
+
+function renderProducts(data, filters) {
+  const products = data.products || [];
+
+  const rows = products
+    .map(p => `
+      <tr class="clickable" data-product-id="${esc(p.id)}">
+        <td class="cell-id">${esc(p.sku || p.product_code || '—')}</td>
+        <td class="cell-strong">${esc(p.description)}</td>
+        <td class="cell-muted">${esc(p.category || '—')}</td>
+        <td class="cell-num">${fmtQty(p.current_quantity)}</td>
+        <td class="cell-muted">${esc(p.unit_of_measure || 'ea')}</td>
+        <td class="cell-num">${fmtMoney(p.unit_cost)}</td>
+        <td class="cell-num">${fmtMoney(p.inventory_value)}</td>
+        <td class="cell-num cell-muted">${p.reorder_level || 0}</td>
+        <td>${stockStatusMark(p.stock_status)}</td>
+        <td class="cell-muted">${esc(p.last_movement_at ? timeAgo(p.last_movement_at) : '—')}</td>
+      </tr>
+    `)
+    .join('');
+
+  const categoryOptions =
+    (data.categories || [])
+      .map(c => `<option value="${esc(c)}" ${filters.category === c ? 'selected' : ''}>${esc(c)}</option>`)
+      .join('');
+
+  return `
+  <div class="page-head">
+    <div>
+      <h1>Products</h1>
+      <p class="sub">
+        ${data.total ?? products.length} product${(data.total ?? products.length) === 1 ? '' : 's'}
+        on the product master.
+      </p>
+    </div>
+
+    <div class="page-actions">
+      <button class="btn btn-secondary" id="btn-new-product">
+        ${Icons.plus} New product
+      </button>
+      <button class="btn btn-primary" data-route="#/stock/import">
+        ${Icons.importFile} Import stock
+      </button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="toolbar-search">
+      ${Icons.search}
+      <input
+        type="text"
+        id="product-search"
+        placeholder="Search SKU, product code, description, supplier code or supplier…"
+        value="${esc(filters.q || '')}"
+      />
+    </div>
+
+    <select id="product-category" class="btn btn-secondary" style="padding-right:28px;">
+      <option value="">All categories</option>
+      ${categoryOptions}
+    </select>
+  </div>
+
+  <div class="filter-row">
+    ${STOCK_FILTERS.map(([v, l]) => `
+      <button
+        class="filter-chip ${(filters.status || '') === v ? 'active' : ''}"
+        data-stock-status="${esc(v)}"
+      >${esc(l)}</button>
+    `).join('')}
+  </div>
+
+  <div class="card">
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th data-sort="sku">SKU</th>
+            <th data-sort="description">Description</th>
+            <th data-sort="category">Category</th>
+            <th class="th-num" data-sort="quantity">Qty</th>
+            <th>Unit</th>
+            <th class="th-num" data-sort="unit_cost">Unit cost</th>
+            <th class="th-num" data-sort="value">Value</th>
+            <th class="th-num">Reorder</th>
+            <th>Status</th>
+            <th data-sort="last_movement">Last movement</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            rows ||
+            `
+              <tr>
+                <td colspan="10">
+                  <div class="empty-state">
+                    ${Icons.products}
+                    <p>No products match.</p>
+                    <div class="hint">Import a stock spreadsheet to create your product master.</div>
+                  </div>
+                </td>
+              </tr>
+            `
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  ${renderPager(data)}`;
+}
+
+function renderPager(data) {
+  const pages = data.pages || 1;
+
+  if (pages <= 1) return '';
+
+  return `
+  <div class="toolbar" style="margin-top:16px;justify-content:flex-end;">
+    <button class="btn btn-secondary btn-sm" id="page-prev" ${data.page <= 1 ? 'disabled' : ''}>
+      Previous
+    </button>
+    <span style="font-size:12.5px;color:var(--ink-muted);">
+      Page ${data.page} of ${pages}
+    </span>
+    <button class="btn btn-secondary btn-sm" id="page-next" ${data.page >= pages ? 'disabled' : ''}>
+      Next
+    </button>
+  </div>`;
+}
+
+// ------------------------------ Product detail ------------------------------
+
+// The answer to "why is the stock what it is": every movement, in order, with
+// a running balance and a link to the document that caused it.
+function renderProductDetail(detail, history) {
+  const product = detail.product;
+  const transactions = (history && history.transactions) || [];
+
+  const rows = transactions
+    .slice()
+    .reverse()
+    .map(t => `
+      <tr class="clickable" data-transaction-id="${esc(t.id)}">
+        <td class="cell-muted">${esc(fmtDateTime(t.created_at))}</td>
+        <td>${esc(transactionLabel(t.transaction_type))}</td>
+        <td class="cell-num">${signedQuantity(t)}</td>
+        <td class="cell-num cell-strong">${Number(t.running_balance).toLocaleString('en-US')}</td>
+        <td>
+          ${
+            t.source_document_type === 'INVOICE' && t.source_document_id
+              ? `<button class="section-link" data-invoice-id="${esc(t.source_document_id)}">
+                   ${esc(t.invoice_number || 'Invoice')} →
+                 </button>`
+              : t.source_document_type === 'STOCK_IMPORT'
+                ? '<span class="cell-muted">Spreadsheet import</span>'
+                : '<span class="cell-muted">—</span>'
+          }
+        </td>
+        <td class="cell-muted">${esc(t.reason || '—')}</td>
+        <td class="cell-muted">${esc(t.created_by_name || 'System')}</td>
+      </tr>
+    `)
+    .join('');
+
+  return `
+  <button class="back-link" data-route="#/stock/products">
+    ${Icons.arrowLeft} Products
+  </button>
+
+  <div class="page-head">
+    <div>
+      <h1>${esc(product.description)}</h1>
+      <p class="sub">
+        ${esc(product.sku || product.product_code || 'No SKU')}
+        ${product.category ? ` · ${esc(product.category)}` : ''}
+        ${product.supplier_name ? ` · ${esc(product.supplier_name)}` : ''}
+      </p>
+    </div>
+
+    <div class="page-actions">
+      ${stockStatusMark(product.stock_status)}
+      <button
+        class="btn btn-secondary"
+        id="btn-adjust-product"
+        data-product-id="${esc(product.id)}"
+      >${Icons.adjust} Adjust</button>
+    </div>
+  </div>
+
+  <div class="stat-inline">
+    <div class="item">
+      <div class="l">Current quantity</div>
+      <div class="v">${fmtQty(product.current_quantity)}</div>
+    </div>
+    <div class="item">
+      <div class="l">Unit cost</div>
+      <div class="v">${fmtMoney(product.unit_cost)}</div>
+    </div>
+    <div class="item">
+      <div class="l">Inventory value</div>
+      <div class="v">${fmtMoney(product.inventory_value)}</div>
+    </div>
+    <div class="item">
+      <div class="l">Reorder level</div>
+      <div class="v">${product.reorder_level || 0}</div>
+    </div>
+  </div>
+
+  ${
+    detail.reconciled === false
+      ? `
+        <div class="detail-block" style="border-color:var(--critical);">
+          <div class="body" style="padding:14px 18px;">
+            <div class="check-row fail" style="border:none;padding:0;">
+              <span class="glyph">${Icons.warning}</span>
+              <span>
+                The cached quantity (${fmtQty(product.current_quantity)}) does not match
+                the ledger (${fmtQty(detail.ledger_quantity)}). Run a reconcile from
+                Stock Overview.
+              </span>
+            </div>
+          </div>
+        </div>
+      `
+      : ''
+  }
+
+  <div class="section">
+    <div class="section-head">
+      <h2>Movement history</h2>
+      <span style="font-size:12.5px;color:var(--ink-faint);">
+        ${transactions.length} movement${transactions.length === 1 ? '' : 's'}
+        · newest first
+      </span>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Movement</th>
+            <th class="th-num">Change</th>
+            <th class="th-num">Balance</th>
+            <th>Source document</th>
+            <th>Reason</th>
+            <th>By</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            rows ||
+            `
+              <tr>
+                <td colspan="7">
+                  <div class="empty-state">
+                    ${Icons.ledger}
+                    <p>No movements recorded for this product.</p>
+                  </div>
+                </td>
+              </tr>
+            `
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  ${
+    (detail.balances_by_location || []).length > 1
+      ? `
+        <div class="section">
+          <div class="section-head"><h2>By location</h2></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>Location</th><th class="th-num">Quantity</th><th>Last movement</th></tr>
+              </thead>
+              <tbody>
+                ${detail.balances_by_location.map(b => `
+                  <tr>
+                    <td class="cell-strong">${esc(b.location_name || b.location_code || '—')}</td>
+                    <td class="cell-num">${fmtQty(b.quantity)}</td>
+                    <td class="cell-muted">${esc(b.last_movement_at ? timeAgo(b.last_movement_at) : '—')}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `
+      : ''
+  }`;
+}
+
+// ------------------------------- Transactions -------------------------------
+
+function renderStockTransactions(data, filters) {
+  const rows = (data.transactions || [])
+    .map(t => `
+      <tr class="clickable" data-transaction-id="${esc(t.id)}">
+        <td class="cell-muted">${esc(fmtDateTime(t.created_at))}</td>
+        <td class="cell-id">${esc(t.sku || '—')}</td>
+        <td class="cell-strong">${esc(t.product_description || '—')}</td>
+        <td>${esc(transactionLabel(t.transaction_type))}</td>
+        <td class="cell-num">${signedQuantity(t)}</td>
+        <td class="cell-num">${t.unit_cost != null ? fmtMoney(t.unit_cost) : '—'}</td>
+        <td class="cell-num">${t.total_value != null ? fmtMoney(t.total_value) : '—'}</td>
+        <td class="cell-muted">${esc(t.location_code || '—')}</td>
+        <td class="cell-muted">${esc(t.created_by_name || 'System')}</td>
+      </tr>
+    `)
+    .join('');
+
+  const typeChips =
+    [['', 'All']]
+      .concat((data.types || []).map(t => [t, transactionLabel(t)]))
+      .map(([v, l]) => `
+        <button
+          class="filter-chip ${(filters.type || '') === v ? 'active' : ''}"
+          data-tx-type="${esc(v)}"
+        >${esc(l)}</button>
+      `)
+      .join('');
+
+  return `
+  <div class="page-head">
+    <div>
+      <h1>Stock transactions</h1>
+      <p class="sub">
+        ${data.total ?? 0} movement${(data.total ?? 0) === 1 ? '' : 's'} in the ledger.
+        Entries are never edited — corrections are posted as adjustments.
+      </p>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="toolbar-search">
+      ${Icons.search}
+      <input
+        type="text"
+        id="tx-search"
+        placeholder="Search product, SKU, reason, employee or job…"
+        value="${esc(filters.q || '')}"
+      />
+    </div>
+  </div>
+
+  <div class="filter-row">${typeChips}</div>
+
+  <div class="card">
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>SKU</th>
+            <th>Product</th>
+            <th>Movement</th>
+            <th class="th-num">Change</th>
+            <th class="th-num">Unit cost</th>
+            <th class="th-num">Value</th>
+            <th>Location</th>
+            <th>By</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            rows ||
+            `
+              <tr>
+                <td colspan="9">
+                  <div class="empty-state">
+                    ${Icons.ledger}
+                    <p>No stock movements match.</p>
+                  </div>
+                </td>
+              </tr>
+            `
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  ${renderPager(data)}`;
+}
+
+function renderStockTransactionDetail(data) {
+  const t = data.transaction;
+
+  const field = (label, value) => `
+    <div class="conf-row">
+      <span class="name">${esc(label)}</span>
+      <span class="pct" style="min-width:0;text-align:right;">${value}</span>
+    </div>
+  `;
+
+  return `
+  <button class="back-link" data-route="#/stock/transactions">
+    ${Icons.arrowLeft} Stock transactions
+  </button>
+
+  <div class="page-head">
+    <div>
+      <h1>${esc(transactionLabel(t.transaction_type))}</h1>
+      <p class="sub">
+        ${esc(t.product_description || '')}
+        ${t.sku ? ` · ${esc(t.sku)}` : ''}
+      </p>
+      <div class="num" style="font-size:22px;font-weight:600;margin-top:10px;">
+        ${signedQuantity(t)} ${esc(t.unit_of_measure || '')}
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width:560px;">
+    <div class="detail-block">
+      <div class="head"><h3>Movement</h3></div>
+      <div class="body" style="padding-top:8px;padding-bottom:14px;">
+        ${field('Product', esc(t.product_description || '—'))}
+        ${field('SKU', esc(t.sku || '—'))}
+        ${field('Type', esc(transactionLabel(t.transaction_type)))}
+        ${field('Quantity', signedQuantity(t))}
+        ${field('Unit cost', t.unit_cost != null ? fmtMoney(t.unit_cost) : '—')}
+        ${field('Total value', t.total_value != null ? fmtMoney(t.total_value) : '—')}
+        ${field('Location', esc(t.location_name || t.location_code || '—'))}
+        ${field('Date', esc(fmtDateTime(t.created_at)))}
+      </div>
+    </div>
+
+    <div class="detail-block">
+      <div class="head"><h3>Source</h3></div>
+      <div class="body" style="padding-top:8px;padding-bottom:14px;">
+        ${field('Document type', esc(t.source_document_type || 'Manual'))}
+        ${
+          t.source_document_type === 'INVOICE' && t.source_document_id
+            ? field(
+                'Document',
+                `<button class="section-link" data-invoice-id="${esc(t.source_document_id)}">
+                   ${esc(t.invoice_number || t.source_document_id)} →
+                 </button>`
+              )
+            : field('Document', esc(t.source_document_id || '—'))
+        }
+        ${field('Supplier', esc(t.supplier_name || '—'))}
+        ${field('Employee', esc(t.employee_name || '—'))}
+        ${field('Job', esc(t.job_reference || '—'))}
+        ${field('Match confidence', t.match_confidence != null ? confidenceText(t.match_confidence) : '—')}
+      </div>
+    </div>
+
+    <div class="detail-block">
+      <div class="head"><h3>Record</h3></div>
+      <div class="body" style="padding-top:8px;padding-bottom:14px;">
+        ${field('Reason', esc(t.reason || '—'))}
+        ${field('Notes', esc(t.notes || data.adjustment?.notes || '—'))}
+        ${field('Created by', esc(t.created_by_name || 'System'))}
+        ${field('Transaction ID', `<span class="mono" style="font-size:11px;">${esc(t.id)}</span>`)}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ------------------------------- Adjustments --------------------------------
+
+function renderStockAdjustments(products, recent) {
+  const rows = (recent || [])
+    .map(t => `
+      <tr class="clickable" data-transaction-id="${esc(t.id)}">
+        <td class="cell-muted">${esc(fmtDateTime(t.created_at))}</td>
+        <td class="cell-id">${esc(t.sku || '—')}</td>
+        <td class="cell-strong">${esc(t.product_description || '—')}</td>
+        <td class="cell-num">${signedQuantity(t)}</td>
+        <td>${esc(t.reason || '—')}</td>
+        <td class="cell-muted">${esc(t.created_by_name || 'System')}</td>
+      </tr>
+    `)
+    .join('');
+
+  return `
+  <div class="page-head">
+    <div>
+      <h1>Stock adjustments</h1>
+      <p class="sub">
+        A correction is posted as its own movement. The original quantity is
+        never rewritten.
+      </p>
+    </div>
+  </div>
+
+  <div style="max-width:560px;margin-bottom:34px;">
+    <div class="detail-block">
+      <div class="head"><h3>New adjustment</h3></div>
+      <div class="body" style="padding-top:16px;padding-bottom:18px;">
+
+        <div class="field">
+          <label>Product</label>
+          <input
+            type="text"
+            id="adj-product-search"
+            placeholder="Search by SKU or description…"
+            autocomplete="off"
+          />
+          <div id="adj-product-results"></div>
+          <input type="hidden" id="adj-product-id" />
+        </div>
+
+        <div style="display:flex;gap:12px;">
+          <div class="field" style="flex:1;">
+            <label>Direction</label>
+            <select id="adj-direction">
+              <option value="1">Increase</option>
+              <option value="-1" selected>Decrease</option>
+            </select>
+          </div>
+
+          <div class="field" style="flex:1;">
+            <label>Quantity</label>
+            <input type="number" id="adj-quantity" min="0" step="0.01" placeholder="0" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Reason</label>
+          <select id="adj-reason">
+            <option value="">Choose a reason…</option>
+            <option>Damaged stock</option>
+            <option>Stock count correction</option>
+            <option>Write-off</option>
+            <option>Found stock</option>
+            <option>Returned to supplier</option>
+            <option>Data entry correction</option>
+            <option>Other</option>
+          </select>
+        </div>
+
+        <div class="field" style="margin-bottom:18px;">
+          <label>Notes</label>
+          <input type="text" id="adj-notes" placeholder="Optional" />
+        </div>
+
+        <button class="btn btn-primary btn-block" id="btn-post-adjustment">
+          Post adjustment
+        </button>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><h2>Recent adjustments</h2></div>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Date</th><th>SKU</th><th>Product</th>
+            <th class="th-num">Change</th><th>Reason</th><th>By</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            rows ||
+            `
+              <tr>
+                <td colspan="6">
+                  <div class="empty-state">
+                    ${Icons.adjust}
+                    <p>No adjustments posted yet.</p>
+                  </div>
+                </td>
+              </tr>
+            `
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+// ---------------------------------- Import ----------------------------------
+
+function renderStockImport() {
+  return `
+  <div class="page-head">
+    <div>
+      <h1>Import stock</h1>
+      <p class="sub">
+        Upload your existing stock spreadsheet. Each row becomes a product and
+        an opening balance in the ledger.
+      </p>
+    </div>
+  </div>
+
+  <div class="dropzone" id="stock-dropzone">
+    <h2>Drag &amp; drop your stock spreadsheet</h2>
+    <div class="or">or</div>
+    <button class="btn btn-primary" id="btn-select-sheet">
+      ${Icons.plus} Select file
+    </button>
+    <div class="hint">
+      Excel (.xlsx) or CSV<br />
+      Column names do not need to match — you confirm the mapping next
+    </div>
+  </div>
+
+  <div id="import-stage"></div>`;
+}
+
+/**
+ * The mapping step. Every spreadsheet column gets a dropdown so the guess can
+ * be corrected before anything is written.
+ */
+function renderImportMapping(inspection) {
+  const fields = inspection.target_fields || [];
+
+  const options = (selected) =>
+    ['<option value="">— Ignore this column —</option>']
+      .concat(
+        fields.map(f =>
+          `<option value="${esc(f.key)}" ${selected === f.key ? 'selected' : ''}>${esc(f.label)}</option>`
+        )
+      )
+      .join('');
+
+  const headerRows =
+    (inspection.headers || [])
+      .map((header, index) => {
+        const guess = inspection.suggested_mapping[String(index)] || '';
+        const confidence = (inspection.mapping_confidence || {})[String(index)];
+
+        const samples =
+          (inspection.sample_rows || [])
+            .slice(0, 3)
+            .map(row => row[index])
+            .filter(v => v !== undefined && String(v).trim())
+            .join(' · ');
+
+        return `
+          <tr>
+            <td>
+              <div class="cell-strong">${esc(header || `Column ${index + 1}`)}</div>
+              <div class="cell-muted" style="font-size:12px;margin-top:2px;">
+                ${esc(samples || 'No sample values')}
+              </div>
+            </td>
+            <td style="width:44px;text-align:center;color:var(--ink-faint);">
+              ${Icons.arrowRight}
+            </td>
+            <td style="width:230px;">
+              <select class="btn btn-secondary map-select" data-column="${index}" style="width:100%;">
+                ${options(guess)}
+              </select>
+              ${
+                guess && confidence !== undefined && confidence < 1
+                  ? '<div class="cell-muted" style="font-size:11.5px;margin-top:4px;">Best guess — please confirm</div>'
+                  : ''
+              }
+            </td>
+          </tr>
+        `;
+      })
+      .join('');
+
+  return `
+  <div class="section" style="margin-top:30px;">
+    <div class="section-head">
+      <h2>Confirm the column mapping</h2>
+      <span style="font-size:12.5px;color:var(--ink-faint);">
+        ${inspection.total_rows} row${inspection.total_rows === 1 ? '' : 's'}
+        ${inspection.sheet_name ? ` · sheet “${esc(inspection.sheet_name)}”` : ''}
+      </span>
+    </div>
+
+    <div class="card">
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Spreadsheet column</th>
+              <th></th>
+              <th>InvoiceFlow field</th>
+            </tr>
+          </thead>
+          <tbody>${headerRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;gap:12px;">
+      <span style="font-size:12.5px;color:var(--ink-muted);">
+        Each row with a quantity becomes an opening balance transaction.
+      </span>
+
+      <span style="display:flex;gap:8px;">
+        <button class="btn btn-secondary" id="btn-cancel-import">Cancel</button>
+        <button class="btn btn-primary" id="btn-commit-import">
+          Import ${inspection.total_rows} row${inspection.total_rows === 1 ? '' : 's'}
+        </button>
+      </span>
+    </div>
+  </div>`;
+}
+
+function renderImportResult(result) {
+  return `
+  <div class="section" style="margin-top:30px;">
+    <div class="section-head"><h2>Import complete</h2></div>
+
+    <div class="batch-summary" style="border-top:none;margin-top:0;">
+      <div class="item">
+        <div class="n">${result.imported}</div>
+        <div class="l">Imported</div>
+      </div>
+      <div class="item">
+        <div class="n">${result.skipped}</div>
+        <div class="l">Skipped</div>
+      </div>
+    </div>
+
+    ${
+      (result.errors || []).length
+        ? `
+          <div class="detail-block" style="margin-top:20px;">
+            <div class="head"><h3>Rows that could not be imported</h3></div>
+            <div class="body">
+              ${result.errors.map(e => `
+                <div class="check-row warn">
+                  <span class="glyph">${Icons.warning}</span>
+                  <span>${esc(e)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `
+        : ''
+    }
+
+    <div style="display:flex;gap:8px;margin-top:20px;">
+      <button class="btn btn-primary" data-route="#/stock/products">View products</button>
+      <button class="btn btn-secondary" data-route="#/stock">Stock overview</button>
+    </div>
+  </div>`;
+}
+
+// ------------------------------- Review queue -------------------------------
+
+function renderStockReview(items) {
+  const cards = items
+    .map(item => `
+      <div class="detail-block" data-review-id="${esc(item.id)}">
+        <div class="head">
+          <h3>
+            ${esc(item.invoice_number || item.source_document_type || 'Document')}
+            · ${esc(item.raw_description || 'Unnamed line')}
+          </h3>
+          <span class="confidence ${Number(item.best_confidence) < 0.9 ? 'low' : ''}">
+            best ${Math.round(Number(item.best_confidence || 0) * 100)}%
+          </span>
+        </div>
+
+        <div class="body" style="padding-top:14px;padding-bottom:16px;">
+          <div class="conf-row">
+            <span class="name">Quantity</span>
+            <span class="pct" style="min-width:0;">${fmtQty(item.quantity)}</span>
+          </div>
+          <div class="conf-row">
+            <span class="name">Supplier</span>
+            <span class="pct" style="min-width:0;">${esc(item.supplier_name || '—')}</span>
+          </div>
+
+          <div class="eyebrow" style="margin:16px 0 8px;">Possible matches</div>
+
+          ${
+            (item.candidates || []).length
+              ? item.candidates.map(c => `
+                  <label class="intel-row" style="cursor:pointer;align-items:center;">
+                    <input
+                      type="radio"
+                      name="review-${esc(item.id)}"
+                      value="${esc(c.product_id)}"
+                      style="width:14px;height:14px;margin-right:2px;"
+                    />
+                    <div style="flex:1;min-width:0;">
+                      <div class="title">${esc(c.description)}</div>
+                      <div class="detail">
+                        ${esc(c.sku || 'No SKU')} · matched on ${esc(c.method || 'similarity')}
+                      </div>
+                    </div>
+                    <span class="confidence ${c.confidence < 0.9 ? 'low' : ''}">
+                      ${Math.round(c.confidence * 100)}%
+                    </span>
+                  </label>
+                `).join('')
+              : '<div class="cell-muted" style="font-size:13px;">No candidate products were found.</div>'
+          }
+
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+            <button class="btn btn-secondary btn-sm" data-dismiss="${esc(item.id)}">
+              Not a stock item
+            </button>
+            <button class="btn btn-primary btn-sm" data-resolve="${esc(item.id)}">
+              Confirm match
+            </button>
+          </div>
+        </div>
+      </div>
+    `)
+    .join('');
+
+  return `
+  <div class="page-head">
+    <div>
+      <h1>Stock review</h1>
+      <p class="sub">
+        ${
+          items.length
+            ? `${items.length} line${items.length === 1 ? '' : 's'} could not be matched confidently. No stock has moved for these.`
+            : 'Nothing is waiting for review.'
+        }
+      </p>
+    </div>
+  </div>
+
+  ${
+    cards ||
+    `
+      <div class="empty-state">
+        ${Icons.check}
+        <p>Every document line has been matched.</p>
+        <div class="hint">Lines the matcher is unsure about will appear here.</div>
+      </div>
+    `
+  }`;
 }
