@@ -229,19 +229,36 @@ router.get(
           `
         );
 
+      // A movement is easier to trust when the figure it left behind is beside
+      // it. The balance is summed from the ledger up to and including that
+      // movement, so it is what the product stood at afterwards rather than
+      // what it stands at now.
       const recent =
         await db.all(
           `
+            WITH scoped AS (
+              SELECT
+                t.*,
+                p.sku,
+                p.description AS product_description,
+                u.name AS created_by_name
+              FROM stock_transactions t
+              JOIN products p ON p.id = t.product_id
+              LEFT JOIN users u ON u.id = t.created_by
+              ORDER BY t.created_at DESC, t.id DESC
+              LIMIT 10
+            )
             SELECT
-              t.*,
-              p.sku,
-              p.description AS product_description,
-              u.name AS created_by_name
-            FROM stock_transactions t
-            JOIN products p ON p.id = t.product_id
-            LEFT JOIN users u ON u.id = t.created_by
-            ORDER BY t.created_at DESC
-            LIMIT 10
+              scoped.*,
+              (
+                SELECT COALESCE(SUM(prior.signed_quantity), 0)
+                FROM stock_transactions prior
+                WHERE prior.product_id = scoped.product_id
+                  AND prior.location_id IS NOT DISTINCT FROM scoped.location_id
+                  AND (prior.created_at, prior.id) <= (scoped.created_at, scoped.id)
+              ) AS balance_after
+            FROM scoped
+            ORDER BY scoped.created_at DESC, scoped.id DESC
           `
         );
 
@@ -856,20 +873,35 @@ router.get(
       const rows =
         await db.all(
           `
+            WITH scoped AS (
+              SELECT
+                t.*,
+                p.sku,
+                p.description AS product_description,
+                p.unit_of_measure,
+                l.code AS location_code,
+                l.name AS location_name,
+                s.name AS supplier_name,
+                u.name AS created_by_name,
+                i.invoice_number,
+                sh.sheet_number
+              ${base}
+              ORDER BY t.created_at DESC, t.id DESC
+              LIMIT $${params.length - 1} OFFSET $${params.length}
+            )
             SELECT
-              t.*,
-              p.sku,
-              p.description AS product_description,
-              p.unit_of_measure,
-              l.code AS location_code,
-              l.name AS location_name,
-              s.name AS supplier_name,
-              u.name AS created_by_name,
-              i.invoice_number,
-              sh.sheet_number
-            ${base}
-            ORDER BY t.created_at DESC, t.id DESC
-            LIMIT $${params.length - 1} OFFSET $${params.length}
+              scoped.*,
+              -- Summed over the whole ledger, not the filtered page, so a
+              -- filter cannot make the running balance lie.
+              (
+                SELECT COALESCE(SUM(prior.signed_quantity), 0)
+                FROM stock_transactions prior
+                WHERE prior.product_id = scoped.product_id
+                  AND prior.location_id IS NOT DISTINCT FROM scoped.location_id
+                  AND (prior.created_at, prior.id) <= (scoped.created_at, scoped.id)
+              ) AS balance_after
+            FROM scoped
+            ORDER BY scoped.created_at DESC, scoped.id DESC
           `,
           params
         );
