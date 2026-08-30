@@ -1,25 +1,31 @@
-# InvoiceFlow — single-container image (backend serves the static frontend too).
-FROM node:20-bullseye-slim AS base
+# InvoiceFlow — single-container image. The backend serves the static frontend
+# too, so this one image is the whole app; PostgreSQL runs separately (see
+# docker-compose.yml for a local one, or point DATABASE_URL at a managed
+# database such as Neon).
 
-# better-sqlite3 needs build tools to compile its native binding.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ \
-    && rm -rf /var/lib/apt/lists/*
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-COPY backend/package.json backend/package-lock.json* ./backend/
-RUN cd backend && npm install --omit=dev --no-audit --no-fund
+# Dependencies are installed from the lockfile alone, so this layer is only
+# rebuilt when the dependencies actually change. Nothing here compiles native
+# code — the app talks to PostgreSQL over the wire through `pg`.
+COPY backend/package.json backend/package-lock.json ./backend/
+RUN cd backend && npm ci --omit=dev --no-audit --no-fund
 
 COPY backend ./backend
 COPY frontend ./frontend
 
-# Persistent data (SQLite DB + uploaded invoice images) lives here — mount a
-# volume at /app/backend/data in production so it survives container restarts.
+# Uploaded invoice photos, imported spreadsheets and sign-out sheets are
+# written here. Mount a volume at /app/backend/data so they survive a restart —
+# the database holds the path to each file, not the file itself.
 VOLUME ["/app/backend/data"]
 
+ENV NODE_ENV=production
 ENV PORT=4000
+
 EXPOSE 4000
 
 WORKDIR /app/backend
+
 CMD ["node", "server.js"]

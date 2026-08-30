@@ -1781,3 +1781,30 @@ input[type='checkbox']:indeterminate::after {
   .attention-row { flex-wrap: wrap; gap: 8px; }
   .attention-cta { display: none; }
 }
+
+/* --------------------- Stock sign-out sheet review ------------------------ */
+
+.sheet-lines .sheet-actions {
+  width: 104px;
+  text-align: right;
+  white-space: nowrap;
+  padding-right: 18px;
+}
+
+/* A line that needs a person sits on the sunk surface, so the eye lands on it
+   without any colour being spent. */
+.sheet-lines tr.row-attention > td { background: var(--surface-sunk); }
+
+.sheet-lines tr.row-editor > td {
+  padding: 0;
+  background: var(--surface-sunk);
+}
+.sheet-editor {
+  padding: 18px;
+  border-top: 1px solid var(--line);
+}
+.sheet-editor .field { margin-bottom: 10px; }
+.sheet-editor .intel-row.selected {
+  border-color: var(--ink);
+  background: var(--surface);
+}

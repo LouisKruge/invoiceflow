@@ -1541,10 +1541,223 @@ async function extractInvoice(
 // EXPORTS
 // ===========================================================================
 
+// ===========================================================================
+// GENERIC DOCUMENT EXTRACTION
+//
+// The invoice path above is one caller of the vision model, not the only one.
+// This exposes the same provider plumbing — key handling, MIME normalization,
+// base64 encoding, the request, and JSON recovery from a chatty response — for
+// any document and any prompt, so a second document type does not need a
+// second AI integration.
+// ===========================================================================
+
+/**
+ * Sends a document to the configured vision model and returns parsed JSON.
+ *
+ * @param {string} filePath
+ * @param {string} mimeType
+ * @param {string} prompt - must instruct the model to return only JSON
+ * @returns {Promise<{data: object, provider: string, model: string, raw: string}>}
+ */
+async function extractJsonFromDocument(filePath, mimeType, prompt) {
+
+  ensureFileExists(filePath);
+
+  const effectiveMimeType =
+    normalizeMimeType(filePath ? mimeType : null, filePath);
+
+  if (!effectiveMimeType) {
+    throw new Error(
+      'Unable to determine the document file type.'
+    );
+  }
+
+  if (!isSupportedMimeType(effectiveMimeType)) {
+    throw new Error(
+      `Unsupported document file type: ${effectiveMimeType}`
+    );
+  }
+
+  const base64 =
+    fs.readFileSync(filePath).toString('base64');
+
+  // -------------------------------------------------------------------------
+  // GEMINI
+  // -------------------------------------------------------------------------
+
+  if (PROVIDER === 'gemini') {
+
+    if (!GEMINI_API_KEY) {
+      throw new Error(
+        'AI_PROVIDER=gemini but GEMINI_API_KEY is missing from the server environment.'
+      );
+    }
+
+    const url =
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+        GEMINI_MODEL
+      )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+
+    const response =
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  inline_data: {
+                    mime_type: effectiveMimeType,
+                    data: base64
+                  }
+                },
+                { text: prompt }
+              ]
+            }
+          ],
+          generationConfig: {
+            temperature: 0,
+            responseMimeType: 'application/json'
+          }
+        })
+      });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+
+      throw new Error(
+        `Gemini returned ${response.status}: ${detail.slice(0, 300)}`
+      );
+    }
+
+    const payload = await response.json();
+
+    const text =
+      payload?.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || '')
+        .join('') || '';
+
+    if (!text.trim()) {
+      throw new Error('Gemini returned an empty response.');
+    }
+
+    return {
+      data: JSON.parse(cleanJsonResponse(text)),
+      provider: 'gemini',
+      model: GEMINI_MODEL,
+      raw: text
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // CLAUDE
+  // -------------------------------------------------------------------------
+
+  if (PROVIDER === 'claude') {
+
+    if (!CLAUDE_API_KEY) {
+      throw new Error(
+        'AI_PROVIDER=claude but ANTHROPIC_API_KEY is missing from the server environment.'
+      );
+    }
+
+    // Claude takes a PDF as a document block and everything else as an image.
+    const isPdf = effectiveMimeType === 'application/pdf';
+
+    const response =
+      await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': CLAUDE_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: CLAUDE_MODEL,
+          max_tokens: 8000,
+          temperature: 0,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: isPdf ? 'document' : 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: effectiveMimeType,
+                    data: base64
+                  }
+                },
+                { type: 'text', text: prompt }
+              ]
+            }
+          ]
+        })
+      });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+
+      throw new Error(
+        `Claude returned ${response.status}: ${detail.slice(0, 300)}`
+      );
+    }
+
+    const payload = await response.json();
+
+    const text =
+      (payload?.content || [])
+        .map((block) => block.text || '')
+        .join('');
+
+    if (!text.trim()) {
+      throw new Error('Claude returned an empty response.');
+    }
+
+    return {
+      data: JSON.parse(cleanJsonResponse(text)),
+      provider: 'claude',
+      model: CLAUDE_MODEL,
+      raw: text
+    };
+  }
+
+  throw new Error(
+    `Unsupported AI_PROVIDER: "${PROVIDER}". Use "gemini" or "claude".`
+  );
+}
+
+/**
+ * Which provider is configured, and whether it can actually be called.
+ */
+function providerStatus() {
+  return {
+    provider: PROVIDER,
+    configured:
+      PROVIDER === 'gemini'
+        ? Boolean(GEMINI_API_KEY)
+        : PROVIDER === 'claude'
+          ? Boolean(CLAUDE_API_KEY)
+          : false,
+    model:
+      PROVIDER === 'gemini'
+        ? GEMINI_MODEL
+        : PROVIDER === 'claude'
+          ? CLAUDE_MODEL
+          : null
+  };
+}
+
 module.exports = {
 
   extractInvoice,
 
-  REQUIRED_FIELDS
+  REQUIRED_FIELDS,
+
+  extractJsonFromDocument,
+
+  providerStatus
 
 };

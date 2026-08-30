@@ -1,168 +1,196 @@
 # InvoiceFlow
 
-Physical paper invoice → phone camera → AI extraction → validated data → approval → Excel export.
+Paper documents become validated, auditable data.
 
-A working MVP: Express + SQLite backend, vanilla-JS mobile-first frontend (no build step), AI extraction
-that runs on a realistic **mock provider out of the box** and swaps to live Claude vision extraction the
-moment you add an API key.
+An invoice is photographed, read by AI, checked, approved, and exported. A stock sign-out sheet is
+uploaded, read, matched against the product master, and — once a person approves it — deducted from
+stock. Everything that moves inventory goes through one ledger, so the quantity on screen can always be
+explained by the movements behind it.
+
+Express 5 + PostgreSQL backend, vanilla-JS frontend with no build step.
 
 ---
 
-## 1. Fastest path to a running pilot (today)
+## 1. Running it
 
-### Option A — plain Node (simplest, no Docker needed)
+Requires Node.js 20+ and a PostgreSQL database.
 
-Requires Node.js 20+.
+### Plain Node
 
 ```bash
 cd backend
-cp .env.example .env
+cp .env.example .env      # set DATABASE_URL and JWT_SECRET
 npm install
 npm start
 ```
 
-Open **http://localhost:4000**. On first boot the server automatically seeds three demo accounts and a
-handful of sample invoices — you don't need to run anything else.
+Open **http://localhost:4000**. The schema is created and migrated on every boot, so a new database
+needs no migration step.
 
-| Role       | Email                         | Password       |
-|------------|--------------------------------|----------------|
-| Admin      | admin@invoiceflow.demo         | admin123       |
-| Processor  | processor@invoiceflow.demo     | processor123   |
-| Reviewer   | reviewer@invoiceflow.demo      | reviewer123    |
+There is no demo data and there are no default accounts. The first person to register becomes the
+administrator; everyone who registers after that starts as a processor, and an administrator can change
+their role. To create that first account without a browser, set `ADMIN_NAME`, `ADMIN_EMAIL` and
+`ADMIN_PASSWORD` and run `node seed.js`.
 
-To put this in front of real users on a phone (not just your laptop), the simplest option is a tunnel:
+**Camera capture needs HTTPS** (or `localhost`) — browsers block `getUserMedia` on a plain `http://`
+address. For a phone test on your own network, a tunnel is the quickest way to get TLS:
 
 ```bash
 npx localtunnel --port 4000
-# or: ngrok http 4000
 ```
 
-**Camera capture needs HTTPS** (or `localhost`) — browsers block `getUserMedia` on plain `http://` from a
-non-localhost address. A tunnel gives you HTTPS for free. If you deploy behind your own domain, make sure
-it's served over TLS (see options B/C below, which both give you HTTPS automatically).
-
-### Option B — Docker (one command, portable to any VM)
+### Docker
 
 ```bash
 docker compose up -d --build
 ```
 
-Runs on port 4000, with invoice data and uploaded images persisted in a named volume
-(`invoiceflow-data`) so they survive container restarts. Set real values in a `.env` file next to
-`docker-compose.yml` (see `backend/.env.example` for the variables it reads) before running in front of
-anyone but yourself — at minimum change `JWT_SECRET`.
+Brings up PostgreSQL and the app together on port 4000. Uploaded documents live in the
+`invoiceflow-data` volume and the database in `invoiceflow-db`, so both survive a restart. Set real
+values in a `.env` file next to `docker-compose.yml` before anyone else uses it — at minimum
+`JWT_SECRET`.
 
-> Note: the Docker build wasn't run in the sandbox this was built in (no Docker daemon available there),
-> but the Dockerfile is a standard Node 20 + `better-sqlite3` build — same pattern used everywhere that
-> package ships. Worth a first local `docker compose up --build` before you rely on it for the pilot.
+To run against a database you already have, set `DATABASE_URL` and the `postgres` service is unused.
 
-### Option C — Render / Railway / Fly.io (a real public URL, HTTPS included)
+> The image builds Node 20 and installs from the lockfile — nothing compiles native code, and
+> `npm ci --omit=dev` was verified against this lockfile. The build itself has not been run here (this
+> sandbox has the Docker client but no daemon), so give `docker compose up --build` one local run before
+> relying on it.
 
-All three can deploy directly from this folder:
+### Render / Railway / Fly.io
 
-1. Push this project to a GitHub repo.
-2. Create a new **Web Service** (Render) or project (Railway/Fly) pointing at the repo.
-3. Build command: `cd backend && npm install`. Start command: `node backend/server.js` (a `Procfile` is
-   included for platforms that read one).
-4. Set environment variables from `backend/.env.example` in the platform's dashboard — at minimum
-   `JWT_SECRET`, and `ANTHROPIC_API_KEY` if you want live AI extraction rather than the mock.
-5. **Important:** SQLite writes to a local file (`backend/data/db/`) and uploaded images go to
-   `backend/data/uploads/`. Most of these platforms use ephemeral disks by default — attach a persistent
-   volume/disk to `backend/data` (Render has a "Disks" option; Railway has volumes) or your data will
-   disappear on redeploy. For a short pilot this may not matter; for anything longer, attach storage.
+1. Point a Web Service at this repository.
+2. Build: `cd backend && npm install`. Start: `node backend/server.js` (a `Procfile` is included).
+3. Set `DATABASE_URL` and `JWT_SECRET`, plus `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` for live
+   extraction. See `backend/.env.example` for everything that can be set.
+4. **Attach a disk at `backend/data`.** The database holds the path to each uploaded document, not the
+   document itself, so on an ephemeral filesystem the records survive a redeploy but the images do not.
 
 ---
 
-## 2. Turning on live AI extraction
+## 2. AI extraction
 
-Out of the box, `AI_PROVIDER=mock` in `.env` — every capture returns a realistic, varied sample
-extraction (with occasional low-confidence fields and one intentional VAT/total mismatch baked in about
-30% of the time) so you can demo the full workflow with zero external dependencies.
+`AI_PROVIDER` selects `gemini` (default), `claude`, or `mock`. With no key configured the app falls back
+to the mock extractor rather than failing, and the interface says which provider read a document.
 
-To extract real invoices with Claude:
+The same extraction path serves both invoices and stock sign-out sheets: `services/aiExtraction.js`
+exposes `extractInvoice()` for invoices and `extractJsonFromDocument()` for anything else that needs a
+document turned into JSON. Swapping in another vision provider means writing one function there; routes,
+validation and the database are untouched.
 
-```bash
-# in backend/.env
-ANTHROPIC_API_KEY=sk-ant-...
-AI_PROVIDER=claude
+A failed extraction is never silent. The invoice becomes a visible exception with a retry path, and a
+sign-out sheet is marked `FAILED` with the reason — and, in both cases, nothing is written to stock.
+
+---
+
+## 3. What it does
+
+### Invoices
+
+- Capture with the phone camera (guide frame, brightness warning) or upload a JPG/PNG/WEBP/PDF
+- AI extraction with per-field confidence, including the supplier account code (e.g. `EVE001`)
+- Validation: subtotal + VAT = total, duplicate detection, missing fields, VAT-rate sanity
+- Review screen with inline editing that re-validates on save, then approve or reject
+- Delete from the dashboard, the list, or the invoice itself (single or bulk, admin/reviewer only)
+- Full audit trail per invoice — uploaded → extracted → validated → edited → approved, with who and when
+- Search and filter across number, supplier, VAT number, PO number, account code and amount
+- Excel export: everything, a selection, or a date range, with a line-items sheet
+- Suppliers built from what has been captured, and spend reporting over them
+
+### Stock
+
+- **Product master** with a canonical product ID — descriptions differ between documents, IDs do not
+- **Import** an existing stock spreadsheet: columns are detected, you confirm the mapping, and each row
+  becomes an `OPENING_BALANCE` transaction rather than a number typed into a table
+- **Ledger** of every movement (`OPENING_BALANCE`, `PURCHASE_RECEIPT`, `STOCK_ISSUE`, `ADJUSTMENT`,
+  `TRANSFER`, `RETURN`, `WRITE_OFF`). Current stock is derived from it and can be re-derived at any time
+- **Approving an invoice** receipts its lines into stock automatically
+- **Stock sign-out sheets** — a photo, PDF, Excel or CSV of what was taken out — are read, matched and
+  validated, and deduct stock only once a person approves. Posting is all-or-nothing and idempotent:
+  one unresolved line blocks the sheet, and approving twice deducts once
+- **Review queue** for lines the matcher could not place confidently, and manual adjustments with a
+  reason for everything else
+- **Traceability**: a product's history lists every movement with a running balance, and each one links
+  back to the invoice or sign-out sheet it came from — and to that document itself
+
+Quantities are read, never guessed. "two" and "a dozen" resolve; "2/?" or anything illegible does not,
+and goes to a person instead. Confidence never overrides a hard rule: a 99%-confident match on a product
+that is not in the master is still rejected.
+
+---
+
+## 4. Architecture
+
+Stock follows one direction, and nothing skips a step:
+
+```
+DOCUMENT → EXTRACTION → PRODUCT MATCH → VALIDATION → APPROVAL → LEDGER → CURRENT STOCK
 ```
 
-If the Claude call fails for any reason (bad key, rate limit, network), the app automatically falls back
-to the mock extractor for that invoice and logs the error into the invoice's processing history — it
-never leaves the employee with a blank screen or a silent failure.
+`services/stockLedger.js` is the only writer of stock movements. It holds the negative-stock guard, the
+balance cache, and the idempotency gate that makes posting a document twice a no-op. Nothing else writes
+to `stock_transactions`, so those rules cannot be bypassed by adding a feature.
 
-Extraction lives entirely in `backend/services/aiExtraction.js` — the rest of the app only ever calls
-`extractInvoice(filePath, mimeType)` and reads back a normalized `{ fields, lineItems, confidence }`
-shape, so swapping in a different vision provider later means writing one new function, not touching
-routes, validation, or the database.
+Transactions and products also carry `syspro_stock_code`, `syspro_warehouse`,
+`syspro_transaction_reference`, `syspro_sync_status` and `syspro_sync_error`, so a later SYSPRO
+integration has somewhere to record itself without a schema change.
 
----
-
-## 3. What's implemented vs. what's scaffolded for later
-
-**Fully working today:**
-- Capture via live camera (with a scan-frame guide and a basic brightness warning) or file/PDF upload
-- AI extraction (mock + real Claude vision path), per-field confidence scores
-- Validation engine: subtotal+VAT=total check, duplicate detection (supplier+invoice number+total),
-  missing-field checks, VAT-rate sanity check
-- Review screen with inline editing (re-validates on save), approve/reject
-- Full audit trail per invoice (uploaded → extracted → validated → edited → approved, with actor + time)
-- Search/filter across invoice number, supplier, VAT number, PO number, amount; status filter chips
-- Excel export (all / selected / date range) with a Line Items sheet, via ExcelJS
-- Dashboard, Suppliers (auto-created from captured invoices), Reports (spend by supplier)
-- JWT auth, 3 roles (admin/processor/reviewer), role-gated approve/reject
-- Error handling: a failed extraction becomes a visible "exception" record with a retry/retake path,
-  never a silent failure
-
-**Scaffolded but intentionally not built out** (per the original spec — architecture is ready, features
-are not, so none of this requires a schema change later):
-- `purchase_orders` / `goods_received_notes` tables exist; PO *matching logic* is not implemented
-- Accounting/ERP integrations (Sage, Xero, QuickBooks, SAP, etc.), email/WhatsApp invoice intake
-- True computer-vision document edge detection / auto-crop / blur detection — the capture screen has a
-  visual guide frame and a simple brightness heuristic, not real CV
-- SQLite is used in place of PostgreSQL for zero-setup local/pilot use. The schema
-  (`backend/db.js`) is written in plain portable SQL specifically so this is a low-effort swap: replace
-  `better-sqlite3` with `pg`, change `AUTOINCREMENT`-style bits to `SERIAL`/`IDENTITY`, and nothing in
-  `routes/` or `services/` needs to change, since they only ever go through the query functions in `db.js`.
-
----
-
-## 4. Project layout
+### Layout
 
 ```
 invoiceflow/
 ├── backend/
-│   ├── server.js            entry point — also serves the frontend statically
-│   ├── db.js                SQLite schema (Postgres-portable) + connection
-│   ├── seed.js               demo users + sample invoices (auto-runs on first boot)
+│   ├── server.js             entry point — also serves the frontend
+│   ├── db.js                 PostgreSQL schema + idempotent migrations, run on every boot
+│   ├── seed.js               optional first-administrator setup (no demo data)
 │   ├── middleware/auth.js    JWT auth + role guard
 │   ├── services/
-│   │   ├── aiExtraction.js   Claude vision call + mock fallback (swap point for other providers)
-│   │   ├── validation.js     math/duplicate/missing-field/VAT checks
-│   │   └── exportExcel.js    ExcelJS workbook builder
+│   │   ├── aiExtraction.js   Gemini/Claude vision, for invoices and any other document
+│   │   ├── validation.js     math, duplicate, missing-field and VAT checks
+│   │   ├── exportExcel.js    ExcelJS workbook builder
+│   │   ├── stockLedger.js    the only writer of stock movements
+│   │   ├── productMatching.js  code/barcode/description matching with confidence
+│   │   ├── stockImport.js    spreadsheet reading and column mapping
+│   │   ├── stockSheet.js     sign-out sheets: read → match → validate → post
+│   │   └── invoiceStock.js   invoice approval → stock receipt
 │   └── routes/
-│       ├── auth.js, invoices.js, dashboard.js, suppliers.js, export.js
+│       └── auth.js, invoices.js, dashboard.js, suppliers.js, export.js, stock.js
 ├── frontend/
 │   ├── index.html
-│   ├── css/styles.css        design tokens + full stylesheet
+│   ├── css/styles.css        design tokens + stylesheet
 │   └── js/
 │       ├── api.js            fetch client
-│       ├── camera.js         live camera capture + native picker fallback
-│       ├── views.js          render functions (pure HTML string templates)
+│       ├── camera.js         live capture + native picker fallback
+│       ├── views.js          render functions (HTML string templates)
 │       └── app.js            router, state, event wiring
 ├── Dockerfile / docker-compose.yml / Procfile
 ```
 
+The frontend is four classic scripts loaded in order — no bundler, no build step. Editing a file and
+reloading is the whole development loop.
+
 ---
 
-## 5. Testing notes
+## 5. Not built
 
-The full workflow (login → capture → AI extraction → validation → review → edit → approve → Excel
-export) was exercised end-to-end during development: via direct API calls (curl) for every backend route,
-and via a scripted DOM test (jsdom, since this sandbox's outbound network wouldn't allow downloading a
-headless Chrome binary for Puppeteer) that drove the actual frontend JavaScript through login, every page
-route, an inline field edit, and a full approve action, with the browser's error console monitored
-throughout — it came back clean. That covers everything except the two truly native browser leaves —
-`getUserMedia` camera video and native file/camera picker dialogs — which need a real device to try before
-relying on them for the pilot. Worth 10 minutes of manual clicking through the whole flow on an actual
-phone before you hand this to employees.
+Deliberately left out, with the schema ready so none of it needs a migration later:
+
+- `purchase_orders` and `goods_received_notes` tables exist; PO matching logic does not
+- Accounting/ERP integrations (Sage, Xero, QuickBooks, SYSPRO), email or WhatsApp intake
+- Real document edge detection and auto-crop — capture has a guide frame and a brightness heuristic,
+  not computer vision
+
+---
+
+## 6. Testing
+
+Verified against real PostgreSQL and a real browser (Chromium via Playwright), not mocks: the API
+suite covers every route including role gating and delete permissions; the stock suite imports a
+spreadsheet, approves an invoice into stock and traces a product end to end; the sign-out suite covers
+a printed sheet, an unreadable quantity, an unknown product, insufficient stock, the same sheet twice,
+a multi-line sheet posting atomically, and a user correction being reused on the next document; and
+jsdom suites render every view and drive the router, delete flows, command palette and theme toggle.
+
+Two things need a real device before a pilot, because no test harness can reach them: `getUserMedia`
+camera video and the native file/camera picker. Ten minutes of clicking through capture on an actual
+phone is worth doing.

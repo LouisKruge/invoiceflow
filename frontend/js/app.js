@@ -331,6 +331,9 @@
 
     '#/stock/review':
       renderStockReviewPage,
+
+    '#/stock/signout':
+      renderStockSignOutPage,
   };
 
   let routerRunning =
@@ -500,6 +503,11 @@
     const stockTxMatch =
       hash.match(
         /^#\/stock\/transactions\/(.+)$/
+      );
+
+    const stockSheetMatch =
+      hash.match(
+        /^#\/stock\/signout\/(.+)$/
       );
 
     // -----------------------------------------------------------------------
@@ -754,6 +762,14 @@
           () =>
             renderStockTransactionDetailPage(
               stockTxMatch[1]
+            );
+
+      } else if (stockSheetMatch) {
+
+        routeHandler =
+          () =>
+            renderStockSheetPage(
+              stockSheetMatch[1]
             );
       }
     }
@@ -1381,6 +1397,9 @@ function bindInvoiceListEvents(container) {
     let stockReviewCount =
       0;
 
+    let stockSheetCount =
+      0;
+
     try {
       if (
         !hasFunction(
@@ -1400,6 +1419,7 @@ function bindInvoiceListEvents(container) {
         duplicateResponse,
         approvalResponse,
         stockReviewResponse,
+        stockSheetResponse,
       ] = await Promise.all([
         API.listInvoices({ status: 'exception' }),
         API.listInvoices({ status: 'duplicate' }),
@@ -1409,7 +1429,16 @@ function bindInvoiceListEvents(container) {
         hasFunction(API, 'listStockReview')
           ? API.listStockReview('pending').catch(() => ({ items: [] }))
           : Promise.resolve({ items: [] }),
+        hasFunction(API, 'stockSheetMetrics')
+          ? API.stockSheetMetrics().catch(() => ({ totals: {} }))
+          : Promise.resolve({ totals: {} }),
       ]);
+
+      // Sheets waiting on a person are the ones worth a badge; a failed
+      // document is equally stuck, so it counts too.
+      stockSheetCount =
+        Number(stockSheetResponse?.totals?.review || 0) +
+        Number(stockSheetResponse?.totals?.failed || 0);
 
       stockReviewCount =
         Array.isArray(stockReviewResponse?.items)
@@ -1485,6 +1514,7 @@ function bindInvoiceListEvents(container) {
       exceptions: exceptionsCount,
       approvals: approvalsCount,
       stockReview: stockReviewCount,
+      stockSheets: stockSheetCount,
     };
 
     root.innerHTML =
@@ -1496,6 +1526,7 @@ function bindInvoiceListEvents(container) {
         {
           approvals: approvalsCount,
           stockReview: stockReviewCount,
+          stockSheets: stockSheetCount,
         }
       );
 
@@ -1746,6 +1777,8 @@ function bindInvoiceListEvents(container) {
     { title: 'Adjust stock',          route: '#/stock/adjustments',  icon: 'adjust' },
     { title: 'Import stock',          route: '#/stock/import',       icon: 'importFile' },
     { title: 'Go to Stock Review',    route: '#/stock/review',       icon: 'review' },
+    { title: 'Go to Stock Sign-Out',  route: '#/stock/signout',      icon: 'signoutSheet' },
+    { title: 'Upload a sign-out sheet', route: '#/stock/signout',    icon: 'upload' },
     { title: 'Export invoices to Excel', action: 'export', icon: 'download' },
     { title: 'Toggle theme',      action: 'theme',       icon: 'moon' },
   ];
@@ -5099,6 +5132,7 @@ function bindInvoiceListEvents(container) {
   const StockState = {
     productFilters: { q: '', status: '', category: '', sort: '', order: '', page: 1 },
     txFilters: { q: '', type: '', page: 1 },
+    sheetFilters: { status: '' },
   };
 
   async function renderStockOverviewPage() {
@@ -5408,7 +5442,7 @@ function bindInvoiceListEvents(container) {
             };
         });
 
-      // Drill straight through to the invoice that caused a movement.
+      // Drill straight through to the document that caused a movement.
       content
         .querySelectorAll('[data-invoice-id]')
         .forEach((link) => {
@@ -5416,6 +5450,16 @@ function bindInvoiceListEvents(container) {
             (event) => {
               event.stopPropagation();
               location.hash = `#/invoices/${link.dataset.invoiceId}`;
+            };
+        });
+
+      content
+        .querySelectorAll('[data-sheet-link]')
+        .forEach((link) => {
+          link.onclick =
+            (event) => {
+              event.stopPropagation();
+              location.hash = `#/stock/signout/${link.dataset.sheetLink}`;
             };
         });
 
@@ -5550,6 +5594,15 @@ function bindInvoiceListEvents(container) {
           link.onclick =
             () => {
               location.hash = `#/invoices/${link.dataset.invoiceId}`;
+            };
+        });
+
+      content
+        .querySelectorAll('[data-sheet-link]')
+        .forEach((link) => {
+          link.onclick =
+            () => {
+              location.hash = `#/stock/signout/${link.dataset.sheetLink}`;
             };
         });
 
@@ -5991,6 +6044,716 @@ function bindInvoiceListEvents(container) {
 
     } catch (error) {
       handleApiError(error, 'Unable to load the stock review queue.');
+    }
+  }
+
+
+  // -------------------------------------------------------------------------
+  // Stock sign-out sheets
+  //
+  // Upload → the server reads the document in the background → the browser
+  // polls until it settles → a person resolves anything unclear → approving
+  // posts the stock issue. Nothing here deducts stock on its own.
+  // -------------------------------------------------------------------------
+
+  const SETTLED_SHEET_STATUSES = [
+    'READY',
+    'REVIEW_REQUIRED',
+    'EXTRACTED',
+    'POSTED',
+    'FAILED',
+    'CANCELLED',
+  ];
+
+  async function renderStockSignOutPage() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading sign-out sheets…</div>',
+        '#/stock/signout'
+      );
+
+    if (!mounted) return;
+
+    try {
+
+      const [metrics, list] =
+        await Promise.all([
+          API.stockSheetMetrics().catch(() => ({})),
+          API.listStockSheets({ status: StockState.sheetFilters.status || '' }),
+        ]);
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML =
+        renderStockSignOut({
+          metrics,
+          sheets: list.sheets || [],
+          filters: StockState.sheetFilters,
+        });
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-sheet-status]')
+        .forEach((chip) => {
+          chip.onclick =
+            () => {
+              StockState.sheetFilters.status = chip.dataset.sheetStatus;
+              renderStockSignOutPage();
+            };
+        });
+
+      content
+        .querySelectorAll('[data-sheet-id]')
+        .forEach((row) => {
+          row.onclick =
+            () => {
+              location.hash = `#/stock/signout/${row.dataset.sheetId}`;
+            };
+        });
+
+      bindSheetUpload();
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load the sign-out sheets.');
+    }
+  }
+
+  /**
+   * The upload zone. The file goes up, then the sheet's status is polled — the
+   * page never blocks while the document is being read.
+   */
+  function bindSheetUpload() {
+    const dropzone = document.getElementById('sheet-dropzone');
+    const stage = document.getElementById('sheet-stage');
+
+    if (!dropzone || !stage) return;
+
+    const fileInput = document.createElement('input');
+
+    fileInput.type = 'file';
+    fileInput.className = 'file-input-hidden';
+    fileInput.accept = '.pdf,.jpg,.jpeg,.png,.webp,.heic,.xlsx,.xls,.csv,.tsv';
+
+    document.body.appendChild(fileInput);
+
+    async function waitForSheet(sheetId) {
+      // The stages are indicative — the server reports only its status, so the
+      // bar advances while the document is being read and stops when it is.
+      let stageIndex = 1;
+
+      for (let attempt = 0; attempt < 90; attempt++) {
+
+        const { sheet } = await API.getStockSheet(sheetId);
+
+        if (SETTLED_SHEET_STATUSES.includes(sheet.status)) {
+          return sheet;
+        }
+
+        stageIndex = Math.min(stageIndex + 1, SHEET_STAGES.length - 1);
+
+        stage.innerHTML = renderSheetProcessing(stageIndex);
+
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+
+      return null;
+    }
+
+    async function upload(file, allowDuplicate) {
+      if (!file) return;
+
+      stage.innerHTML = renderSheetProcessing(0);
+
+      let created;
+
+      try {
+
+        created =
+          await API.uploadStockSheet(
+            file,
+            allowDuplicate ? { allow_duplicate: 'true' } : {}
+          );
+
+      } catch (error) {
+
+        if (error.duplicate) {
+          stage.innerHTML = '';
+
+          const original = error.duplicateOf || {};
+
+          const again =
+            await confirmDialog({
+              title: 'This stock sheet has already been processed',
+              body:
+                `The same document was uploaded as ${original.sheet_number || 'an earlier sheet'}` +
+                `${original.status ? ` (${original.status.toLowerCase().replace(/_/g, ' ')})` : ''}. ` +
+                'Uploading it again creates a second sheet, which would deduct ' +
+                'the same stock twice. Open the original instead?',
+              confirmLabel: 'Open the original',
+            });
+
+          if (again && original.id) {
+            location.hash = `#/stock/signout/${original.id}`;
+          }
+
+          return;
+        }
+
+        stage.innerHTML = '';
+        handleApiError(error, 'Unable to upload that sign-out sheet.');
+
+        return;
+      }
+
+      try {
+
+        const sheet = await waitForSheet(created.sheet.id);
+
+        if (!sheet) {
+          stage.innerHTML =
+            renderSheetProcessing(
+              0,
+              'This is taking longer than expected. The sheet is still being ' +
+              'read — open it from the list below in a moment.'
+            );
+
+          return;
+        }
+
+        if (sheet.status === 'FAILED') {
+          stage.innerHTML = renderSheetProcessing(0, sheet.error_message);
+
+          await refreshSheetList();
+
+          return;
+        }
+
+        location.hash = `#/stock/signout/${sheet.id}`;
+
+      } catch (error) {
+        stage.innerHTML = '';
+        handleApiError(error, 'Unable to read that sign-out sheet.');
+      }
+    }
+
+    async function refreshSheetList() {
+      try {
+        const list =
+          await API.listStockSheets({ status: StockState.sheetFilters.status || '' });
+
+        const tbody = document.querySelector('.data-table tbody');
+
+        if (tbody && list.sheets) {
+          await renderStockSignOutPage();
+        }
+      } catch (error) {
+        // The list is a convenience here; a failure to refresh it is not worth
+        // interrupting the person who has just uploaded a sheet.
+        console.warn('[SignOut] Could not refresh the sheet list:', error);
+      }
+    }
+
+    ['dragenter', 'dragover'].forEach((type) => {
+      dropzone.addEventListener(type, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        dropzone.classList.add('dragover');
+      });
+    });
+
+    ['dragleave', 'drop'].forEach((type) => {
+      dropzone.addEventListener(type, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (type === 'drop' || !dropzone.contains(event.relatedTarget)) {
+          dropzone.classList.remove('dragover');
+        }
+      });
+    });
+
+    dropzone.addEventListener('drop', (event) => {
+      upload(event.dataTransfer?.files?.[0], false);
+    });
+
+    fileInput.addEventListener('change', (event) => {
+      upload(event.target.files?.[0], false);
+      fileInput.value = '';
+    });
+
+    const select = document.getElementById('btn-select-sheet-doc');
+
+    if (select) {
+      select.onclick =
+        (event) => {
+          event.preventDefault();
+          fileInput.click();
+        };
+    }
+  }
+
+  // The line whose correction panel is open, kept out of the DOM so a repaint
+  // does not close it.
+  let openSheetRow = null;
+
+  async function renderStockSheetPage(id, opts = {}) {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading sign-out sheet…</div>',
+        '#/stock/signout'
+      );
+
+    if (!mounted) return;
+
+    let sheet;
+
+    try {
+      const response = await API.getStockSheet(id);
+
+      sheet = response.sheet;
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load that sign-out sheet.');
+
+      return;
+    }
+
+    await paintSheet(sheet, opts);
+
+    // A sheet uploaded from another tab, or re-read after a retry, is still
+    // being processed — keep looking until it settles.
+    if (sheet.status === 'UPLOADED' || sheet.status === 'PROCESSING') {
+      for (let attempt = 0; attempt < 90; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        if (!location.hash.includes(id)) return;
+
+        const { sheet: latest } = await API.getStockSheet(id);
+
+        if (SETTLED_SHEET_STATUSES.includes(latest.status)) {
+          await paintSheet(latest, opts);
+
+          return;
+        }
+      }
+    }
+  }
+
+  async function paintSheet(sheet, opts = {}) {
+    const content = document.querySelector('.content');
+
+    if (!content) return;
+
+    content.innerHTML =
+      renderStockSheetDetail(sheet, {
+        ...opts,
+        expandedRow: openSheetRow,
+      });
+
+    bindShellEvents();
+
+    await mountSheetDocumentViewer(sheet);
+
+    bindSheetHeader(sheet);
+    bindSheetRows(sheet);
+    bindSheetDecisions(sheet);
+  }
+
+  async function mountSheetDocumentViewer(sheet) {
+    const stage = document.getElementById('doc-stage');
+
+    if (!stage) return;
+
+    let url;
+
+    try {
+      url = await API.fetchStockSheetBlob(sheet.id);
+    } catch (error) {
+      stage.innerHTML = '<div class="doc-empty">Could not load the document</div>';
+
+      return;
+    }
+
+    if (!url) {
+      stage.innerHTML = '<div class="doc-empty">No document on file</div>';
+
+      return;
+    }
+
+    const isImage = stage.dataset.image === '1';
+
+    if (isImage) {
+      stage.innerHTML = `<img id="doc-image" src="${url}" alt="Sign-out sheet" />`;
+    } else if (stage.dataset.pdf === '1') {
+      stage.style.padding = '0';
+      stage.innerHTML = `<iframe src="${url}" title="Sign-out sheet"></iframe>`;
+    } else {
+      // A spreadsheet has nothing to show, but it can still be downloaded — and
+      // an empty 620px panel beside the fields helps nobody.
+      stage.style.height = '180px';
+
+      stage.innerHTML =
+        `<div class="doc-empty">
+           ${esc(sheet.filename || 'Spreadsheet')} — download it to open the original
+         </div>`;
+    }
+
+    const image = document.getElementById('doc-image');
+    const zoomLabel = document.getElementById('doc-zoom-label');
+
+    let zoom = 1;
+    let rotation = 0;
+
+    function applyTransform() {
+      if (!image) return;
+
+      image.style.width = `${zoom * 100}%`;
+      image.style.transform = `rotate(${rotation}deg)`;
+
+      if (zoomLabel) zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+    }
+
+    if (image) {
+      image.style.width = '100%';
+      applyTransform();
+    }
+
+    const zoomIn = document.getElementById('doc-zoom-in');
+    const zoomOut = document.getElementById('doc-zoom-out');
+    const rotate = document.getElementById('doc-rotate');
+    const download = document.getElementById('doc-download');
+
+    [zoomIn, zoomOut, rotate].forEach((button) => {
+      if (button) button.disabled = !image;
+    });
+
+    if (zoomIn) {
+      zoomIn.onclick = () => { zoom = Math.min(4, zoom + 0.25); applyTransform(); };
+    }
+
+    if (zoomOut) {
+      zoomOut.onclick = () => { zoom = Math.max(0.5, zoom - 0.25); applyTransform(); };
+    }
+
+    if (rotate) {
+      rotate.onclick = () => { rotation = (rotation + 90) % 360; applyTransform(); };
+    }
+
+    if (download) {
+      download.onclick =
+        () => {
+          const link = document.createElement('a');
+
+          link.href = url;
+          link.download = sheet.filename || `${sheet.sheet_number}-document`;
+
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+        };
+    }
+  }
+
+  function bindSheetHeader(sheet) {
+    const save = document.getElementById('btn-save-sheet-header');
+
+    if (!save) return;
+
+    save.onclick =
+      async () => {
+        const fields = {};
+
+        document
+          .querySelectorAll('.sheet-header-field')
+          .forEach((input) => {
+            fields[input.dataset.field] = input.value.trim();
+          });
+
+        save.disabled = true;
+
+        try {
+
+          const response = await API.updateStockSheet(sheet.id, fields);
+
+          toast('Sheet details saved', 'success');
+
+          await paintSheet(response.sheet);
+
+        } catch (error) {
+          save.disabled = false;
+          handleApiError(error, 'Unable to save the sheet details.');
+        }
+      };
+  }
+
+  function bindSheetRows(sheet) {
+    const content = document.querySelector('.content');
+
+    if (!content) return;
+
+    content
+      .querySelectorAll('[data-fix-row]')
+      .forEach((button) => {
+        button.onclick =
+          async () => {
+            const rowId = button.dataset.fixRow;
+
+            openSheetRow = openSheetRow === rowId ? null : rowId;
+
+            await paintSheet(sheet);
+          };
+      });
+
+    if (!openSheetRow) return;
+
+    const search = document.getElementById(`row-search-${openSheetRow}`);
+    const results = document.getElementById(`row-results-${openSheetRow}`);
+
+    if (search && results) {
+      let timer = null;
+
+      search.oninput =
+        () => {
+          clearTimeout(timer);
+
+          const term = search.value.trim();
+
+          if (term.length < 2) return;
+
+          timer =
+            setTimeout(
+              async () => {
+                try {
+
+                  const found = await API.listProducts({ q: term, limit: 8 });
+
+                  results.innerHTML =
+                    (found.products || []).length
+                      ? found.products.map((p) => `
+                          <label class="intel-row" style="cursor:pointer;align-items:center;">
+                            <input
+                              type="radio"
+                              name="sheet-row-${esc(openSheetRow)}"
+                              value="${esc(p.id)}"
+                              style="width:14px;height:14px;margin-right:2px;"
+                            />
+                            <div style="flex:1;min-width:0;">
+                              <div class="title">${esc(p.description)}</div>
+                              <div class="detail">
+                                ${esc(p.sku || 'No SKU')} · ${fmtQty(p.current_quantity)} in stock
+                              </div>
+                            </div>
+                          </label>
+                        `).join('')
+                      : '<div class="cell-muted" style="font-size:13px;">No products match that search.</div>';
+
+                } catch (error) {
+                  console.warn('[SignOut] Product search failed:', error);
+                }
+              },
+              250
+            );
+        };
+    }
+
+    const save = document.getElementById(`row-qty-${openSheetRow}`)
+      ? content.querySelector(`[data-save-row="${openSheetRow}"]`)
+      : null;
+
+    if (save) {
+      save.onclick =
+        async () => {
+          const rowId = save.dataset.saveRow;
+
+          const chosen =
+            content.querySelector(`input[name="sheet-row-${rowId}"]:checked`);
+
+          const quantityInput = document.getElementById(`row-qty-${rowId}`);
+
+          const fields = {};
+
+          if (chosen) fields.product_id = chosen.value;
+
+          if (quantityInput && quantityInput.value !== '') {
+            const quantity = Number(quantityInput.value);
+
+            if (!Number.isFinite(quantity) || quantity <= 0) {
+              toast('Enter a quantity greater than zero.', 'error');
+
+              return;
+            }
+
+            fields.quantity = quantity;
+          }
+
+          if (!Object.keys(fields).length) {
+            toast('Choose a product or type a quantity first.', 'error');
+
+            return;
+          }
+
+          save.disabled = true;
+
+          try {
+
+            const response = await API.updateStockSheetRow(sheet.id, rowId, fields);
+
+            openSheetRow = null;
+
+            toast('Line corrected', 'success');
+
+            await paintSheet(response.sheet);
+
+          } catch (error) {
+            save.disabled = false;
+            handleApiError(error, 'Unable to correct that line.');
+          }
+        };
+    }
+
+    content
+      .querySelectorAll('[data-exclude-row]')
+      .forEach((button) => {
+        button.onclick =
+          async () => {
+            const rowId = button.dataset.excludeRow;
+
+            const row = (sheet.rows || []).find((r) => r.id === rowId);
+
+            const excluding = !row || row.status !== 'EXCLUDED';
+
+            button.disabled = true;
+
+            try {
+
+              const response =
+                await API.updateStockSheetRow(sheet.id, rowId, { excluded: excluding });
+
+              openSheetRow = null;
+
+              toast(
+                excluding
+                  ? 'Line excluded — no stock will move for it'
+                  : 'Line put back on the sheet',
+                'success'
+              );
+
+              await paintSheet(response.sheet);
+
+            } catch (error) {
+              button.disabled = false;
+              handleApiError(error, 'Unable to update that line.');
+            }
+          };
+      });
+  }
+
+  function bindSheetDecisions(sheet) {
+    const approve = document.getElementById('btn-approve-sheet');
+
+    if (approve) {
+      approve.onclick =
+        async () => {
+          const included =
+            (sheet.rows || []).filter((r) => r.status !== 'EXCLUDED');
+
+          const units =
+            included.reduce((sum, r) => sum + Number(r.quantity || 0), 0);
+
+          const confirmed =
+            await confirmDialog({
+              title: 'Deduct this stock?',
+              body:
+                `${included.length} line${included.length === 1 ? '' : 's'} ` +
+                `totalling ${units} unit${units === 1 ? '' : 's'} will be issued ` +
+                `out of stock against ${sheet.sheet_number}. This posts to the ` +
+                'ledger and cannot be undone except by an adjustment.',
+              confirmLabel: 'Approve & deduct stock',
+            });
+
+          if (!confirmed) return;
+
+          approve.disabled = true;
+
+          try {
+
+            const result = await API.approveStockSheet(sheet.id);
+
+            toast(
+              `Stock issue posted — ${result.transaction_count} movement${result.transaction_count === 1 ? '' : 's'}`,
+              'success'
+            );
+
+            openSheetRow = null;
+
+            await paintSheet(result.sheet);
+
+          } catch (error) {
+            approve.disabled = false;
+
+            // A blocked posting is not a failure to report as an error: the
+            // sheet says exactly which lines are in the way.
+            handleApiError(error, 'This sheet could not be posted.');
+
+            await renderStockSheetPage(sheet.id);
+          }
+        };
+    }
+
+    const cancel = document.getElementById('btn-cancel-sheet');
+
+    if (cancel) {
+      cancel.onclick =
+        async () => {
+          const confirmed =
+            await confirmDialog({
+              title: 'Cancel this sheet?',
+              body:
+                'The sheet stays on file for the record but will never post ' +
+                'stock. No stock has moved for it.',
+              confirmLabel: 'Cancel sheet',
+              danger: true,
+            });
+
+          if (!confirmed) return;
+
+          try {
+
+            const result = await API.cancelStockSheet(sheet.id);
+
+            toast('Sheet cancelled', 'success');
+
+            await paintSheet(result.sheet);
+
+          } catch (error) {
+            handleApiError(error, 'Unable to cancel that sheet.');
+          }
+        };
+    }
+
+    const retry = document.getElementById('btn-retry-sheet');
+
+    if (retry) {
+      retry.onclick =
+        async () => {
+          retry.disabled = true;
+
+          try {
+
+            await API.retryStockSheet(sheet.id);
+
+            toast('Reading the document again…', 'success');
+
+            await renderStockSheetPage(sheet.id);
+
+          } catch (error) {
+            retry.disabled = false;
+            handleApiError(error, 'Unable to read that sheet again.');
+          }
+        };
     }
   }
 

@@ -1196,6 +1196,171 @@
     return body;
   }
 
+  // ---------------------------------------------------------------------------
+  // STOCK SIGN-OUT SHEETS
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Uploads a sign-out sheet. The server reads it in the background, so the
+   * caller polls getStockSheet() until the status settles.
+   */
+  async function uploadStockSheet(file, fields = {}) {
+    if (!token()) {
+      invalidateSession();
+
+      return Promise.reject(
+        new Error('Your session has expired. Please sign in again.')
+      );
+    }
+
+    const form = new FormData();
+
+    form.append('file', file);
+
+    Object.entries(fields).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        form.append(key, value);
+      }
+    });
+
+    const response =
+      await fetch(`${BASE}/stock/sheets`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token()}` },
+        body: form,
+      });
+
+    if (response.status === 401) {
+      invalidateSession();
+
+      throw new Error('Your session has expired. Please sign in again.');
+    }
+
+    const body = await response.json().catch(() => ({}));
+
+    if (response.status === 409) {
+      // The same document has already been uploaded. The caller decides
+      // whether to upload it again anyway.
+      const duplicate = new Error(body.error || 'This sheet has already been processed.');
+
+      duplicate.duplicate = true;
+      duplicate.duplicateOf = body.duplicate_of || null;
+
+      throw duplicate;
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        body.error ||
+        (response.status === 403
+          ? 'You do not have permission to upload sign-out sheets.'
+          : 'Unable to read that sign-out sheet.')
+      );
+    }
+
+    return body;
+  }
+
+  async function listStockSheets(params = {}) {
+    return request(`/stock/sheets${stockQuery(params)}`);
+  }
+
+  async function stockSheetMetrics() {
+    return request('/stock/sheets/metrics');
+  }
+
+  async function getStockSheet(id) {
+    if (!id) throw new Error('Sheet ID is required.');
+
+    return request(`/stock/sheets/${encodeURIComponent(id)}`);
+  }
+
+  async function updateStockSheet(id, fields) {
+    if (!id) throw new Error('Sheet ID is required.');
+
+    return request(`/stock/sheets/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(fields || {}),
+    });
+  }
+
+  async function updateStockSheetRow(sheetId, rowId, fields) {
+    if (!sheetId || !rowId) throw new Error('Sheet and line IDs are required.');
+
+    return request(
+      `/stock/sheets/${encodeURIComponent(sheetId)}/rows/${encodeURIComponent(rowId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(fields || {}),
+      }
+    );
+  }
+
+  async function approveStockSheet(id) {
+    if (!id) throw new Error('Sheet ID is required.');
+
+    return request(`/stock/sheets/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+    });
+  }
+
+  async function cancelStockSheet(id, reason) {
+    if (!id) throw new Error('Sheet ID is required.');
+
+    return request(`/stock/sheets/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason || null }),
+    });
+  }
+
+  async function retryStockSheet(id) {
+    if (!id) throw new Error('Sheet ID is required.');
+
+    return request(`/stock/sheets/${encodeURIComponent(id)}/retry`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * The sheet's own document, as a blob URL. The endpoint needs the bearer
+   * token, so it cannot simply be pointed at from an <img> tag.
+   */
+  async function fetchStockSheetBlob(id) {
+    const currentToken = token();
+
+    if (!currentToken) {
+      invalidateSession();
+
+      return null;
+    }
+
+    let response;
+
+    try {
+      response =
+        await fetch(
+          `${BASE}/stock/sheets/${encodeURIComponent(id)}/document`,
+          { headers: { Authorization: `Bearer ${currentToken}` } }
+        );
+    } catch (error) {
+      throw new Error(
+        'Unable to load the sign-out sheet. Please check your connection.'
+      );
+    }
+
+    if (response.status === 401) {
+      invalidateSession();
+
+      throw new Error('Your session has expired. Please sign in again.');
+    }
+
+    if (!response.ok) {
+      throw new Error(`Unable to load the document (${response.status}).`);
+    }
+
+    return URL.createObjectURL(await response.blob());
+  }
+
   async function commitStockImport(importId, body) {
     if (!importId) throw new Error('Import ID is required.');
 
@@ -1500,6 +1665,18 @@
     listStockImports,
     uploadStockImport,
     commitStockImport,
+
+    // Stock sign-out sheets
+    uploadStockSheet,
+    listStockSheets,
+    stockSheetMetrics,
+    getStockSheet,
+    updateStockSheet,
+    updateStockSheetRow,
+    approveStockSheet,
+    cancelStockSheet,
+    retryStockSheet,
+    fetchStockSheetBlob,
 
     // Exports
     exportAllUrl,

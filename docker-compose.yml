@@ -1,21 +1,52 @@
-version: "3.8"
+# A complete local InvoiceFlow: the app plus the PostgreSQL it needs.
+#
+# In production you would usually drop the `postgres` service and point
+# DATABASE_URL at a managed database instead.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: invoiceflow-db
+    environment:
+      - POSTGRES_USER=invoiceflow
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-invoiceflow}
+      - POSTGRES_DB=invoiceflow
+    volumes:
+      - invoiceflow-db:/var/lib/postgresql/data
+    # The app creates its schema on boot, so it must not start until the
+    # database is actually accepting connections.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invoiceflow -d invoiceflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   invoiceflow:
     build: .
     container_name: invoiceflow
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "4000:4000"
     environment:
       - PORT=4000
+      # sslmode=disable because this database is on the compose network, not
+      # across the internet. A managed database needs SSL left on.
+      - DATABASE_URL=${DATABASE_URL:-postgresql://invoiceflow:${POSTGRES_PASSWORD:-invoiceflow}@postgres:5432/invoiceflow?sslmode=disable}
       - JWT_SECRET=${JWT_SECRET:-change-me-to-a-long-random-string}
+      - AI_PROVIDER=${AI_PROVIDER:-gemini}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
-      - AI_PROVIDER=${AI_PROVIDER:-mock}
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.85}
+      - STOCK_ALLOW_NEGATIVE=${STOCK_ALLOW_NEGATIVE:-false}
     volumes:
       - invoiceflow-data:/app/backend/data
     restart: unless-stopped
 
 volumes:
+  invoiceflow-db:
   invoiceflow-data:

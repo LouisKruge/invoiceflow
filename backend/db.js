@@ -732,6 +732,176 @@ async function initializeDatabase() {
       ON document_product_matches(COALESCE(supplier_id, ''), normalized_text);
   `);
 
+  // -------------------------------------------------------------------------
+  // STOCK SIGN-OUT SHEETS
+  //
+  // A physical sign-out sheet is a stock issue event. The sheet is captured
+  // and extracted first; stock only moves when a person approves it. The two
+  // stages are deliberately separate tables of state so a half-read document
+  // can never deduct anything.
+  // -------------------------------------------------------------------------
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stock_sheets (
+      id TEXT PRIMARY KEY,
+
+      -- Human reference, SI-000184 style.
+      sheet_number TEXT NOT NULL UNIQUE,
+
+      filename TEXT,
+      mime_type TEXT,
+      file_path TEXT,
+      file_hash TEXT,
+
+      status TEXT NOT NULL DEFAULT 'UPLOADED' CHECK (
+        status IN (
+          'UPLOADED',
+          'PROCESSING',
+          'EXTRACTED',
+          'REVIEW_REQUIRED',
+          'READY',
+          'POSTED',
+          'FAILED',
+          'CANCELLED'
+        )
+      ),
+
+      -- Header fields read off the sheet.
+      employee_name TEXT,
+      job_reference TEXT,
+      department TEXT,
+      vehicle TEXT,
+      issue_date TEXT,
+      notes TEXT,
+
+      header_confidence TEXT,
+
+      location_id TEXT,
+
+      extraction_provider TEXT,
+      extraction_model TEXT,
+      extraction_source TEXT,
+      ai_raw_response TEXT,
+
+      row_count INTEGER NOT NULL DEFAULT 0,
+      matched_count INTEGER NOT NULL DEFAULT 0,
+      review_count INTEGER NOT NULL DEFAULT 0,
+      total_quantity NUMERIC NOT NULL DEFAULT 0,
+
+      error_message TEXT,
+
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      posted_by TEXT,
+      posted_at TIMESTAMPTZ,
+
+      FOREIGN KEY (location_id)
+        REFERENCES stock_locations(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (created_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (posted_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS stock_sheet_rows (
+      id TEXT PRIMARY KEY,
+      sheet_id TEXT NOT NULL,
+      row_number INTEGER NOT NULL,
+
+      -- Exactly what the document said, kept verbatim so a correction can
+      -- always be compared against the original reading.
+      raw_product_code TEXT,
+      raw_description TEXT,
+      raw_quantity TEXT,
+      raw_unit TEXT,
+      raw_notes TEXT,
+
+      quantity NUMERIC,
+      unit_of_measure TEXT,
+
+      product_id TEXT,
+      match_confidence NUMERIC,
+      match_method TEXT,
+      quantity_confidence NUMERIC,
+      candidates TEXT,
+
+      -- Stock position captured at validation, so the review screen can show
+      -- what the issue will do before anyone approves it.
+      stock_before NUMERIC,
+      stock_after NUMERIC,
+
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (
+        status IN (
+          'PENDING',
+          'MATCHED',
+          'REVIEW_REQUIRED',
+          'INSUFFICIENT_STOCK',
+          'RESOLVED',
+          'EXCLUDED',
+          'POSTED'
+        )
+      ),
+
+      issue TEXT,
+
+      transaction_id TEXT,
+
+      corrected_by TEXT,
+      corrected_at TIMESTAMPTZ,
+
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (sheet_id)
+        REFERENCES stock_sheets(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE SET NULL,
+
+      FOREIGN KEY (corrected_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sheets_status ON stock_sheets(status);
+    CREATE INDEX IF NOT EXISTS idx_sheets_created ON stock_sheets(created_at);
+    CREATE INDEX IF NOT EXISTS idx_sheets_employee ON stock_sheets(employee_name);
+    CREATE INDEX IF NOT EXISTS idx_sheets_job ON stock_sheets(job_reference);
+    CREATE INDEX IF NOT EXISTS idx_sheet_rows_sheet ON stock_sheet_rows(sheet_id);
+    CREATE INDEX IF NOT EXISTS idx_sheet_rows_product ON stock_sheet_rows(product_id);
+    CREATE INDEX IF NOT EXISTS idx_sheet_rows_status ON stock_sheet_rows(status);
+
+    -- The same physical document uploaded twice should be recognised before it
+    -- can be posted a second time.
+    CREATE INDEX IF NOT EXISTS idx_sheets_hash ON stock_sheets(file_hash);
+  `);
+
+  // SYSPRO handshake fields. InvoiceFlow owns the ledger today; these carry the
+  // mapping and sync state so a later SYSPRO integration does not require a
+  // schema migration on a table that by then holds live history.
+  await pool.query(`
+    ALTER TABLE stock_transactions
+      ADD COLUMN IF NOT EXISTS syspro_stock_code TEXT,
+      ADD COLUMN IF NOT EXISTS syspro_warehouse TEXT,
+      ADD COLUMN IF NOT EXISTS syspro_transaction_reference TEXT,
+      ADD COLUMN IF NOT EXISTS syspro_sync_status TEXT DEFAULT 'NOT_SYNCED',
+      ADD COLUMN IF NOT EXISTS syspro_sync_error TEXT;
+
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS syspro_stock_code TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_tx_syspro_status
+      ON stock_transactions(syspro_sync_status);
+  `);
+
   // Line items carry their resolved product so an invoice can be re-examined
   // later without re-running the matcher.
   await pool.query(`
