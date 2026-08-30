@@ -2593,11 +2593,17 @@ const STOCK_FILTERS = [
   ['OUT_OF_STOCK', 'Out of stock'],
 ];
 
+function groupLabel(name) {
+  if (!name || name === 'UNGROUPED') return 'Not grouped';
+
+  return String(name);
+}
+
 function renderProducts(data, filters) {
   const products = data.products || [];
+  const groups = data.groups || [];
 
-  const rows = products
-    .map(p => `
+  const productRow = (p) => `
       <tr class="clickable" data-product-id="${esc(p.id)}">
         <td class="cell-id">${esc(p.sku || p.product_code || '—')}</td>
         <td class="cell-strong">${esc(p.description)}</td>
@@ -2613,8 +2619,38 @@ function renderProducts(data, filters) {
         <td>${stockStatusMark(p.stock_status)}</td>
         <td class="cell-muted">${esc(p.last_movement_at ? timeAgo(p.last_movement_at) : '—')}</td>
       </tr>
-    `)
-    .join('');
+    `;
+
+  // With no group chosen the table is not one long list: each stock list gets
+  // its own heading, so consumables and fittings read as separate things even
+  // when they are on screen together.
+  const rows =
+    filters.group || groups.length < 2
+      ? products.map(productRow).join('')
+      : (() => {
+          const order = [];
+          const buckets = new Map();
+
+          products.forEach((p) => {
+            const key = p.stock_group || 'UNGROUPED';
+
+            if (!buckets.has(key)) {
+              buckets.set(key, []);
+              order.push(key);
+            }
+
+            buckets.get(key).push(p);
+          });
+
+          return order
+            .map((key) => `
+              <tr class="group-row">
+                <td colspan="11">${esc(groupLabel(key))}</td>
+              </tr>
+              ${buckets.get(key).map(productRow).join('')}
+            `)
+            .join('');
+        })();
 
   const categoryOptions =
     (data.categories || [])
@@ -2627,7 +2663,7 @@ function renderProducts(data, filters) {
       <h1>Products</h1>
       <p class="sub">
         ${data.total ?? products.length} product${(data.total ?? products.length) === 1 ? '' : 's'}
-        on the product master.
+        ${filters.group ? `in ${esc(groupLabel(filters.group))}` : 'on the product master'}.
       </p>
     </div>
 
@@ -2657,6 +2693,25 @@ function renderProducts(data, filters) {
       ${categoryOptions}
     </select>
   </div>
+
+  ${
+    groups.length > 1
+      ? `
+        <div class="filter-row group-row-filters">
+          <button
+            class="filter-chip ${!filters.group ? 'active' : ''}"
+            data-stock-group=""
+          >All stock</button>
+          ${groups.map(g => `
+            <button
+              class="filter-chip ${filters.group === g.name ? 'active' : ''}"
+              data-stock-group="${esc(g.name)}"
+            >${esc(groupLabel(g.name))} <span class="chip-count">${g.product_count}</span></button>
+          `).join('')}
+        </div>
+      `
+      : ''
+  }
 
   <div class="filter-row">
     ${STOCK_FILTERS.map(([v, l]) => `
@@ -2812,6 +2867,10 @@ function renderProductDetail(detail, history) {
     <div class="item">
       <div class="l">Reorder level</div>
       <div class="v">${product.reorder_level || 0}</div>
+    </div>
+    <div class="item">
+      <div class="l">Group</div>
+      <div class="v">${esc(product.stock_group || '—')}</div>
     </div>
     <div class="item">
       <div class="l">${(detail.bins || []).length > 1 ? 'Bins' : 'Bin'}</div>
@@ -3315,6 +3374,21 @@ function renderImportMapping(inspection) {
           </thead>
           <tbody>${headerRows}</tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;padding:14px 18px;">
+      <div class="field" style="margin-bottom:0;max-width:420px;">
+        <label>Stock group for this sheet</label>
+        <input
+          id="import-stock-group"
+          placeholder="e.g. Consumable Stock, Fitting Stock"
+        />
+        <div class="cell-muted" style="font-size:12px;margin-top:6px;">
+          A store keeps its stock as separate lists. Name this one and its
+          products stay grouped under it, instead of joining one long list.
+          Leave it blank if the sheet has a stock group column of its own.
+        </div>
       </div>
     </div>
 
