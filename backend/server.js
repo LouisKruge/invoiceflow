@@ -59,67 +59,93 @@ const BUILD = (() => {
   };
 })();
 
+// Whether the schema is ready to be served.
+//
+// The port is opened before the database is touched. A migration that has to
+// wait — for a lock held by the instance being replaced, most of all — used to
+// mean no port, which a host reads as a service that failed to start: the
+// deploy is rolled back, the old instance keeps its lock, and the next attempt
+// waits on the same thing. Listening first breaks that circle, and the API
+// says plainly that it is not ready yet rather than answering with half a
+// schema.
+const SCHEMA = {
+  state: 'starting',
+  error: null,
+  attempts: 0,
+};
+
+/**
+ * Brings the schema up, retrying for as long as it takes.
+ *
+ * Each attempt fails fast rather than hanging, so a lock held elsewhere costs
+ * a few seconds and a retry instead of the whole deploy.
+ */
+async function prepareDatabase() {
+  for (let attempt = 1; ; attempt++) {
+    SCHEMA.attempts = attempt;
+
+    try {
+
+      console.log(
+        `[server] Initializing database (attempt ${attempt})...`
+      );
+
+      await db.testConnection();
+
+      await db.initializeDatabase();
+
+      console.log('[server] Database initialization complete.');
+
+      const userCount =
+        await db.get('SELECT COUNT(*)::int AS count FROM users');
+
+      if (Number(userCount.count) === 0) {
+        console.log(
+          'No users found — running first-boot administrator setup...'
+        );
+
+        try {
+          const seed = require('./seed');
+
+          if (seed && typeof seed.runSeed === 'function') {
+            await seed.runSeed();
+          } else {
+            console.log('[server] seed.runSeed() is not available.');
+          }
+        } catch (seedError) {
+          console.error('[server] First-boot seed failed:', seedError);
+          console.log('[server] Continuing without seed data.');
+        }
+      } else {
+        console.log(`[server] Existing users found: ${userCount.count}`);
+      }
+
+      SCHEMA.state = 'ready';
+      SCHEMA.error = null;
+
+      return;
+
+    } catch (error) {
+      SCHEMA.state = 'migrating';
+      SCHEMA.error = error.message;
+
+      console.error(
+        `[server] Database initialization failed (attempt ${attempt}): ${error.message}`
+      );
+
+      // Backing off to a minute, so a database that is down for a while does
+      // not turn into a log full of the same line.
+      const wait = Math.min(attempt * 5000, 60000);
+
+      console.log(`[server] Retrying in ${Math.round(wait / 1000)}s.`);
+
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+
 async function startServer() {
   try {
-    // -----------------------------------------------------------------------
-    // DATABASE
-    // -----------------------------------------------------------------------
-
-    console.log('[server] Initializing database...');
-
-    await db.testConnection();
-
-    await db.initializeDatabase();
-
-    console.log(
-      '[server] Database initialization complete.'
-    );
-
-    // -----------------------------------------------------------------------
-    // FIRST BOOT
-    // -----------------------------------------------------------------------
-
-    const userCount = await db.get(
-      `
-        SELECT COUNT(*)::int AS count
-        FROM users
-      `
-    );
-
-    if (Number(userCount.count) === 0) {
-      console.log(
-        'No users found — running first-boot administrator setup...'
-      );
-
-      try {
-        const seed = require('./seed');
-
-        if (
-          seed &&
-          typeof seed.runSeed === 'function'
-        ) {
-          await seed.runSeed();
-        } else {
-          console.log(
-            '[server] seed.runSeed() is not available.'
-          );
-        }
-      } catch (seedError) {
-        console.error(
-          '[server] First-boot seed failed:',
-          seedError
-        );
-
-        console.log(
-          '[server] Continuing without seed data.'
-        );
-      }
-    } else {
-      console.log(
-        `[server] Existing users found: ${userCount.count}`
-      );
-    }
-
     // -----------------------------------------------------------------------
     // ROUTES
     // -----------------------------------------------------------------------
@@ -146,6 +172,21 @@ async function startServer() {
     // -----------------------------------------------------------------------
     // API ROUTES
     // -----------------------------------------------------------------------
+
+    // Answering with half a schema is worse than saying "not yet". Health is
+    // exempt, so a person can see what the server is waiting on.
+    app.use('/api', (req, res, next) => {
+      if (SCHEMA.state === 'ready' || req.path === '/health') {
+        return next();
+      }
+
+      return res.status(503).json({
+        error:
+          'InvoiceFlow is finishing a database update. Try again in a moment.',
+        schema: SCHEMA.state,
+        detail: SCHEMA.error,
+      });
+    });
 
     app.use(
       '/api/auth',
@@ -220,6 +261,9 @@ async function startServer() {
             version: BUILD.version,
             commit: BUILD.commit,
             features: BUILD.features,
+
+            schema: SCHEMA.state,
+            schema_error: SCHEMA.error,
 
             ai_provider:
               provider,
@@ -349,6 +393,10 @@ async function startServer() {
     app.listen(
       PORT,
       () => {
+        // The schema is brought up behind the open port, so a migration that
+        // has to wait for a lock cannot stop the service from starting.
+        prepareDatabase();
+
         const geminiConfigured =
           Boolean(
             process.env.GEMINI_API_KEY

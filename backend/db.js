@@ -41,7 +41,23 @@ const pool = new Pool({
 
   idleTimeoutMillis: 30000,
 
-  connectionTimeoutMillis: 10000
+  connectionTimeoutMillis: 10000,
+
+  // Adding a column needs an exclusive lock on the table. If anything else is
+  // holding one — the instance being replaced, mid-request — the ALTER waits,
+  // and with no timeout it waits forever: the boot never finishes, the deploy
+  // never opens a port, and the thing holding the lock is never replaced.
+  // Fifteen seconds turns that deadlock into a retry.
+  lock_timeout: 15000,
+
+  // Nothing this app does should run for two minutes. Something that does is
+  // wrong, and killing it beats leaving it to hold what it holds.
+  statement_timeout: 120000,
+
+  // The one that matters most here: a transaction left open by a request
+  // nobody is waiting for any more releases its locks after a minute instead
+  // of blocking the next deploy.
+  idle_in_transaction_session_timeout: 60000
 });
 
 // ---------------------------------------------------------------------------
