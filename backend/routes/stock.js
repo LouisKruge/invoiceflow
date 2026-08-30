@@ -317,6 +317,7 @@ router.get(
             OR p.description ILIKE ${p}
             OR p.supplier_product_code ILIKE ${p}
             OR p.barcode ILIKE ${p}
+            OR p.bin_location ILIKE ${p}
             OR s.name ILIKE ${p}
           )
         `;
@@ -427,9 +428,9 @@ router.post(
               id, sku, product_code, barcode, description,
               normalized_description, category, unit_of_measure,
               reorder_level, unit_cost, supplier_id, supplier_product_code,
-              created_by
+              bin_location, created_by
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             RETURNING *
           `,
           [
@@ -445,6 +446,7 @@ router.post(
             toNumber(body.unit_cost, 0),
             supplierId,
             body.supplier_product_code || null,
+            body.bin_location ? String(body.bin_location).trim() : null,
             req.user.id,
           ]
         );
@@ -559,6 +561,7 @@ const EDITABLE_PRODUCT_FIELDS = [
   'unit_cost',
   'supplier_id',
   'supplier_product_code',
+  'bin_location',
   'is_active',
 ];
 
@@ -769,6 +772,7 @@ router.get(
           AND (
             p.sku ILIKE ${p}
             OR p.description ILIKE ${p}
+            OR p.bin_location ILIKE ${p}
             OR t.reason ILIKE ${p}
             OR t.employee_name ILIKE ${p}
             OR t.job_reference ILIKE ${p}
@@ -1274,8 +1278,9 @@ router.post(
                       supplier_id = COALESCE($7, supplier_id),
                       supplier_product_code = COALESCE($8, supplier_product_code),
                       barcode = COALESCE($9, barcode),
+                      bin_location = COALESCE($10, bin_location),
                       updated_at = NOW()
-                  WHERE id = $10
+                  WHERE id = $11
                 `,
                 [
                   description,
@@ -1287,6 +1292,7 @@ router.post(
                   supplierId,
                   parsed.supplier_product_code,
                   parsed.barcode,
+                  parsed.bin_location,
                   productId,
                 ]
               );
@@ -1300,9 +1306,9 @@ router.post(
                   INSERT INTO products (
                     id, sku, description, normalized_description, category,
                     unit_of_measure, unit_cost, reorder_level, supplier_id,
-                    supplier_product_code, barcode, created_by
+                    supplier_product_code, barcode, bin_location, created_by
                   )
-                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                 `,
                 [
                   productId,
@@ -1316,6 +1322,7 @@ router.post(
                   supplierId,
                   parsed.supplier_product_code,
                   parsed.barcode,
+                  parsed.bin_location,
                   req.user.id,
                 ]
               );
@@ -1760,6 +1767,7 @@ router.post(
           description: req.body?.description,
           code: req.body?.code,
           barcode: req.body?.barcode,
+          bin: req.body?.bin,
           supplier_id: req.body?.supplier_id,
           limit: 8,
         });
@@ -1914,6 +1922,7 @@ async function loadSheet(sheetId) {
           p.sku,
           p.description AS product_description,
           p.unit_of_measure AS product_unit,
+          p.bin_location AS product_bin,
           p.is_active AS product_active,
           u.name AS corrected_by_name
         FROM stock_sheet_rows r
@@ -2609,6 +2618,28 @@ router.patch(
           confidence: 1,
           userId: req.user.id,
         });
+
+        // A bin the sheet wrote that the product master does not know is a gap
+        // in the master, not a mapping to remember: the correction fills it in
+        // so the next sheet resolves the bin on its own. Only an empty bin is
+        // filled — moving a product between bins stays a deliberate edit on
+        // the product itself.
+        // Only a value the sheet actually presented as a bin. A code column
+        // may hold a supplier's part number, and writing that into the bin
+        // would be worse than leaving the bin empty.
+        const writtenBin = row.raw_bin;
+
+        if (writtenBin) {
+          await db.run(
+            `
+              UPDATE products
+              SET bin_location = $1, updated_at = NOW()
+              WHERE id = $2
+                AND COALESCE(NULLIF(TRIM(bin_location), ''), '') = ''
+            `,
+            [String(writtenBin).trim(), confirmedProductId]
+          );
+        }
       }
 
       return res.json({ sheet: await loadSheet(req.params.id) });

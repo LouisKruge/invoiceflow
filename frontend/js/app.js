@@ -5326,9 +5326,15 @@ function bindInvoiceListEvents(container) {
             <label>Description</label>
             <input id="np-description" placeholder="e.g. SKF 6205-2RS Bearing" />
           </div>
-          <div class="field">
-            <label>SKU / product code</label>
-            <input id="np-sku" placeholder="Optional" />
+          <div style="display:flex;gap:12px;">
+            <div class="field" style="flex:1;">
+              <label>SKU / product code</label>
+              <input id="np-sku" placeholder="Optional" />
+            </div>
+            <div class="field" style="flex:1;">
+              <label>Bin number</label>
+              <input id="np-bin" placeholder="e.g. A12" />
+            </div>
           </div>
           <div style="display:flex;gap:12px;">
             <div class="field" style="flex:1;">
@@ -5384,6 +5390,7 @@ function bindInvoiceListEvents(container) {
           await API.createProduct({
             description,
             sku: backdrop.querySelector('#np-sku').value.trim() || null,
+            bin_location: backdrop.querySelector('#np-bin').value.trim() || null,
             opening_quantity: backdrop.querySelector('#np-qty').value || 0,
             unit_cost: backdrop.querySelector('#np-cost').value || 0,
             category: backdrop.querySelector('#np-category').value.trim() || null,
@@ -5402,6 +5409,68 @@ function bindInvoiceListEvents(container) {
       };
 
     backdrop.querySelector('#np-description').focus();
+  }
+
+  /**
+   * Where a product lives. Worth its own dialog because in a store that signs
+   * stock out by bin, this one field is what makes a sign-out sheet readable.
+   */
+  function openBinDialog(productId, currentBin, description) {
+    const host = document.createElement('div');
+
+    host.innerHTML = `
+      <div class="modal-backdrop" id="bin-backdrop">
+        <div class="modal-card">
+          <h3>Bin number</h3>
+          <p>Where ${esc(description || 'this product')} is stored.</p>
+          <div class="field">
+            <label>Bin</label>
+            <input id="bin-value" placeholder="e.g. A12" value="${esc(currentBin || '')}" />
+          </div>
+          <p style="font-size:12.5px;color:var(--ink-muted);">
+            A sign-out sheet that writes only this bin will resolve to this
+            product — as long as no other product shares the bin.
+          </p>
+          <div class="modal-actions">
+            <button class="btn btn-secondary" id="bin-cancel">Cancel</button>
+            <button class="btn btn-primary" id="bin-save">Save bin</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const backdrop = host.firstElementChild;
+
+    document.body.appendChild(backdrop);
+
+    const close = () => backdrop.remove();
+
+    backdrop.querySelector('#bin-cancel').onclick = close;
+
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) close();
+    });
+
+    backdrop.querySelector('#bin-save').onclick =
+      async () => {
+        const value = backdrop.querySelector('#bin-value').value.trim();
+
+        try {
+
+          await API.updateProduct(productId, { bin_location: value || null });
+
+          close();
+
+          toast(value ? `Bin set to ${value}` : 'Bin cleared', 'success');
+
+          await renderProductDetailPage(productId);
+
+        } catch (error) {
+          handleApiError(error, 'Unable to save the bin.');
+        }
+      };
+
+    backdrop.querySelector('#bin-value').focus();
   }
 
   // -------------------------------------------------------------------------
@@ -5462,6 +5531,18 @@ function bindInvoiceListEvents(container) {
               location.hash = `#/stock/signout/${link.dataset.sheetLink}`;
             };
         });
+
+      const editBin = document.getElementById('btn-edit-bin');
+
+      if (editBin) {
+        editBin.onclick =
+          () =>
+            openBinDialog(
+              editBin.dataset.productId,
+              editBin.dataset.bin,
+              detail.product.description
+            );
+      }
 
       const adjust = document.getElementById('btn-adjust-product');
 
@@ -6543,7 +6624,9 @@ function bindInvoiceListEvents(container) {
                             <div style="flex:1;min-width:0;">
                               <div class="title">${esc(p.description)}</div>
                               <div class="detail">
-                                ${esc(p.sku || 'No SKU')} · ${fmtQty(p.current_quantity)} in stock
+                                ${esc(p.sku || 'No SKU')}
+                                ${p.bin_location ? ` · bin ${esc(p.bin_location)}` : ''}
+                                · ${fmtQty(p.current_quantity)} in stock
                               </div>
                             </div>
                           </label>

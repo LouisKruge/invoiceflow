@@ -413,6 +413,11 @@ async function initializeDatabase() {
       supplier_id TEXT,
       supplier_product_code TEXT,
 
+      -- Where the product physically sits. On a sign-out sheet this is often
+      -- the only identifier anyone writes down, so it has to be able to
+      -- resolve to a product on its own.
+      bin_location TEXT,
+
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
 
       created_by TEXT,
@@ -819,6 +824,7 @@ async function initializeDatabase() {
       -- always be compared against the original reading.
       raw_product_code TEXT,
       raw_description TEXT,
+      raw_bin TEXT,
       raw_quantity TEXT,
       raw_unit TEXT,
       raw_notes TEXT,
@@ -900,6 +906,22 @@ async function initializeDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_stock_tx_syspro_status
       ON stock_transactions(syspro_sync_status);
+  `);
+
+  // Bin numbers. Stores that write only the bin on a sign-out sheet need it to
+  // identify the product, so it is indexed in the same punctuation-free form
+  // the matcher compares.
+  await pool.query(`
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS bin_location TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_products_bin
+      ON products (
+        UPPER(REGEXP_REPLACE(COALESCE(bin_location, ''), '[^A-Za-z0-9]', '', 'g'))
+      );
+
+    ALTER TABLE stock_sheet_rows
+      ADD COLUMN IF NOT EXISTS raw_bin TEXT;
   `);
 
   // Line items carry their resolved product so an invoice can be re-examined

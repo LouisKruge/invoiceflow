@@ -35,6 +35,7 @@ const CERTAIN_METHODS = new Set([
   'barcode',
   'sku',
   'supplier_code',
+  'bin',
   'normalized_description',
 ]);
 
@@ -182,6 +183,8 @@ function similarity(a, b) {
  * @param {string} query.description - the text as printed on the document
  * @param {string} [query.code] - supplier product code / SKU as printed
  * @param {string} [query.barcode]
+ * @param {string} [query.bin] - bin number as written, often the only thing a
+ *   sign-out sheet records
  * @param {string} [query.supplier_id] - narrows and boosts candidates
  * @param {number} [query.limit]
  * @returns {Promise<{match, confidence, method, candidates, auto}>}
@@ -190,11 +193,13 @@ async function matchProduct(query = {}) {
   const description = query.description || '';
   const code = query.code || '';
   const barcode = query.barcode || '';
+  const bin = query.bin || '';
   const supplierId = query.supplier_id || null;
   const limit = query.limit || 5;
 
   const normalizedDescription = normalizeDescription(description);
   const normalizedCode = normalizeCode(code);
+  const normalizedBin = normalizeCode(bin);
 
   const candidates = new Map();
 
@@ -313,6 +318,37 @@ async function matchProduct(query = {}) {
       );
 
     supplierRows.forEach((row) => consider(row, 0.97, 'supplier_code'));
+  }
+
+  // -------------------------------------------------------------------------
+  // 4b. Bin number.
+  //
+  // A store that writes only the bin on its sign-out sheets needs the bin to
+  // identify the product by itself — but only when the bin holds one product.
+  // Two products in the same bin is a real situation and a genuinely
+  // ambiguous line: both are offered, neither is chosen, and the quantity
+  // written against a shared bin is a question for a person.
+  // -------------------------------------------------------------------------
+
+  if (normalizedBin) {
+    const rows =
+      await db.all(
+        `
+          SELECT * FROM products
+          WHERE is_active = TRUE
+            AND UPPER(REGEXP_REPLACE(COALESCE(bin_location, ''), '[^A-Za-z0-9]', '', 'g')) = $1
+          LIMIT 10
+        `,
+        [normalizedBin]
+      );
+
+    if (rows.length === 1) {
+      consider(rows[0], 0.98, 'bin');
+    } else {
+      // Deliberately below the auto-match threshold and identical for each, so
+      // the ambiguity check catches them however they happen to sort.
+      rows.forEach((row) => consider(row, 0.6, 'bin_shared'));
+    }
   }
 
   // -------------------------------------------------------------------------

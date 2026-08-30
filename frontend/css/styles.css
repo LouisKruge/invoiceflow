@@ -802,6 +802,15 @@ table.data-table tbody tr.selected { background: var(--surface-sunk); }
   letter-spacing: -0.01em;
   white-space: nowrap;
 }
+/* A bin reads like an identifier but is a location, so it is set in the same
+   type as an ID while staying distinguishable from one. */
+.cell-bin {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  color: var(--ink-soft);
+}
 .cell-strong { font-weight: 500; }
 .cell-muted { color: var(--ink-muted); }
 .cell-check { width: 40px; }

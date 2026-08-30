@@ -2601,6 +2601,7 @@ function renderProducts(data, filters) {
       <tr class="clickable" data-product-id="${esc(p.id)}">
         <td class="cell-id">${esc(p.sku || p.product_code || '—')}</td>
         <td class="cell-strong">${esc(p.description)}</td>
+        <td class="cell-bin">${esc(p.bin_location || '—')}</td>
         <td class="cell-muted">${esc(p.category || '—')}</td>
         <td class="cell-num">${fmtQty(p.current_quantity)}</td>
         <td class="cell-muted">${esc(p.unit_of_measure || 'ea')}</td>
@@ -2644,7 +2645,7 @@ function renderProducts(data, filters) {
       <input
         type="text"
         id="product-search"
-        placeholder="Search SKU, product code, description, supplier code or supplier…"
+        placeholder="Search SKU, bin, description, product code, supplier code or supplier…"
         value="${esc(filters.q || '')}"
       />
     </div>
@@ -2671,6 +2672,7 @@ function renderProducts(data, filters) {
           <tr>
             <th data-sort="sku">SKU</th>
             <th data-sort="description">Description</th>
+            <th>Bin</th>
             <th data-sort="category">Category</th>
             <th class="th-num" data-sort="quantity">Qty</th>
             <th>Unit</th>
@@ -2686,7 +2688,7 @@ function renderProducts(data, filters) {
             rows ||
             `
               <tr>
-                <td colspan="10">
+                <td colspan="11">
                   <div class="empty-state">
                     ${Icons.products}
                     <p>No products match.</p>
@@ -2780,6 +2782,12 @@ function renderProductDetail(detail, history) {
       ${stockStatusMark(product.stock_status)}
       <button
         class="btn btn-secondary"
+        id="btn-edit-bin"
+        data-product-id="${esc(product.id)}"
+        data-bin="${esc(product.bin_location || '')}"
+      >${product.bin_location ? 'Edit bin' : 'Set bin'}</button>
+      <button
+        class="btn btn-secondary"
         id="btn-adjust-product"
         data-product-id="${esc(product.id)}"
       >${Icons.adjust} Adjust</button>
@@ -2802,6 +2810,10 @@ function renderProductDetail(detail, history) {
     <div class="item">
       <div class="l">Reorder level</div>
       <div class="v">${product.reorder_level || 0}</div>
+    </div>
+    <div class="item">
+      <div class="l">Bin</div>
+      <div class="v mono">${esc(product.bin_location || '—')}</div>
     </div>
   </div>
 
@@ -3700,6 +3712,7 @@ function sheetRowHtml(row, sheet, expandedRowId) {
         <div class="cell-strong">${esc(row.product_description || '—')}</div>
         <div class="cell-muted" style="font-size:12px;">
           ${esc(row.sku || 'No SKU')}
+          ${row.product_bin ? ` · bin ${esc(row.product_bin)}` : ''}
           ${row.match_method ? ` · ${esc(String(row.match_method).replace(/_/g, ' '))}` : ''}
         </div>
       `
@@ -3732,9 +3745,20 @@ function sheetRowHtml(row, sheet, expandedRowId) {
     <tr class="${needsWork ? 'row-attention' : ''}">
       <td class="cell-muted">${row.row_number}</td>
       <td>
-        <div class="cell-strong">${esc(row.raw_description || '—')}</div>
+        <div class="cell-strong">
+          ${esc(row.raw_description || (row.raw_bin ? `Bin ${row.raw_bin}` : '—'))}
+        </div>
         <div class="cell-muted" style="font-size:12px;">
-          ${esc(row.raw_product_code || 'No code on the sheet')}
+          ${
+            esc(
+              [
+                row.raw_product_code,
+                row.raw_bin && row.raw_description ? `bin ${row.raw_bin}` : null,
+              ]
+                .filter(Boolean)
+                .join(' · ') || 'No code on the sheet'
+            )
+          }
         </div>
       </td>
       <td class="cell-num">
@@ -3768,7 +3792,14 @@ function sheetRowHtml(row, sheet, expandedRowId) {
 
                 <div class="eyebrow">What was written on the sheet</div>
                 <div class="cell-muted" style="font-size:13px;margin-bottom:14px;">
-                  “${esc(row.raw_description || '')}”
+                  ${
+                    row.raw_description
+                      ? `“${esc(row.raw_description)}”`
+                      : row.raw_bin
+                        ? `bin “${esc(row.raw_bin)}” and nothing else`
+                        : '“”'
+                  }
+                  ${row.raw_bin && row.raw_description ? ` · bin “${esc(row.raw_bin)}”` : ''}
                   ${row.raw_quantity ? ` · quantity read as “${esc(row.raw_quantity)}”` : ''}
                 </div>
 

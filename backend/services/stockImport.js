@@ -28,11 +28,13 @@ const TARGET_FIELDS = [
   { key: 'supplier_product_code', label: 'Supplier Product Code', required: false },
   { key: 'barcode',               label: 'Barcode', required: false },
   { key: 'reorder_level',         label: 'Reorder Level', required: false },
+  { key: 'bin_location',          label: 'Bin Number', required: false },
 ];
 
 // Header wordings seen in the wild, most specific first. Matching is done on a
 // squashed lower-case form so spacing and punctuation do not matter.
 const HEADER_HINTS = [
+  ['bin_location',          ['bin', 'binno', 'binnumber', 'binnr', 'bincode', 'binlocation', 'binloc', 'storagebin', 'shelf', 'shelfno', 'rack', 'rackno', 'aisle', 'slot', 'position', 'location', 'storagelocation', 'warehouselocation', 'pickface', 'pickslot']],
   ['supplier_product_code', ['supplierproductcode', 'suppliercode', 'suppliersku', 'vendorcode', 'manufacturercode', 'mfrcode', 'partno', 'partnumber']],
   ['reorder_level',         ['reorderlevel', 'reorderpoint', 'reorder', 'minlevel', 'minimumlevel', 'minstock', 'minqty', 'reorderqty', 'safetystock', 'rol']],
   ['unit_cost',             ['unitcost', 'cost', 'costprice', 'price', 'unitprice', 'buyprice', 'purchaseprice', 'costeach', 'rate', 'avgcost', 'averagecost']],
@@ -78,10 +80,14 @@ function guessField(header, alreadyUsed) {
     }
   }
 
+  // Substring matching only for hints long enough to be meaningful. A
+  // three-letter abbreviation hides inside unrelated words — "location"
+  // contains "cat" — and a wrong guess is worse than no guess, because a
+  // person has to notice it to undo it.
   for (const [field, hints] of HEADER_HINTS) {
     if (alreadyUsed.has(field)) continue;
 
-    if (hints.some((hint) => key.includes(hint))) {
+    if (hints.some((hint) => hint.length >= 4 && key.includes(hint))) {
       return { field, confidence: 0.6 };
     }
   }
@@ -385,6 +391,7 @@ function extractRow(row, mapping) {
     supplier_name: out.supplier_name || null,
     supplier_product_code: out.supplier_product_code || null,
     barcode: out.barcode || null,
+    bin_location: out.bin_location || null,
     quantity: toNumber(out.quantity),
     unit_cost: toNumber(out.unit_cost),
     reorder_level: toNumber(out.reorder_level),
