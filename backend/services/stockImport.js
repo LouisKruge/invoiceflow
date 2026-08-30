@@ -29,11 +29,13 @@ const TARGET_FIELDS = [
   { key: 'barcode',               label: 'Barcode', required: false },
   { key: 'reorder_level',         label: 'Reorder Level', required: false },
   { key: 'bin_location',          label: 'Bin Number', required: false },
+  { key: 'stock_group',           label: 'Stock Group', required: false },
 ];
 
 // Header wordings seen in the wild, most specific first. Matching is done on a
 // squashed lower-case form so spacing and punctuation do not matter.
 const HEADER_HINTS = [
+  ['stock_group',           ['stockgroup', 'stocklist', 'stockarea', 'stocksection', 'storearea', 'store', 'storename']],
   ['bin_location',          ['bin', 'binno', 'binnumber', 'binnr', 'bincode', 'binlocation', 'binloc', 'storagebin', 'shelf', 'shelfno', 'rack', 'rackno', 'aisle', 'slot', 'position', 'location', 'pickface', 'pickslot']],
   ['supplier_product_code', ['supplierproductcode', 'suppliercode', 'suppliersku', 'vendorcode', 'manufacturercode', 'mfrcode', 'partno', 'partnumber']],
   ['reorder_level',         ['reorderlevel', 'reorderpoint', 'reorder', 'minlevel', 'minimumlevel', 'minstock', 'minqty', 'reorderqty', 'safetystock', 'rol']],
@@ -419,6 +421,7 @@ function extractRow(row, mapping) {
     supplier_product_code: out.supplier_product_code || null,
     barcode: out.barcode || null,
     bin_location: out.bin_location || null,
+    stock_group: out.stock_group || null,
     quantity: toNumber(out.quantity),
     unit_cost: toNumber(out.unit_cost),
     reorder_level: toNumber(out.reorder_level),

@@ -5130,7 +5130,7 @@ function bindInvoiceListEvents(container) {
   // ===========================================================================
 
   const StockState = {
-    productFilters: { q: '', status: '', category: '', sort: '', order: '', page: 1 },
+    productFilters: { q: '', status: '', category: '', group: '', sort: '', order: '', page: 1 },
     txFilters: { q: '', type: '', page: 1 },
     sheetFilters: { status: '' },
   };
@@ -5249,6 +5249,17 @@ function bindInvoiceListEvents(container) {
       }
 
       content
+        .querySelectorAll('[data-stock-group]')
+        .forEach((chip) => {
+          chip.onclick =
+            () => {
+              StockState.productFilters.group = chip.dataset.stockGroup;
+              StockState.productFilters.page = 1;
+              loadProducts();
+            };
+        });
+
+      content
         .querySelectorAll('[data-stock-status]')
         .forEach((chip) => {
           chip.onclick =
@@ -5336,6 +5347,10 @@ function bindInvoiceListEvents(container) {
               <input id="np-bin" placeholder="e.g. A12" />
             </div>
           </div>
+          <div class="field">
+            <label>Stock group</label>
+            <input id="np-group" placeholder="e.g. Consumable Stock" />
+          </div>
           <div style="display:flex;gap:12px;">
             <div class="field" style="flex:1;">
               <label>Opening quantity</label>
@@ -5391,6 +5406,7 @@ function bindInvoiceListEvents(container) {
             description,
             sku: backdrop.querySelector('#np-sku').value.trim() || null,
             bin_location: backdrop.querySelector('#np-bin').value.trim() || null,
+            stock_group: backdrop.querySelector('#np-group').value.trim() || null,
             opening_quantity: backdrop.querySelector('#np-qty').value || 0,
             unit_cost: backdrop.querySelector('#np-cost').value || 0,
             category: backdrop.querySelector('#np-category').value.trim() || null,
@@ -5975,12 +5991,14 @@ function bindInvoiceListEvents(container) {
                 await API.commitStockImport(inspection.import_id, {
                   mapping,
                   update_only: updateOnly,
+                  stock_group:
+                    document.getElementById('import-stock-group')?.value.trim() || null,
                 });
 
               // Someone who has just imported stock wants to see all of it,
               // not whatever the products list was last filtered to.
               StockState.productFilters = {
-                q: '', status: '', category: '', sort: '', order: '', page: 1,
+                q: '', status: '', category: '', group: '', sort: '', order: '', page: 1,
               };
 
               stage.innerHTML = renderImportResult(result);

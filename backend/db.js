@@ -418,6 +418,11 @@ async function initializeDatabase() {
       -- resolve to a product on its own.
       bin_location TEXT,
 
+      -- Which stock list the product belongs to — consumables, fittings,
+      -- electrical. A store keeps these as separate lists and thinks of them
+      -- separately, so the product master keeps them apart too.
+      stock_group TEXT,
+
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
 
       created_by TEXT,
@@ -922,6 +927,12 @@ async function initializeDatabase() {
 
     ALTER TABLE stock_sheet_rows
       ADD COLUMN IF NOT EXISTS raw_bin TEXT;
+
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS stock_group TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_products_stock_group
+      ON products(stock_group);
   `);
 
   // A product can occupy more than one bin. Real stock sheets show the same

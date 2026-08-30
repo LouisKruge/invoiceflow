@@ -292,6 +292,7 @@ router.get(
         status,
         supplier_id: supplierId,
         include_inactive: includeInactive,
+        group,
       } = req.query;
 
       const sort = SORTABLE[req.query.sort] || 'p.description';
@@ -331,6 +332,15 @@ router.get(
         where += ` AND p.category = $${params.length}`;
       }
 
+      if (group) {
+        if (group === 'UNGROUPED') {
+          where += " AND COALESCE(NULLIF(TRIM(p.stock_group), ''), '') = ''";
+        } else {
+          params.push(group);
+          where += ` AND p.stock_group = $${params.length}`;
+        }
+      }
+
       if (supplierId) {
         params.push(supplierId);
         where += ` AND p.supplier_id = $${params.length}`;
@@ -364,7 +374,11 @@ router.get(
           `
             ${PRODUCT_SELECT}
             ${where}
-            ORDER BY ${sort} ${order} NULLS LAST
+            ORDER BY ${
+              // Without a group chosen the lists stay whole down the pages,
+              // rather than consumables and fittings alternating row by row.
+              group ? '' : 'p.stock_group ASC NULLS LAST, '
+            }${sort} ${order} NULLS LAST
             LIMIT $${params.length - 1} OFFSET $${params.length}
           `,
           params
@@ -380,6 +394,22 @@ router.get(
           `
         );
 
+      // The store's own lists — consumables, fittings, electrical — with how
+      // many products are in each, so the screen can offer them as the top
+      // level rather than one undifferentiated table.
+      const groups =
+        await db.all(
+          `
+            SELECT
+              COALESCE(NULLIF(TRIM(stock_group), ''), 'UNGROUPED') AS name,
+              COUNT(*)::int AS product_count
+            FROM products
+            WHERE is_active = TRUE
+            GROUP BY 1
+            ORDER BY (COALESCE(NULLIF(TRIM(stock_group), ''), 'UNGROUPED') = 'UNGROUPED'), 1
+          `
+        );
+
       return res.json({
         products: rows.map(decorateProduct),
         total: Number(total?.c || 0),
@@ -387,6 +417,7 @@ router.get(
         limit,
         pages: Math.max(1, Math.ceil(Number(total?.c || 0) / limit)),
         categories: categories.map((row) => row.category),
+        groups,
       });
 
     } catch (error) {
@@ -431,9 +462,9 @@ router.post(
               id, sku, product_code, barcode, description,
               normalized_description, category, unit_of_measure,
               reorder_level, unit_cost, supplier_id, supplier_product_code,
-              bin_location, created_by
+              bin_location, stock_group, created_by
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             RETURNING *
           `,
           [
@@ -450,6 +481,7 @@ router.post(
             supplierId,
             body.supplier_product_code || null,
             body.bin_location ? String(body.bin_location).trim() : null,
+            body.stock_group ? String(body.stock_group).trim() : null,
             req.user.id,
           ]
         );
@@ -568,6 +600,7 @@ const EDITABLE_PRODUCT_FIELDS = [
   'supplier_id',
   'supplier_product_code',
   'bin_location',
+  'stock_group',
   'is_active',
 ];
 
@@ -1206,6 +1239,14 @@ router.post(
       const updateOnly =
         req.body?.update_only === true || req.body?.update_only === 'true';
 
+      // A store keeps its stock as separate lists — consumables, fittings,
+      // electrical — one sheet each. The sheet itself is the group, so it can
+      // be named for the whole import rather than repeated down a column.
+      const importGroup =
+        req.body?.stock_group
+          ? String(req.body.stock_group).trim() || null
+          : null;
+
       const mappedFields = Object.values(mapping).filter(Boolean);
 
       if (!mappedFields.includes('description') && !mappedFields.includes('sku')) {
@@ -1245,6 +1286,9 @@ router.post(
 
         const rowId = uuid();
         const rowNumber = index + 1;
+
+        // A column on the sheet wins over the name given for the whole import.
+        const stockGroup = parsed.stock_group || importGroup;
 
         // A row with neither a name nor a code cannot become a product.
         if (!parsed.description && !parsed.sku) {
@@ -1341,8 +1385,9 @@ router.post(
                       supplier_id = COALESCE($7, supplier_id),
                       supplier_product_code = COALESCE($8, supplier_product_code),
                       barcode = COALESCE($9, barcode),
+                      stock_group = COALESCE($10, stock_group),
                       updated_at = NOW()
-                  WHERE id = $10
+                  WHERE id = $11
                 `,
                 [
                   description,
@@ -1354,6 +1399,7 @@ router.post(
                   supplierId,
                   parsed.supplier_product_code,
                   parsed.barcode,
+                  stockGroup,
                   productId,
                 ]
               );
@@ -1367,9 +1413,10 @@ router.post(
                   INSERT INTO products (
                     id, sku, description, normalized_description, category,
                     unit_of_measure, unit_cost, reorder_level, supplier_id,
-                    supplier_product_code, barcode, bin_location, created_by
+                    supplier_product_code, barcode, bin_location, stock_group,
+                    created_by
                   )
-                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                 `,
                 [
                   productId,
@@ -1384,6 +1431,7 @@ router.post(
                   parsed.supplier_product_code,
                   parsed.barcode,
                   parsed.bin_location,
+                  stockGroup,
                   req.user.id,
                 ]
               );
