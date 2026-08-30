@@ -64,6 +64,7 @@ Return ONLY valid JSON with exactly this structure:
     {
       "product_code": string|null,
       "description": string|null,
+      "bin": string|null,
       "quantity": number|null,
       "raw_quantity": string|null,
       "unit": string|null,
@@ -99,13 +100,18 @@ RULES:
 8. Both confidences are between 0.0 and 1.0.
 9. Copy product codes exactly as printed, including punctuation.
 10. Put the full item wording into description, even when a code is present.
-11. Dates should be YYYY-MM-DD where the year is legible.
-12. The employee is the person taking the stock, not a supplier or a manager
+11. Many stores write only the BIN NUMBER for an item — a short location code
+    like "A12", "B-04-2" or "R3/S2", often under a column headed Bin,
+    Location, Shelf, Rack or Slot. Put it in bin, exactly as written. A row
+    with nothing but a bin and a quantity is a real row: return it, with
+    description and product_code null.
+12. Dates should be YYYY-MM-DD where the year is legible.
+13. The employee is the person taking the stock, not a supplier or a manager
     signature, when the two can be distinguished.
-13. A job may appear as a job number, a work order, a registration or a
+14. A job may appear as a job number, a work order, a registration or a
     customer name. Put it in job.
-14. If a field is not on the sheet, return null. Do not infer it.
-15. Return ONLY the JSON object.
+15. If a field is not on the sheet, return null. Do not infer it.
+16. Return ONLY the JSON object.
 `;
 
 // ---------------------------------------------------------------------------
@@ -275,9 +281,11 @@ function labelFor(text) {
 /**
  * Finds the row that starts the line table.
  *
- * A row qualifies when its cells name a product and a quantity. A row naming
- * only a product is kept as a fallback, for sheets whose quantity column is
- * headed something the importer does not recognise.
+ * A row qualifies when its cells name a product and a quantity. A bin counts
+ * as naming a product: a store that signs stock out by bin writes a sheet
+ * headed "Bin | Quantity" and nothing else. A row naming only a product is
+ * kept as a fallback, for sheets whose quantity column is headed something the
+ * importer does not recognise.
  */
 function findLineHeader(grid) {
   let fallback = null;
@@ -297,7 +305,11 @@ function findLineHeader(grid) {
       }
     });
 
-    if (!used.has('description') && !used.has('sku')) continue;
+    if (
+      !used.has('description') &&
+      !used.has('sku') &&
+      !used.has('bin_location')
+    ) continue;
 
     if (used.has('quantity')) {
       return { index, mapping, row };
@@ -405,6 +417,9 @@ async function extractFromSpreadsheet(filePath, mimeType) {
   const quantityColumn =
     Object.keys(table.mapping).find((k) => table.mapping[k] === 'quantity');
 
+  const binColumn =
+    Object.keys(table.mapping).find((k) => table.mapping[k] === 'bin_location');
+
   const rows = [];
 
   grid.slice(table.index + 1).forEach((raw, index) => {
@@ -420,7 +435,14 @@ async function extractFromSpreadsheet(filePath, mimeType) {
       if (!header[field]) header[field] = readColumn(field);
     });
 
-    if (!parsed.description && !parsed.sku) return;
+    const bin =
+      binColumn !== undefined
+        ? String(raw[Number(binColumn)] ?? '').trim() || null
+        : null;
+
+    // A bin on its own identifies a product in a store that signs stock out by
+    // bin number, so a row carrying only a bin and a quantity is a real row.
+    if (!parsed.description && !parsed.sku && !bin) return;
 
     // A totals line is not stock going out.
     if (/^(total|totals|subtotal|grand total)$/i.test(String(parsed.description || '').trim())) {
@@ -436,6 +458,7 @@ async function extractFromSpreadsheet(filePath, mimeType) {
       row_number: rows.length + 1,
       product_code: parsed.sku,
       description: parsed.description,
+      bin,
       raw_quantity:
         rawQuantity || (parsed.quantity != null ? String(parsed.quantity) : null),
       // The cell is read exactly; parseQuantity still judges whether the text
@@ -471,6 +494,7 @@ async function extractFromDocument(filePath, mimeType) {
           row_number: index + 1,
           product_code: row.product_code || null,
           description: row.description || null,
+          bin: row.bin || null,
           raw_quantity:
             row.raw_quantity != null
               ? String(row.raw_quantity)
@@ -617,12 +641,13 @@ async function processSheet(sheetId) {
       `
         INSERT INTO stock_sheet_rows (
           id, sheet_id, row_number,
-          raw_product_code, raw_description, raw_quantity, raw_unit, raw_notes,
+          raw_product_code, raw_description, raw_bin, raw_quantity, raw_unit,
+          raw_notes,
           quantity, unit_of_measure,
           product_id, match_confidence, match_method, quantity_confidence,
           candidates, stock_before, stock_after, status, issue
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
       `,
       [
         uuid(),
@@ -630,6 +655,7 @@ async function processSheet(sheetId) {
         row.row_number,
         row.product_code,
         row.description,
+        row.bin,
         row.raw_quantity,
         row.unit,
         row.notes,
@@ -723,10 +749,15 @@ async function evaluateRow(row, { locationId }) {
       ? Math.min(row.quantity_confidence, quantityRead.confidence || 1)
       : quantityRead.confidence;
 
+  // Where a store signs stock out by bin, the bin is often written into
+  // whatever column the sheet has — so the code that was written is offered as
+  // a bin too. A bin only resolves when it holds exactly one product, so
+  // trying it costs nothing.
   const match =
     await matching.matchProduct({
       description: row.description || row.product_code || '',
       code: row.product_code || '',
+      bin: row.bin || row.product_code || '',
       limit: 5,
     });
 
@@ -756,7 +787,10 @@ async function evaluateRow(row, { locationId }) {
     return {
       ...base,
       status: 'REVIEW_REQUIRED',
-      issue: 'No matching product could be found in the product master.',
+      issue:
+        row.bin && !row.description && !row.product_code
+          ? `Bin ${row.bin} is not on any product in the product master.`
+          : 'No matching product could be found in the product master.',
     };
   }
 
@@ -766,7 +800,9 @@ async function evaluateRow(row, { locationId }) {
     return {
       ...base,
       status: 'REVIEW_REQUIRED',
-      issue: match.ambiguous
+      issue: match.candidates.length > 1 && match.method === 'bin_shared'
+        ? `More than one product is stored in bin ${row.bin || row.product_code}.`
+        : match.ambiguous
         ? 'More than one product matches this description equally well.'
         : `Product match confidence is ${Math.round(
             (match.confidence || 0) * 100

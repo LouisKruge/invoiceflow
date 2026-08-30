@@ -160,7 +160,10 @@ const PRODUCT_SELECT = `
     p.*,
     COALESCE(b.quantity, 0) AS current_quantity,
     b.last_movement_at,
-    s.name AS supplier_name
+    s.name AS supplier_name,
+    (
+      SELECT COUNT(*)::int FROM product_bins pb WHERE pb.product_id = p.id
+    ) AS bin_count
   FROM products p
   LEFT JOIN (
     SELECT product_id,
@@ -317,6 +320,7 @@ router.get(
             OR p.description ILIKE ${p}
             OR p.supplier_product_code ILIKE ${p}
             OR p.barcode ILIKE ${p}
+            OR p.bin_location ILIKE ${p}
             OR s.name ILIKE ${p}
           )
         `;
@@ -427,9 +431,9 @@ router.post(
               id, sku, product_code, barcode, description,
               normalized_description, category, unit_of_measure,
               reorder_level, unit_cost, supplier_id, supplier_product_code,
-              created_by
+              bin_location, created_by
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             RETURNING *
           `,
           [
@@ -445,6 +449,7 @@ router.post(
             toNumber(body.unit_cost, 0),
             supplierId,
             body.supplier_product_code || null,
+            body.bin_location ? String(body.bin_location).trim() : null,
             req.user.id,
           ]
         );
@@ -526,6 +531,9 @@ router.get(
           ...row,
           quantity: Number(row.quantity || 0),
         })),
+        // Every bin the product occupies, not only the primary one shown in
+        // the list — a sign-out sheet may name any of them.
+        bins: await matching.binsForProduct(req.params.id),
         ledger_quantity: ledgerQuantity,
         reconciled:
           Number(product.current_quantity || 0) === ledgerQuantity,
@@ -559,6 +567,7 @@ const EDITABLE_PRODUCT_FIELDS = [
   'unit_cost',
   'supplier_id',
   'supplier_product_code',
+  'bin_location',
   'is_active',
 ];
 
@@ -618,10 +627,24 @@ router.patch(
         values
       );
 
+      // A bin set by hand joins the product's set of bins, so a sign-out sheet
+      // naming it resolves like any imported one.
+      if (updates.bin_location) {
+        await matching.rememberBin({
+          productId: req.params.id,
+          bin: updates.bin_location,
+          source: 'manual',
+          userId: req.user.id,
+        });
+      }
+
       const product =
         await db.get(`${PRODUCT_SELECT} WHERE p.id = $1`, [req.params.id]);
 
-      return res.json({ product: decorateProduct(product) });
+      return res.json({
+        product: decorateProduct(product),
+        bins: await matching.binsForProduct(req.params.id),
+      });
 
     } catch (error) {
       console.error('[stock/products/update]', error);
@@ -769,6 +792,7 @@ router.get(
           AND (
             p.sku ILIKE ${p}
             OR p.description ILIKE ${p}
+            OR p.bin_location ILIKE ${p}
             OR t.reason ILIKE ${p}
             OR t.employee_name ILIKE ${p}
             OR t.job_reference ILIKE ${p}
@@ -1177,6 +1201,11 @@ router.post(
 
       const mapping = req.body?.mapping || JSON.parse(record.column_mapping || '{}');
 
+      // "Update what is there, add nothing new" — the safe mode for a sheet
+      // whose purpose is to fill in a field on products that already exist.
+      const updateOnly =
+        req.body?.update_only === true || req.body?.update_only === 'true';
+
       const mappedFields = Object.values(mapping).filter(Boolean);
 
       if (!mappedFields.includes('description') && !mappedFields.includes('sku')) {
@@ -1206,6 +1235,7 @@ router.post(
 
       let imported = 0;
       let skipped = 0;
+      let binsRecorded = 0;
 
       const errors = [];
 
@@ -1245,17 +1275,54 @@ router.post(
             const normalized = matching.normalizeDescription(description);
 
             // Re-importing a sheet should update the product it already
-            // created, not make a second one.
-            const existing =
+            // created, not make a second one — and the column a store used as
+            // its identifier last time is not always the one it uses this
+            // time. Strongest evidence first: the SKU, then the supplier's own
+            // code for that supplier, then the wording.
+            let existing =
               await client.query(
                 `
                   SELECT * FROM products
-                  WHERE ($1::text IS NOT NULL AND sku = $1)
-                     OR ($1::text IS NULL AND normalized_description = $2)
+                  WHERE $1::text IS NOT NULL AND sku = $1
                   LIMIT 1
                 `,
-                [parsed.sku || null, normalized]
+                [parsed.sku || null]
               );
+
+            if (!existing.rows.length && parsed.supplier_product_code) {
+              existing =
+                await client.query(
+                  `
+                    SELECT * FROM products
+                    WHERE supplier_product_code = $1
+                      AND ($2::text IS NULL OR supplier_id = $2)
+                    LIMIT 1
+                  `,
+                  [parsed.supplier_product_code, supplierId]
+                );
+            }
+
+            if (!existing.rows.length) {
+              existing =
+                await client.query(
+                  `
+                    SELECT * FROM products
+                    WHERE normalized_description = $1
+                    LIMIT 1
+                  `,
+                  [normalized]
+                );
+            }
+
+            // Applying bins to a master that is already live should not be
+            // able to invent products: a row that matches nothing is reported
+            // and skipped rather than created.
+            if (!existing.rows.length && updateOnly) {
+              throw Object.assign(
+                new Error('No existing product matches this row'),
+                { skipRow: true }
+              );
+            }
 
             let productId;
 
@@ -1300,9 +1367,9 @@ router.post(
                   INSERT INTO products (
                     id, sku, description, normalized_description, category,
                     unit_of_measure, unit_cost, reorder_level, supplier_id,
-                    supplier_product_code, barcode, created_by
+                    supplier_product_code, barcode, bin_location, created_by
                   )
-                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                 `,
                 [
                   productId,
@@ -1316,16 +1383,41 @@ router.post(
                   supplierId,
                   parsed.supplier_product_code,
                   parsed.barcode,
+                  parsed.bin_location,
                   req.user.id,
                 ]
               );
+            }
+
+            // A product listed in several bins keeps all of them: each one is
+            // a real place the part is stored, and each one gets written on a
+            // sign-out sheet sooner or later.
+            if (parsed.bin_location) {
+              const added =
+                await matching.rememberBin(
+                  {
+                    productId,
+                    bin: parsed.bin_location,
+                    source: 'import',
+                    userId: req.user.id,
+                  },
+                  client
+                );
+
+              if (added) binsRecorded += 1;
             }
 
             let transactionId = null;
 
             // The quantity from the sheet enters as a ledger event so it can
             // be traced back to this import later.
-            if (parsed.quantity && parsed.quantity > 0) {
+            //
+            // Update-only exists to fill in a field on products that already
+            // exist — bins, costs, categories — so it never posts a balance,
+            // whatever the mapping says a column is. That makes it safe to run
+            // against a live master: the worst a wrong mapping can do is write
+            // a wrong attribute, not invent stock.
+            if (!updateOnly && parsed.quantity && parsed.quantity > 0) {
               const transaction =
                 await ledger.postMovement(client, {
                   product_id: productId,
@@ -1381,15 +1473,24 @@ router.post(
 
           skipped++;
 
-          errors.push(`Row ${rowNumber}: ${rowError.message}`);
+          if (!rowError.skipRow) {
+            errors.push(`Row ${rowNumber}: ${rowError.message}`);
+          }
 
           await db.run(
             `
               INSERT INTO stock_import_rows
                 (id, import_id, row_number, raw_data, status, message)
-              VALUES ($1,$2,$3,$4,'failed',$5)
+              VALUES ($1,$2,$3,$4,$5,$6)
             `,
-            [uuid(), record.id, rowNumber, JSON.stringify(raw), rowError.message]
+            [
+              uuid(),
+              record.id,
+              rowNumber,
+              JSON.stringify(raw),
+              rowError.skipRow ? 'skipped' : 'failed',
+              rowError.message,
+            ]
           );
         }
       }
@@ -1418,6 +1519,8 @@ router.post(
         import_id: record.id,
         imported,
         skipped,
+        update_only: updateOnly,
+        bins_recorded: binsRecorded,
         errors: errors.slice(0, 20),
       });
 
@@ -1760,6 +1863,7 @@ router.post(
           description: req.body?.description,
           code: req.body?.code,
           barcode: req.body?.barcode,
+          bin: req.body?.bin,
           supplier_id: req.body?.supplier_id,
           limit: 8,
         });
@@ -1914,6 +2018,7 @@ async function loadSheet(sheetId) {
           p.sku,
           p.description AS product_description,
           p.unit_of_measure AS product_unit,
+          p.bin_location AS product_bin,
           p.is_active AS product_active,
           u.name AS corrected_by_name
         FROM stock_sheet_rows r
@@ -2609,6 +2714,22 @@ router.patch(
           confidence: 1,
           userId: req.user.id,
         });
+
+        // A bin the sheet wrote that the product master does not know is a gap
+        // in the master, not a mapping to remember: the correction records it
+        // against the product, so the next sheet resolves that bin on its own.
+        //
+        // Only a value the sheet actually presented as a bin. A code column
+        // may hold a supplier's part number, and recording that as a bin would
+        // be worse than recording nothing.
+        if (row.raw_bin) {
+          await matching.rememberBin({
+            productId: confirmedProductId,
+            bin: row.raw_bin,
+            source: 'stock_sheet',
+            userId: req.user.id,
+          });
+        }
       }
 
       return res.json({ sheet: await loadSheet(req.params.id) });

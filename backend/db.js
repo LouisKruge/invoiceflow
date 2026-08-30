@@ -413,6 +413,11 @@ async function initializeDatabase() {
       supplier_id TEXT,
       supplier_product_code TEXT,
 
+      -- Where the product physically sits. On a sign-out sheet this is often
+      -- the only identifier anyone writes down, so it has to be able to
+      -- resolve to a product on its own.
+      bin_location TEXT,
+
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
 
       created_by TEXT,
@@ -819,6 +824,7 @@ async function initializeDatabase() {
       -- always be compared against the original reading.
       raw_product_code TEXT,
       raw_description TEXT,
+      raw_bin TEXT,
       raw_quantity TEXT,
       raw_unit TEXT,
       raw_notes TEXT,
@@ -900,6 +906,60 @@ async function initializeDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_stock_tx_syspro_status
       ON stock_transactions(syspro_sync_status);
+  `);
+
+  // Bin numbers. Stores that write only the bin on a sign-out sheet need it to
+  // identify the product, so it is indexed in the same punctuation-free form
+  // the matcher compares.
+  await pool.query(`
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS bin_location TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_products_bin
+      ON products (
+        UPPER(REGEXP_REPLACE(COALESCE(bin_location, ''), '[^A-Za-z0-9]', '', 'g'))
+      );
+
+    ALTER TABLE stock_sheet_rows
+      ADD COLUMN IF NOT EXISTS raw_bin TEXT;
+  `);
+
+  // A product can occupy more than one bin. Real stock sheets show the same
+  // part in several places — a fast-moving bolt in two racks, a lube oil
+  // across four shelves — and every one of those bins is written on a sign-out
+  // sheet at some point, so every one has to resolve. products.bin_location
+  // stays the primary bin a person sees; this table is the full set.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS product_bins (
+      id TEXT PRIMARY KEY,
+
+      product_id TEXT NOT NULL,
+
+      -- As written, and in the punctuation-free form the matcher compares.
+      bin TEXT NOT NULL,
+      normalized_bin TEXT NOT NULL,
+
+      source TEXT,
+
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (created_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL,
+
+      UNIQUE (product_id, normalized_bin)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_product_bins_normalized
+      ON product_bins(normalized_bin);
+
+    CREATE INDEX IF NOT EXISTS idx_product_bins_product
+      ON product_bins(product_id);
   `);
 
   // Line items carry their resolved product so an invoice can be re-examined

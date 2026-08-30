@@ -8,3 +8,7 @@ backend/data/
 
 *.log
 .DS_Store
+
+# Generated stock files (a copy of live stock data — belongs in the app, not
+# in the repository).
+out/
