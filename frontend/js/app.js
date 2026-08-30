@@ -5963,10 +5963,17 @@ function bindInvoiceListEvents(container) {
               return;
             }
 
-            const updateOnlyChecked =
+            // Everything the person set is read here, while the mapping
+            // screen is still on the page. Reading it after the stage is
+            // replaced with the progress message finds nothing, and the import
+            // silently runs with none of their choices.
+            const updateOnly =
               document.getElementById('import-update-only')?.checked === true;
 
-            if (!chosen.includes('quantity') && !updateOnlyChecked) {
+            const stockGroup =
+              document.getElementById('import-stock-group')?.value.trim() || null;
+
+            if (!chosen.includes('quantity') && !updateOnly) {
               const proceed =
                 await confirmDialog({
                   title: 'No quantity column mapped',
@@ -5984,15 +5991,11 @@ function bindInvoiceListEvents(container) {
 
             try {
 
-              const updateOnly =
-                document.getElementById('import-update-only')?.checked === true;
-
               const result =
                 await API.commitStockImport(inspection.import_id, {
                   mapping,
                   update_only: updateOnly,
-                  stock_group:
-                    document.getElementById('import-stock-group')?.value.trim() || null,
+                  stock_group: stockGroup,
                 });
 
               // Someone who has just imported stock wants to see all of it,

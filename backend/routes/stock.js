@@ -1568,6 +1568,7 @@ router.post(
         imported,
         skipped,
         update_only: updateOnly,
+        stock_group: importGroup,
         bins_recorded: binsRecorded,
         errors: errors.slice(0, 20),
       });

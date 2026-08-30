@@ -2621,11 +2621,16 @@ function renderProducts(data, filters) {
       </tr>
     `;
 
+  // A store that has grouped any of its stock gets the group treatment, even
+  // while only one list has been named — seeing the list it belongs to is how
+  // a person knows the grouping took.
+  const hasGroups = groups.some(g => g.name !== 'UNGROUPED');
+
   // With no group chosen the table is not one long list: each stock list gets
   // its own heading, so consumables and fittings read as separate things even
   // when they are on screen together.
   const rows =
-    filters.group || groups.length < 2
+    filters.group || !hasGroups
       ? products.map(productRow).join('')
       : (() => {
           const order = [];
@@ -2695,7 +2700,7 @@ function renderProducts(data, filters) {
   </div>
 
   ${
-    groups.length > 1
+    hasGroups
       ? `
         <div class="filter-row group-row-filters">
           <button
@@ -3439,6 +3444,41 @@ function renderImportResult(result) {
           : ''
       }
     </div>
+
+    ${
+      // What the import actually did with the settings on the previous screen,
+      // so a run that ignored them is visible rather than silent.
+      result.stock_group || result.update_only
+        ? `
+          <div class="body" style="padding:14px 0 0;">
+            ${
+              result.stock_group
+                ? `
+                  <div class="check-row pass">
+                    <span class="glyph">${Icons.check}</span>
+                    <span>Grouped as <strong>${esc(result.stock_group)}</strong>.</span>
+                  </div>
+                `
+                : ''
+            }
+            ${
+              result.update_only
+                ? `
+                  <div class="check-row pass">
+                    <span class="glyph">${Icons.check}</span>
+                    <span>
+                      Existing products only — nothing was created
+                      ${result.skipped ? `, and ${result.skipped} row${result.skipped === 1 ? '' : 's'} matched no product` : ''}
+                      — and no stock was moved.
+                    </span>
+                  </div>
+                `
+                : ''
+            }
+          </div>
+        `
+        : ''
+    }
 
     ${
       (result.errors || []).length
