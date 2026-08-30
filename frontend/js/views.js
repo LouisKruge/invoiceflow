@@ -2503,6 +2503,9 @@ function renderStockOverview(data) {
         <td class="cell-strong">${esc(row.product_description || '—')}</td>
         <td>${esc(transactionLabel(row.transaction_type))}</td>
         <td class="cell-num">${signedQuantity(row)}</td>
+        <td class="cell-num cell-strong">
+          ${row.balance_after == null ? '—' : fmtQty(row.balance_after)}
+        </td>
         <td class="cell-muted">${esc(row.created_by_name || 'System')}</td>
         <td class="cell-muted">${esc(timeAgo(row.created_at))}</td>
       </tr>
@@ -2589,6 +2592,7 @@ function renderStockOverview(data) {
             <th>Product</th>
             <th>Movement</th>
             <th class="th-num">Qty</th>
+            <th class="th-num">New qty</th>
             <th>By</th>
             <th>When</th>
           </tr>
@@ -2598,7 +2602,7 @@ function renderStockOverview(data) {
             rows ||
             `
               <tr>
-                <td colspan="6">
+                <td colspan="7">
                   <div class="empty-state">
                     ${Icons.stock}
                     <p>No stock movements yet.</p>
@@ -3104,6 +3108,7 @@ function renderStockTransactions(data, filters) {
             <th>Product</th>
             <th>Movement</th>
             <th class="th-num">Change</th>
+            <th class="th-num">New qty</th>
             <th class="th-num">Unit cost</th>
             <th class="th-num">Value</th>
             <th>Location</th>
@@ -3115,7 +3120,7 @@ function renderStockTransactions(data, filters) {
             rows ||
             `
               <tr>
-                <td colspan="9">
+                <td colspan="10">
                   <div class="empty-state">
                     ${Icons.ledger}
                     <p>No stock movements match.</p>
