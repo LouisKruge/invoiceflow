@@ -1848,3 +1848,37 @@ input[type='checkbox']:indeterminate::after {
   font-size: 11px;
   opacity: 0.65;
 }
+
+/* ------------------------ Invoice line stock decision ---------------------- */
+
+/* The three answers sit side by side: matching, creating and excluding are
+   equally valid, and a layout that buries one of them pushes people towards
+   whichever is nearest. */
+.decision-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+.decision-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  padding: 14px 16px;
+}
+.decision-card > .head {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-bottom: 12px;
+}
+.decision-card .field { margin-bottom: 10px; }
+
+/* A note under a form field, explaining a choice rather than labelling it. */
+.field-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-faint);
+}

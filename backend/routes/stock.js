@@ -27,6 +27,7 @@ const matching = require('../services/productMatching');
 const importer = require('../services/stockImport');
 const sheets = require('../services/stockSheet');
 const binSeed = require('../services/binSeed');
+const invoiceStock = require('../services/invoiceStock');
 const ai = require('../services/aiExtraction');
 
 const router = express.Router();
@@ -350,6 +351,11 @@ router.get(
         where += ` AND p.category = $${params.length}`;
       }
 
+      if (req.query.inventory_type) {
+        params.push(String(req.query.inventory_type).toUpperCase());
+        where += ` AND p.inventory_type = $${params.length}`;
+      }
+
       if (group) {
         if (group === 'UNGROUPED') {
           where += " AND COALESCE(NULLIF(TRIM(p.stock_group), ''), '') = ''";
@@ -480,9 +486,10 @@ router.post(
               id, sku, product_code, barcode, description,
               normalized_description, category, unit_of_measure,
               reorder_level, unit_cost, supplier_id, supplier_product_code,
-              bin_location, stock_group, created_by
+              bin_location, stock_group, inventory_type, track_inventory,
+              created_by
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
             RETURNING *
           `,
           [
@@ -500,6 +507,16 @@ router.post(
             body.supplier_product_code || null,
             body.bin_location ? String(body.bin_location).trim() : null,
             body.stock_group ? String(body.stock_group).trim() : null,
+
+            // Stock unless told otherwise, because that is what a product
+            // master is mostly for — but a service or a one-off can be
+            // recorded here too, and will never take a receipt.
+            body.inventory_type === 'NON_STOCK' ? 'NON_STOCK' : 'STOCK',
+
+            body.inventory_type === 'NON_STOCK'
+              ? false
+              : body.track_inventory !== false && body.track_inventory !== 'false',
+
             req.user.id,
           ]
         );
@@ -619,6 +636,8 @@ const EDITABLE_PRODUCT_FIELDS = [
   'supplier_product_code',
   'bin_location',
   'stock_group',
+  'inventory_type',
+  'track_inventory',
   'is_active',
 ];
 
@@ -1832,6 +1851,27 @@ router.post(
           [req.user.id, item.id]
         );
 
+        // Keep the invoice line's own answer in step with the queue: dismissed
+        // means a person said this is not stock.
+        if (item.source_line_id && item.source_document_type === 'INVOICE') {
+          await db.run(
+            `
+              UPDATE invoice_line_items
+              SET stock_decision = $1,
+                  stock_decision_reason = $2,
+                  stock_decision_by = $3,
+                  stock_decision_at = NOW()
+              WHERE id = $4
+            `,
+            [
+              invoiceStock.DECISIONS.DO_NOT_STOCK,
+              'NON_INVENTORY',
+              req.user.id,
+              item.source_line_id,
+            ]
+          );
+        }
+
         return res.json({ resolved: true, dismissed: true });
       }
 
@@ -1886,16 +1926,19 @@ router.post(
             [productId, written.id, req.user.id, item.id]
           );
 
-          if (item.source_line_id) {
+          if (item.source_line_id && item.source_document_type === 'INVOICE') {
             await client.query(
               `
                 UPDATE invoice_line_items
                 SET product_id = $1,
                     match_confidence = 1,
-                    match_method = 'manual_review'
+                    match_method = 'manual_review',
+                    stock_decision = 'POSTED',
+                    stock_decision_by = $3,
+                    stock_decision_at = NOW()
                 WHERE id = $2
               `,
-              [productId, item.source_line_id]
+              [productId, item.source_line_id, req.user.id]
             );
           }
 

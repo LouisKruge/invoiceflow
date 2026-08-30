@@ -3919,6 +3919,14 @@ function bindInvoiceListEvents(container) {
     id,
     warning
   ) {
+    // Opening a different invoice starts from that invoice's own reading,
+    // never the last one's.
+    if (ReviewState.invoiceId !== id) {
+      ReviewState.invoiceId = id;
+      ReviewState.stockPlan = null;
+      ReviewState.openLine = null;
+    }
+
     const mounted =
       await mountShell(
         `
@@ -4131,6 +4139,217 @@ function bindInvoiceListEvents(container) {
     }
   }
 
+  // What the stock panel is currently showing, so a repaint does not lose the
+  // open line or re-fetch a plan the server just handed back.
+  const ReviewState = {
+    invoiceId: null,
+    stockPlan: null,
+    openLine: null,
+  };
+
+  /**
+   * The three decisions a person can make about an invoice line.
+   */
+  function bindInvoiceStockDecisions(invoice) {
+    const content = document.querySelector('.content');
+
+    if (!content) return;
+
+    const repaint = async (plan) => {
+      ReviewState.stockPlan = plan || null;
+
+      await paintReview(invoice);
+    };
+
+    content
+      .querySelectorAll('[data-line-decide]')
+      .forEach((button) => {
+        button.onclick =
+          async () => {
+            const lineId = button.dataset.lineDecide;
+
+            ReviewState.openLine =
+              ReviewState.openLine === lineId ? null : lineId;
+
+            await paintReview(invoice);
+          };
+      });
+
+    const openLine = ReviewState.openLine;
+
+    if (!openLine) return;
+
+    // Searching the product master, for the "match an existing product" answer.
+    const search = document.getElementById(`line-search-${openLine}`);
+    const results = document.getElementById(`line-results-${openLine}`);
+
+    if (search && results) {
+      let timer = null;
+
+      search.oninput =
+        () => {
+          clearTimeout(timer);
+
+          const term = search.value.trim();
+
+          if (term.length < 2) return;
+
+          timer =
+            setTimeout(
+              async () => {
+                try {
+                  const found = await API.listProducts({ q: term, limit: 8 });
+
+                  results.innerHTML =
+                    (found.products || []).length
+                      ? found.products.map((p) => `
+                          <label class="intel-row" style="cursor:pointer;align-items:center;">
+                            <input
+                              type="radio"
+                              name="line-${esc(openLine)}"
+                              value="${esc(p.id)}"
+                              style="width:14px;height:14px;margin-right:2px;"
+                            />
+                            <div style="flex:1;min-width:0;">
+                              <div class="title">${esc(p.description)}</div>
+                              <div class="detail">
+                                ${esc(p.sku || 'No SKU')}
+                                ${p.inventory_type === 'NON_STOCK' ? ' · not inventory' : ''}
+                                · ${fmtQty(p.current_quantity)} in stock
+                              </div>
+                            </div>
+                          </label>
+                        `).join('')
+                      : '<div class="cell-muted" style="font-size:13px;">No products match that search.</div>';
+
+                } catch (error) {
+                  console.warn('[Review] Product search failed:', error);
+                }
+              },
+              250
+            );
+        };
+    }
+
+    const match = content.querySelector(`[data-line-match="${openLine}"]`);
+
+    if (match) {
+      match.onclick =
+        async () => {
+          const chosen =
+            content.querySelector(`input[name="line-${openLine}"]:checked`);
+
+          if (!chosen) {
+            toast('Choose the product this line refers to.', 'error');
+
+            return;
+          }
+
+          match.disabled = true;
+
+          try {
+            const result =
+              await API.setInvoiceLineStock(invoice.id, openLine, {
+                decision: 'STOCK_MATCHED',
+                product_id: chosen.value,
+              });
+
+            ReviewState.openLine = null;
+
+            toast(
+              result.decision === 'NON_STOCK'
+                ? 'Matched — that product is not tracked as stock'
+                : 'Matched to stock',
+              'success'
+            );
+
+            await repaint(result.plan);
+
+          } catch (error) {
+            match.disabled = false;
+            handleApiError(error, 'Unable to match that line.');
+          }
+        };
+    }
+
+    const skip = content.querySelector(`[data-line-skip="${openLine}"]`);
+
+    if (skip) {
+      skip.onclick =
+        async () => {
+          skip.disabled = true;
+
+          try {
+            const result =
+              await API.setInvoiceLineStock(invoice.id, openLine, {
+                decision: 'DO_NOT_STOCK',
+                reason: document.getElementById(`line-reason-${openLine}`)?.value,
+              });
+
+            ReviewState.openLine = null;
+
+            toast('Kept off stock — the line stays on the invoice', 'success');
+
+            await repaint(result.plan);
+
+          } catch (error) {
+            skip.disabled = false;
+            handleApiError(error, 'Unable to record that decision.');
+          }
+        };
+    }
+
+    const create = content.querySelector(`[data-line-create="${openLine}"]`);
+
+    if (create) {
+      create.onclick =
+        async () => {
+          const description =
+            document.getElementById(`line-desc-${openLine}`)?.value.trim();
+
+          if (!description) {
+            toast('A product description is required.', 'error');
+
+            return;
+          }
+
+          const confirmed =
+            await confirmDialog({
+              title: 'Create this product?',
+              body:
+                `${description} will be added to the product master, and the ` +
+                'invoice quantity will be added to its stock when this invoice ' +
+                'is approved.',
+              confirmLabel: 'Create and add to stock',
+            });
+
+          if (!confirmed) return;
+
+          create.disabled = true;
+
+          try {
+            const result =
+              await API.createProductFromLine(invoice.id, openLine, {
+                description,
+                sku: document.getElementById(`line-sku-${openLine}`)?.value.trim() || null,
+                bin_location: document.getElementById(`line-bin-${openLine}`)?.value.trim() || null,
+                stock_group: document.getElementById(`line-group-${openLine}`)?.value.trim() || null,
+              });
+
+            ReviewState.openLine = null;
+
+            toast(`${result.product.description} added to the product master`, 'success');
+
+            await repaint(result.plan);
+
+          } catch (error) {
+            create.disabled = false;
+            handleApiError(error, 'Unable to create that product.');
+          }
+        };
+    }
+  }
+
   async function paintReview(
     invoice,
     warning
@@ -4144,17 +4363,34 @@ function bindInvoiceListEvents(container) {
       return;
     }
 
+    let stockPlan = ReviewState.stockPlan;
+
+    if (!stockPlan && hasFunction(API, 'invoiceStockPlan')) {
+      try {
+        stockPlan = await API.invoiceStockPlan(invoice.id);
+      } catch (error) {
+        // The stock panel is an addition to this screen, not the point of it.
+        console.warn('[Review] Could not load the stock impact:', error);
+      }
+    }
+
+    ReviewState.stockPlan = stockPlan;
+
     content.innerHTML =
       renderInvoiceDetail(
         invoice,
         {
           warning,
+          stockPlan,
+          openLine: ReviewState.openLine,
         }
       );
 
     bindShellEvents();
 
     await mountDocumentViewer(invoice);
+
+    bindInvoiceStockDecisions(invoice);
 
     // -------------------------------------------------------------------------
     // Delete
@@ -5437,6 +5673,18 @@ function bindInvoiceListEvents(container) {
               <input id="np-reorder" type="number" min="0" step="1" placeholder="0" />
             </div>
           </div>
+          <div class="field">
+            <label>Is this inventory?</label>
+            <select id="np-inventory-type">
+              <option value="STOCK">Stock — counted, and invoices receipt into it</option>
+              <option value="NON_STOCK">Not stock — recorded on invoices, never counted</option>
+            </select>
+            <div class="field-hint">
+              Services, hire, delivery and consumed-on-site items belong here.
+              An invoice line matching a non-stock product is captured without
+              moving any quantity.
+            </div>
+          </div>
           <div class="modal-actions">
             <button class="btn btn-secondary" id="np-cancel">Cancel</button>
             <button class="btn btn-primary" id="np-save">Create product</button>
@@ -5477,6 +5725,9 @@ function bindInvoiceListEvents(container) {
             unit_cost: backdrop.querySelector('#np-cost').value || 0,
             category: backdrop.querySelector('#np-category').value.trim() || null,
             reorder_level: backdrop.querySelector('#np-reorder').value || 0,
+            inventory_type: backdrop.querySelector('#np-inventory-type').value,
+            track_inventory:
+              backdrop.querySelector('#np-inventory-type').value !== 'NON_STOCK',
           });
 
           close();
@@ -5624,6 +5875,40 @@ function bindInvoiceListEvents(container) {
               editBin.dataset.bin,
               detail.product.description
             );
+      }
+
+      const inventoryType = document.getElementById('btn-inventory-type');
+
+      if (inventoryType) {
+        inventoryType.onclick =
+          async () => {
+            const wasNonStock =
+              inventoryType.dataset.inventoryType === 'NON_STOCK';
+
+            const next = wasNonStock ? 'STOCK' : 'NON_STOCK';
+
+            // A product that is not inventory is not counted either — the two
+            // flags move together so nothing is left half-tracked.
+            try {
+
+              await API.updateProduct(inventoryType.dataset.productId, {
+                inventory_type: next,
+                track_inventory: next === 'STOCK',
+              });
+
+              toast(
+                next === 'NON_STOCK'
+                  ? 'Marked as non-stock. Invoices will capture it without moving quantity.'
+                  : 'Back on stock. Invoices will receipt into it again.',
+                'success'
+              );
+
+              await renderProductDetailPage(inventoryType.dataset.productId);
+
+            } catch (error) {
+              handleApiError(error, 'Unable to change the inventory type.');
+            }
+          };
       }
 
       const adjust = document.getElementById('btn-adjust-product');
