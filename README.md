@@ -101,8 +101,11 @@ sign-out sheet is marked `FAILED` with the reason — and, in both cases, nothin
 
 - **Product master** with a canonical product ID — descriptions differ between documents, IDs do not
 - **Bin numbers**: imported from the stock spreadsheet, shown on every product, and able to identify a
-  product on their own, because a sign-out sheet often records nothing else. A bin holding two products
-  is treated as ambiguous rather than guessed at
+  product on their own, because a sign-out sheet often records nothing else. A product may occupy
+  several bins and any of them resolves it; a bin holding two products is treated as ambiguous rather
+  than guessed at
+- **Update-only import** for filling a field in on a master that already exists — bins, costs,
+  categories — which creates no products and posts no quantities whatever the mapping says
 - **Import** an existing stock spreadsheet: columns are detected, you confirm the mapping, and each row
   becomes an `OPENING_BALANCE` transaction rather than a number typed into a table
 - **Ledger** of every movement (`OPENING_BALANCE`, `PURCHASE_RECEIPT`, `STOCK_ISSUE`, `ADJUSTMENT`,

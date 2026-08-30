@@ -2601,7 +2601,9 @@ function renderProducts(data, filters) {
       <tr class="clickable" data-product-id="${esc(p.id)}">
         <td class="cell-id">${esc(p.sku || p.product_code || '—')}</td>
         <td class="cell-strong">${esc(p.description)}</td>
-        <td class="cell-bin">${esc(p.bin_location || '—')}</td>
+        <td class="cell-bin">
+          ${esc(p.bin_location || '—')}${p.bin_count > 1 ? ` +${p.bin_count - 1}` : ''}
+        </td>
         <td class="cell-muted">${esc(p.category || '—')}</td>
         <td class="cell-num">${fmtQty(p.current_quantity)}</td>
         <td class="cell-muted">${esc(p.unit_of_measure || 'ea')}</td>
@@ -2812,8 +2814,14 @@ function renderProductDetail(detail, history) {
       <div class="v">${product.reorder_level || 0}</div>
     </div>
     <div class="item">
-      <div class="l">Bin</div>
-      <div class="v mono">${esc(product.bin_location || '—')}</div>
+      <div class="l">${(detail.bins || []).length > 1 ? 'Bins' : 'Bin'}</div>
+      <div class="v mono">
+        ${
+          (detail.bins || []).length
+            ? esc(detail.bins.map(b => b.bin).join(', '))
+            : esc(product.bin_location || '—')
+        }
+      </div>
     </div>
   </div>
 
@@ -3313,6 +3321,13 @@ function renderImportMapping(inspection) {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px;gap:12px;">
       <span style="font-size:12.5px;color:var(--ink-muted);">
         Each row with a quantity becomes an opening balance transaction.
+        <label style="display:flex;align-items:center;gap:7px;margin-top:8px;cursor:pointer;">
+          <input type="checkbox" id="import-update-only" />
+          <span>
+            Only update products that already exist — do not create new ones,
+            and do not post any quantities
+          </span>
+        </label>
       </span>
 
       <span style="display:flex;gap:8px;">
@@ -3333,12 +3348,22 @@ function renderImportResult(result) {
     <div class="batch-summary" style="border-top:none;margin-top:0;">
       <div class="item">
         <div class="n">${result.imported}</div>
-        <div class="l">Imported</div>
+        <div class="l">${result.update_only ? 'Updated' : 'Imported'}</div>
       </div>
       <div class="item">
         <div class="n">${result.skipped}</div>
         <div class="l">Skipped</div>
       </div>
+      ${
+        result.bins_recorded
+          ? `
+            <div class="item">
+              <div class="n">${result.bins_recorded}</div>
+              <div class="l">Bins recorded</div>
+            </div>
+          `
+          : ''
+      }
     </div>
 
     ${

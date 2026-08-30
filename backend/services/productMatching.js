@@ -331,12 +331,19 @@ async function matchProduct(query = {}) {
   // -------------------------------------------------------------------------
 
   if (normalizedBin) {
+    // A product's primary bin and every other bin it occupies are the same
+    // evidence, so both are searched and a product found by either counts once.
     const rows =
       await db.all(
         `
-          SELECT * FROM products
-          WHERE is_active = TRUE
-            AND UPPER(REGEXP_REPLACE(COALESCE(bin_location, ''), '[^A-Za-z0-9]', '', 'g')) = $1
+          SELECT DISTINCT ON (p.id) p.*
+          FROM products p
+          LEFT JOIN product_bins pb ON pb.product_id = p.id
+          WHERE p.is_active = TRUE
+            AND (
+              UPPER(REGEXP_REPLACE(COALESCE(p.bin_location, ''), '[^A-Za-z0-9]', '', 'g')) = $1
+              OR pb.normalized_bin = $1
+            )
           LIMIT 10
         `,
         [normalizedBin]
@@ -454,6 +461,77 @@ async function matchProduct(query = {}) {
 }
 
 /**
+ * Records a bin a product occupies.
+ *
+ * Additive by design: a product that turns up in a second bin gains that bin
+ * rather than losing the first, because both are real places the part is
+ * stored and both get written on sign-out sheets. The first bin recorded also
+ * becomes the product's primary bin, which is the one shown on screen.
+ *
+ * @returns {Promise<boolean>} whether the bin was new to this product
+ */
+async function rememberBin({ productId, bin, source, userId }, client) {
+  const runner = client || db;
+
+  const normalized = normalizeCode(bin);
+
+  if (!productId || !normalized) return false;
+
+  const inserted =
+    await runner.query(
+      `
+        INSERT INTO product_bins
+          (id, product_id, bin, normalized_bin, source, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (product_id, normalized_bin) DO NOTHING
+        RETURNING id
+      `,
+      [
+        uuid(),
+        productId,
+        String(bin).trim(),
+        normalized,
+        source || 'manual',
+        userId || null,
+      ]
+    );
+
+  // Only fills an empty primary — moving a product's main bin stays a
+  // deliberate edit on the product itself.
+  await runner.query(
+    `
+      UPDATE products
+      SET bin_location = $1, updated_at = NOW()
+      WHERE id = $2
+        AND COALESCE(NULLIF(TRIM(bin_location), ''), '') = ''
+    `,
+    [String(bin).trim(), productId]
+  );
+
+  return inserted.rows.length > 0;
+}
+
+/**
+ * Every bin a product occupies, primary first.
+ */
+async function binsForProduct(productId, client) {
+  const runner = client || db;
+
+  const result =
+    await runner.query(
+      `
+        SELECT pb.bin, pb.source, pb.created_at
+        FROM product_bins pb
+        WHERE pb.product_id = $1
+        ORDER BY pb.created_at, pb.bin
+      `,
+      [productId]
+    );
+
+  return result.rows;
+}
+
+/**
  * Records the answer a person gave in the review queue so the same supplier
  * wording resolves automatically next time.
  */
@@ -515,4 +593,6 @@ module.exports = {
   similarity,
   matchProduct,
   rememberMatch,
+  rememberBin,
+  binsForProduct,
 };

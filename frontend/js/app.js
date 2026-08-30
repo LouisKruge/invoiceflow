@@ -5947,7 +5947,10 @@ function bindInvoiceListEvents(container) {
               return;
             }
 
-            if (!chosen.includes('quantity')) {
+            const updateOnlyChecked =
+              document.getElementById('import-update-only')?.checked === true;
+
+            if (!chosen.includes('quantity') && !updateOnlyChecked) {
               const proceed =
                 await confirmDialog({
                   title: 'No quantity column mapped',
@@ -5965,8 +5968,14 @@ function bindInvoiceListEvents(container) {
 
             try {
 
+              const updateOnly =
+                document.getElementById('import-update-only')?.checked === true;
+
               const result =
-                await API.commitStockImport(inspection.import_id, { mapping });
+                await API.commitStockImport(inspection.import_id, {
+                  mapping,
+                  update_only: updateOnly,
+                });
 
               // Someone who has just imported stock wants to see all of it,
               // not whatever the products list was last filtered to.

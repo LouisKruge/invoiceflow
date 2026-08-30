@@ -924,6 +924,44 @@ async function initializeDatabase() {
       ADD COLUMN IF NOT EXISTS raw_bin TEXT;
   `);
 
+  // A product can occupy more than one bin. Real stock sheets show the same
+  // part in several places — a fast-moving bolt in two racks, a lube oil
+  // across four shelves — and every one of those bins is written on a sign-out
+  // sheet at some point, so every one has to resolve. products.bin_location
+  // stays the primary bin a person sees; this table is the full set.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS product_bins (
+      id TEXT PRIMARY KEY,
+
+      product_id TEXT NOT NULL,
+
+      -- As written, and in the punctuation-free form the matcher compares.
+      bin TEXT NOT NULL,
+      normalized_bin TEXT NOT NULL,
+
+      source TEXT,
+
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE CASCADE,
+
+      FOREIGN KEY (created_by)
+        REFERENCES users(id)
+        ON DELETE SET NULL,
+
+      UNIQUE (product_id, normalized_bin)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_product_bins_normalized
+      ON product_bins(normalized_bin);
+
+    CREATE INDEX IF NOT EXISTS idx_product_bins_product
+      ON product_bins(product_id);
+  `);
+
   // Line items carry their resolved product so an invoice can be re-examined
   // later without re-running the matcher.
   await pool.query(`

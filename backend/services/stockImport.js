@@ -34,7 +34,7 @@ const TARGET_FIELDS = [
 // Header wordings seen in the wild, most specific first. Matching is done on a
 // squashed lower-case form so spacing and punctuation do not matter.
 const HEADER_HINTS = [
-  ['bin_location',          ['bin', 'binno', 'binnumber', 'binnr', 'bincode', 'binlocation', 'binloc', 'storagebin', 'shelf', 'shelfno', 'rack', 'rackno', 'aisle', 'slot', 'position', 'location', 'storagelocation', 'warehouselocation', 'pickface', 'pickslot']],
+  ['bin_location',          ['bin', 'binno', 'binnumber', 'binnr', 'bincode', 'binlocation', 'binloc', 'storagebin', 'shelf', 'shelfno', 'rack', 'rackno', 'aisle', 'slot', 'position', 'location', 'pickface', 'pickslot']],
   ['supplier_product_code', ['supplierproductcode', 'suppliercode', 'suppliersku', 'vendorcode', 'manufacturercode', 'mfrcode', 'partno', 'partnumber']],
   ['reorder_level',         ['reorderlevel', 'reorderpoint', 'reorder', 'minlevel', 'minimumlevel', 'minstock', 'minqty', 'reorderqty', 'safetystock', 'rol']],
   ['unit_cost',             ['unitcost', 'cost', 'costprice', 'price', 'unitprice', 'buyprice', 'purchaseprice', 'costeach', 'rate', 'avgcost', 'averagecost']],
@@ -53,6 +53,44 @@ function squash(value) {
     .replace(/[^a-z0-9]/g, '');
 }
 
+// How a header matched, strongest evidence first.
+const MATCH_TIERS = [
+  ['exact', 1],
+  ['prefix', 0.8],
+  ['contains', 0.6],
+];
+
+/**
+ * Which fields a header could mean, split by how strong the evidence is.
+ *
+ * Substring matching is only allowed for hints long enough to be meaningful.
+ * Short, common words hide inside headers that mean something else entirely —
+ * "location" contains "cat", and "SUP STOCK CODE" contains "stock", which read
+ * a supplier's part number as an opening quantity. A compound hint like
+ * "stockcode" or "qtyonhand" carries enough of its own context to be safe; a
+ * bare "stock" or "cost" does not, and only matches a header outright or as a
+ * prefix.
+ */
+function fieldMatches(header) {
+  const key = squash(header);
+
+  const result = { exact: [], prefix: [], contains: [] };
+
+  if (!key) return result;
+
+  for (const [field, hints] of HEADER_HINTS) {
+    if (hints.includes(key)) {
+      result.exact.push(field);
+    } else if (hints.some((hint) => key.startsWith(hint) || hint.startsWith(key))) {
+      result.prefix.push(field);
+    } else if (hints.some((hint) => hint.length >= 6 && key.includes(hint))) {
+      result.contains.push(field);
+    }
+  }
+
+  return result;
+}
+
 /**
  * Guesses which target field a spreadsheet header means.
  *
@@ -60,36 +98,12 @@ function squash(value) {
  * that merely contains "cost".
  */
 function guessField(header, alreadyUsed) {
-  const key = squash(header);
+  const matches = fieldMatches(header);
 
-  if (!key) return null;
+  for (const [tier, confidence] of MATCH_TIERS) {
+    const field = matches[tier].find((f) => !alreadyUsed.has(f));
 
-  for (const [field, hints] of HEADER_HINTS) {
-    if (alreadyUsed.has(field)) continue;
-
-    if (hints.includes(key)) {
-      return { field, confidence: 1 };
-    }
-  }
-
-  for (const [field, hints] of HEADER_HINTS) {
-    if (alreadyUsed.has(field)) continue;
-
-    if (hints.some((hint) => key.startsWith(hint) || hint.startsWith(key))) {
-      return { field, confidence: 0.8 };
-    }
-  }
-
-  // Substring matching only for hints long enough to be meaningful. A
-  // three-letter abbreviation hides inside unrelated words — "location"
-  // contains "cat" — and a wrong guess is worse than no guess, because a
-  // person has to notice it to undo it.
-  for (const [field, hints] of HEADER_HINTS) {
-    if (alreadyUsed.has(field)) continue;
-
-    if (hints.some((hint) => hint.length >= 4 && key.includes(hint))) {
-      return { field, confidence: 0.6 };
-    }
+    if (field) return { field, confidence };
   }
 
   return null;
@@ -291,20 +305,33 @@ async function inspectSpreadsheet(filePath, mimeType) {
     headers.pop();
   }
 
+  // Columns compete for a field, and the strongest evidence wins it — across
+  // the whole header row, not left to right. Real sheets put a "WAREHOUSE"
+  // column in front of the "BIN" column and a "SUP STOCK CODE" in front of
+  // "QTY ON HAND"; resolving each header on its own hands the field to
+  // whichever column happens to come first, however weak its claim.
+  const candidates = headers.map(fieldMatches);
+
   const used = new Set();
   const mapping = {};
   const confidence = {};
 
-  headers.forEach((header, index) => {
-    const guess = guessField(header, used);
+  MATCH_TIERS.forEach(([tier, tierConfidence]) => {
+    headers.forEach((header, index) => {
+      if (mapping[String(index)]) return;
 
-    if (guess) {
-      used.add(guess.field);
-      mapping[String(index)] = guess.field;
-      confidence[String(index)] = guess.confidence;
-    } else {
-      mapping[String(index)] = null;
-    }
+      const field = candidates[index][tier].find((f) => !used.has(f));
+
+      if (!field) return;
+
+      used.add(field);
+      mapping[String(index)] = field;
+      confidence[String(index)] = tierConfidence;
+    });
+  });
+
+  headers.forEach((header, index) => {
+    if (!(String(index) in mapping)) mapping[String(index)] = null;
   });
 
   const rows =
@@ -402,6 +429,7 @@ module.exports = {
   TARGET_FIELDS,
   squash,
   guessField,
+  fieldMatches,
   parseCsv,
   parseCsvLine,
   inspectSpreadsheet,
