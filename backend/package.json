@@ -1,6 +1,6 @@
 {
   "name": "invoiceflow",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "AI-powered invoice processing and management system",
   "main": "server.js",
   "scripts": {
