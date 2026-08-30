@@ -37,73 +37,119 @@ function readSeed() {
 }
 
 /**
+ * What the bundled sheet holds. Reads the file, touches no data.
+ */
+function summary() {
+  const { source, rows } = readSeed();
+
+  const groups = {};
+
+  rows.forEach((row) => {
+    const key = row.group || 'Ungrouped';
+
+    groups[key] = (groups[key] || 0) + 1;
+  });
+
+  return {
+    source,
+    row_count: rows.length,
+    groups: Object.entries(groups).map(([name, count]) => ({ name, count })),
+  };
+}
+
+/**
+ * The seed as parallel arrays, which is how it is handed to Postgres — five
+ * parameters rather than one per cell.
+ */
+function columns(rows) {
+  return {
+    codes: rows.map((row) => (row.code ? String(row.code).trim() : '')),
+    normalized: rows.map((row) => matching.normalizeDescription(row.description || '')),
+    bins: rows.map((row) => String(row.bin || '').trim()),
+    normalizedBins: rows.map((row) => matching.normalizeCode(row.bin || '')),
+    groups: rows.map((row) => String(row.group || '')),
+  };
+}
+
+// Resolving every seed row to a product, in one pass.
+//
+// The rungs are the same ones the importer climbs — SKU, the supplier's code,
+// the product code, then the wording — and the tie-break is explicit, because
+// two products can share a code and a preview that resolves a row differently
+// from the run reports work that is already done.
+const RESOLVE = `
+  seed AS (
+    SELECT *
+    FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+      WITH ORDINALITY AS t(
+        code, normalized_description, bin, normalized_bin, stock_group, ord
+      )
+  ),
+  resolved AS (
+    SELECT seed.*, hit.id AS product_id, hit.stock_group AS current_group
+    FROM seed
+    LEFT JOIN LATERAL (
+      SELECT p.id, p.stock_group
+      FROM products p
+      WHERE p.is_active = TRUE
+        AND (
+          (seed.code <> '' AND (
+            p.sku = seed.code
+            OR p.supplier_product_code = seed.code
+            OR p.product_code = seed.code
+          ))
+          OR (
+            seed.normalized_description <> ''
+            AND p.normalized_description = seed.normalized_description
+          )
+        )
+      ORDER BY
+        CASE
+          WHEN seed.code <> '' AND p.sku = seed.code THEN 1
+          WHEN seed.code <> '' AND p.supplier_product_code = seed.code THEN 2
+          WHEN seed.code <> '' AND p.product_code = seed.code THEN 3
+          ELSE 4
+        END,
+        p.created_at,
+        p.id
+      LIMIT 1
+    ) hit ON TRUE
+  )
+`;
+
+/**
  * How much of the bundled sheet is still outstanding.
  *
- * One set-based query rather than a row-by-row walk: this runs every time the
- * products screen loads, and 2,000 round trips to decide whether to show a
- * banner would make the screen slower than the thing it is offering to do.
+ * This runs every time the products screen loads, so it is one query rather
+ * than a walk: two thousand round trips to decide whether to show a banner
+ * would make the screen slower than the thing it is offering to do.
  */
 async function preview() {
   const { source, rows } = readSeed();
 
   if (!rows.length) {
-    return { source, row_count: 0, matched: 0, unmatched: 0, pending_bins: 0, pending_groups: 0 };
+    return {
+      source,
+      row_count: 0,
+      matched: 0,
+      unmatched: 0,
+      pending_bins: 0,
+      pending_groups: 0,
+    };
   }
 
-  const codes = rows.map((row) => (row.code ? String(row.code).trim() : ''));
-  const normalized =
-    rows.map((row) => matching.normalizeDescription(row.description || ''));
-  const bins = rows.map((row) => String(row.bin || '').trim());
-  const normalizedBins = rows.map((row) => matching.normalizeCode(row.bin || ''));
-  const groups = rows.map((row) => String(row.group || ''));
+  const { codes, normalized, bins, normalizedBins, groups } = columns(rows);
 
   const result =
     await db.get(
       `
-        WITH seed AS (
-          SELECT *
-          FROM unnest(
-            $1::text[], $2::text[], $3::text[], $4::text[], $5::text[]
-          ) AS t(code, normalized_description, bin, normalized_bin, stock_group)
-        ),
-        resolved AS (
-          SELECT seed.*, hit.id AS product_id, hit.stock_group AS current_group
-          FROM seed
-          LEFT JOIN LATERAL (
-            SELECT p.id, p.stock_group
-            FROM products p
-            WHERE p.is_active = TRUE
-              AND (
-                (seed.code <> '' AND (
-                  p.sku = seed.code
-                  OR p.supplier_product_code = seed.code
-                  OR p.product_code = seed.code
-                ))
-                OR (
-                  seed.normalized_description <> ''
-                  AND p.normalized_description = seed.normalized_description
-                )
-              )
-            -- The same rungs, in the same order, with the same tie-break as
-            -- findProduct(): a preview that resolves a row differently from
-            -- the run itself reports work that is already done.
-            ORDER BY
-              CASE
-                WHEN seed.code <> '' AND p.sku = seed.code THEN 1
-                WHEN seed.code <> '' AND p.supplier_product_code = seed.code THEN 2
-                WHEN seed.code <> '' AND p.product_code = seed.code THEN 3
-                ELSE 4
-              END,
-              p.created_at,
-              p.id
-            LIMIT 1
-          ) hit ON TRUE
-        )
+        WITH ${RESOLVE}
         SELECT
           COUNT(*) FILTER (WHERE product_id IS NOT NULL)::int AS matched,
           COUNT(*) FILTER (WHERE product_id IS NULL)::int AS unmatched,
           COUNT(*) FILTER (
             WHERE product_id IS NOT NULL
+              AND normalized_bin <> ''
               AND NOT EXISTS (
                 SELECT 1 FROM product_bins pb
                 WHERE pb.product_id = resolved.product_id
@@ -131,174 +177,145 @@ async function preview() {
 }
 
 /**
- * What the bundled sheet holds, without changing anything.
- */
-function summary() {
-  const { source, rows } = readSeed();
-
-  const groups = {};
-
-  rows.forEach((row) => {
-    const key = row.group || 'Ungrouped';
-
-    groups[key] = (groups[key] || 0) + 1;
-  });
-
-  return {
-    source,
-    row_count: rows.length,
-    groups: Object.entries(groups).map(([name, count]) => ({ name, count })),
-  };
-}
-
-/**
- * Finds the product a bin sheet row refers to.
- *
- * The same ladder the importer uses, and for the same reason: a store does not
- * always identify its stock by the same column twice.
- */
-async function findProduct(client, row) {
-  const code = row.code ? String(row.code).trim() : '';
-  const description = row.description ? String(row.description).trim() : '';
-
-  // Two products can share a code or a wording. Which one is picked has to be
-  // the same every time, or a second run finds work the first one thought it
-  // had done — so every rung orders before it limits.
-  const first = async (sql, params) => {
-    const result = await client.query(sql, params);
-
-    return result.rows.length ? result.rows[0].id : null;
-  };
-
-  if (code) {
-    const bySku =
-      await first(
-        `SELECT id FROM products WHERE is_active = TRUE AND sku = $1
-         ORDER BY created_at, id LIMIT 1`,
-        [code]
-      );
-
-    if (bySku) return bySku;
-
-    const bySupplierCode =
-      await first(
-        `SELECT id FROM products WHERE is_active = TRUE AND supplier_product_code = $1
-         ORDER BY created_at, id LIMIT 1`,
-        [code]
-      );
-
-    if (bySupplierCode) return bySupplierCode;
-
-    const byProductCode =
-      await first(
-        `SELECT id FROM products WHERE is_active = TRUE AND product_code = $1
-         ORDER BY created_at, id LIMIT 1`,
-        [code]
-      );
-
-    if (byProductCode) return byProductCode;
-  }
-
-  if (description) {
-    const normalized = matching.normalizeDescription(description);
-
-    return first(
-      `SELECT id FROM products
-       WHERE is_active = TRUE AND normalized_description = $1
-       ORDER BY created_at, id LIMIT 1`,
-      [normalized]
-    );
-  }
-
-  return null;
-}
-
-/**
  * Applies the bundled sheet.
+ *
+ * Two thousand rows resolved one at a time is roughly ten thousand round
+ * trips. Against a database on the same machine that is twenty seconds;
+ * against a hosted one it is several minutes, and the request waiting on it
+ * times out long before it finishes — which looks, from a browser, exactly
+ * like a button that does nothing.
+ *
+ * So it is one statement: resolve every row, insert the bins that are missing,
+ * set the primary bin, set the group. Each product's first bin in sheet order
+ * becomes its primary one, and a bin or group already set by hand is left
+ * alone.
  *
  * @param {object} options
  * @param {string} [options.userId]
- * @param {boolean} [options.dryRun] - report what would happen, change nothing
- * @returns {Promise<object>} what was matched, recorded and left over
  */
-async function apply({ userId, dryRun } = {}) {
+async function apply({ userId } = {}) {
   const { source, rows } = readSeed();
 
   if (!rows.length) {
-    return {
-      applied: false,
-      reason: 'no_seed',
-      source,
-      row_count: 0,
-    };
+    return { applied: false, reason: 'no_seed', source, row_count: 0 };
   }
 
-  let matched = 0;
-  let unmatched = 0;
-  let binsRecorded = 0;
-  let grouped = 0;
+  const { codes, normalized, bins, normalizedBins, groups } = columns(rows);
 
-  const groupCounts = {};
-  const misses = [];
+  const result =
+    await db.get(
+      `
+        WITH ${RESOLVE},
+        landing AS (
+          SELECT * FROM resolved
+          WHERE product_id IS NOT NULL
+            AND normalized_bin <> ''
+        ),
+        recorded AS (
+          INSERT INTO product_bins
+            (id, product_id, bin, normalized_bin, source, created_by)
+          SELECT
+            gen_random_uuid()::text,
+            d.product_id,
+            d.bin,
+            d.normalized_bin,
+            'bundled_sheet',
+            $6
+          FROM (
+            SELECT DISTINCT ON (product_id, normalized_bin) *
+            FROM landing
+            ORDER BY product_id, normalized_bin, ord
+          ) d
+          ON CONFLICT (product_id, normalized_bin) DO NOTHING
+          RETURNING product_id
+        ),
+        -- The bin and the group are set by one UPDATE rather than two.
+        -- Postgres runs every data-modifying branch of a statement against the
+        -- same snapshot, and leaves the result unspecified when two of them
+        -- touch the same row — which silently cost the groups when the bins
+        -- were written first.
+        per_product AS (
+          SELECT
+            product_id,
+            (array_agg(bin ORDER BY ord) FILTER (WHERE normalized_bin <> ''))[1]
+              AS first_bin,
+            (array_agg(stock_group ORDER BY ord) FILTER (WHERE stock_group <> ''))[1]
+              AS first_group
+          FROM resolved
+          WHERE product_id IS NOT NULL
+          GROUP BY product_id
+        ),
+        -- Read before the update lands, so the counts describe what changed
+        -- rather than what is now true.
+        pending AS (
+          SELECT
+            pp.product_id,
+            (
+              COALESCE(NULLIF(TRIM(p.bin_location), ''), '') = ''
+              AND pp.first_bin IS NOT NULL
+            ) AS sets_bin,
+            (
+              COALESCE(NULLIF(TRIM(p.stock_group), ''), '') = ''
+              AND pp.first_group IS NOT NULL
+            ) AS sets_group
+          FROM per_product pp
+          JOIN products p ON p.id = pp.product_id
+        ),
+        touched AS (
+          UPDATE products p
+          SET
+            bin_location =
+              CASE
+                WHEN COALESCE(NULLIF(TRIM(p.bin_location), ''), '') = ''
+                  AND pp.first_bin IS NOT NULL
+                THEN pp.first_bin
+                ELSE p.bin_location
+              END,
+            stock_group =
+              CASE
+                WHEN COALESCE(NULLIF(TRIM(p.stock_group), ''), '') = ''
+                  AND pp.first_group IS NOT NULL
+                THEN pp.first_group
+                ELSE p.stock_group
+              END,
+            updated_at = NOW()
+          FROM per_product pp
+          WHERE p.id = pp.product_id
+          RETURNING p.id
+        )
+        SELECT
+          (SELECT COUNT(*) FROM resolved WHERE product_id IS NOT NULL)::int AS matched,
+          (SELECT COUNT(*) FROM resolved WHERE product_id IS NULL)::int AS unmatched,
+          (SELECT COUNT(*) FROM recorded)::int AS bins_recorded,
+          (SELECT COUNT(*) FROM pending WHERE sets_bin)::int AS primary_bins_set,
+          (SELECT COUNT(*) FROM pending WHERE sets_group)::int AS grouped,
+          (SELECT COUNT(*) FROM touched)::int AS products_touched
+      `,
+      [codes, normalized, bins, normalizedBins, groups, userId || null]
+    );
 
-  await db.transaction(async (client) => {
-    for (const row of rows) {
-      const productId = await findProduct(client, row);
-
-      if (!productId) {
-        unmatched += 1;
-
-        if (misses.length < 25) {
-          misses.push(row.description || row.code || '(unnamed row)');
-        }
-
-        continue;
-      }
-
-      matched += 1;
-
-      if (dryRun) continue;
-
-      const added =
-        await matching.rememberBin(
-          { productId, bin: row.bin, source: 'bundled_sheet', userId },
-          client
-        );
-
-      if (added) binsRecorded += 1;
-
-      if (row.group) {
-        // A group already set by hand is left alone.
-        const result =
-          await client.query(
-            `
-              UPDATE products
-              SET stock_group = $1, updated_at = NOW()
-              WHERE id = $2
-                AND COALESCE(NULLIF(TRIM(stock_group), ''), '') = ''
-            `,
-            [row.group, productId]
-          );
-
-        if (result.rowCount) {
-          grouped += 1;
-          groupCounts[row.group] = (groupCounts[row.group] || 0) + 1;
-        }
-      }
-    }
-  });
+  const groupCounts =
+    await db.all(
+      `
+        SELECT stock_group AS name, COUNT(*)::int AS count
+        FROM products
+        WHERE is_active = TRUE
+          AND COALESCE(NULLIF(TRIM(stock_group), ''), '') <> ''
+        GROUP BY stock_group
+        ORDER BY stock_group
+      `
+    );
 
   return {
-    applied: !dryRun,
-    dry_run: Boolean(dryRun),
+    applied: true,
     source,
     row_count: rows.length,
-    matched,
-    unmatched,
-    bins_recorded: binsRecorded,
-    grouped,
-    groups: Object.entries(groupCounts).map(([name, count]) => ({ name, count })),
-    unmatched_examples: misses,
+    matched: Number(result?.matched || 0),
+    unmatched: Number(result?.unmatched || 0),
+    bins_recorded: Number(result?.bins_recorded || 0),
+    primary_bins_set: Number(result?.primary_bins_set || 0),
+    grouped: Number(result?.grouped || 0),
+    groups: groupCounts,
   };
 }
 
@@ -306,6 +323,7 @@ module.exports = {
   SEED_PATH,
   readSeed,
   summary,
+  columns,
   preview,
   apply,
 };
