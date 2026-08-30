@@ -1141,6 +1141,18 @@
     });
   }
 
+  /**
+   * The bin sheet that ships with the app: what it holds, and how much of it
+   * would land on the product master as it stands.
+   */
+  async function stockBinsAvailable() {
+    return request('/stock/bins/available');
+  }
+
+  async function applyStockBins() {
+    return request('/stock/bins/apply', { method: 'POST' });
+  }
+
   async function reconcileStock() {
     return request('/stock/reconcile', { method: 'POST' });
   }
@@ -1662,6 +1674,8 @@
     resolveStockReview,
     matchStockProduct,
     reconcileStock,
+    stockBinsAvailable,
+    applyStockBins,
     listStockImports,
     uploadStockImport,
     commitStockImport,

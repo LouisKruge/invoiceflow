@@ -2294,6 +2294,36 @@ function renderSettings(user, health) {
       </div>
     </div>
 
+    <div class="detail-block">
+      <div class="head"><h3>This build</h3></div>
+      <div class="body" style="padding-top:14px;padding-bottom:18px;">
+        <div class="conf-row">
+          <span class="name">Version</span>
+          <span class="pct mono" style="min-width:0;">${esc(health?.version || 'unknown')}</span>
+        </div>
+        ${
+          health?.commit
+            ? `
+              <div class="conf-row">
+                <span class="name">Commit</span>
+                <span class="pct mono" style="min-width:0;">${esc(health.commit)}</span>
+              </div>
+            `
+            : ''
+        }
+        <div class="conf-row" style="border-bottom:none;align-items:flex-start;">
+          <span class="name">Includes</span>
+          <span class="pct" style="min-width:0;text-align:right;">
+            ${(health?.features || []).map(f => esc(String(f).replace(/-/g, ' '))).join(' · ') || '—'}
+          </span>
+        </div>
+        <p style="font-size:12.5px;color:var(--ink-muted);margin:14px 0 0;line-height:1.6;">
+          What is actually running. If a feature is missing from this list, the
+          deploy carrying it has not gone out yet.
+        </p>
+      </div>
+    </div>
+
   </div>`;
 }
 
@@ -2662,6 +2692,8 @@ function renderProducts(data, filters) {
       .map(c => `<option value="${esc(c)}" ${filters.category === c ? 'selected' : ''}>${esc(c)}</option>`)
       .join('');
 
+  const binOffer = data.bin_offer;
+
   return `
   <div class="page-head">
     <div>
@@ -2698,6 +2730,37 @@ function renderProducts(data, filters) {
       ${categoryOptions}
     </select>
   </div>
+
+  ${
+    binOffer
+      ? `
+        <div class="section" style="margin-top:0;">
+          <div class="attention-row" id="bin-offer" style="cursor:default;">
+            <div class="attention-main">
+              <div class="title">
+                ${binOffer.products_with_bin
+                  ? `${binOffer.pending_bins} bin${binOffer.pending_bins === 1 ? '' : 's'} and ${binOffer.pending_groups} group${binOffer.pending_groups === 1 ? '' : 's'} can still be filled in`
+                  : 'None of your products has a bin number yet'}
+              </div>
+              <div class="issue">
+                ${Icons.warning}
+                ${esc(binOffer.source || 'The bundled stock sheet')} carries
+                ${binOffer.row_count} bins in
+                ${binOffer.groups.map(g => `${g.count} ${esc(g.name)}`).join(', ')}.
+                ${binOffer.matched} of them match a product you already have.
+                Nothing is created and no stock moves.
+              </div>
+            </div>
+            <div class="attention-cta">
+              <button class="btn btn-primary btn-sm" id="btn-apply-bins">
+                Fill in bins &amp; groups
+              </button>
+            </div>
+          </div>
+        </div>
+      `
+      : ''
+  }
 
   ${
     hasGroups

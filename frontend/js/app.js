@@ -5191,6 +5191,27 @@ function bindInvoiceListEvents(container) {
 
       const data = await API.listProducts(StockState.productFilters);
 
+      // If the app ships a bin sheet and the master is still missing bins it
+      // would fill in, say so on the screen where the empty column is — rather
+      // than leaving a person to work out that a six-step import was needed.
+      let binOffer = null;
+
+      if (hasFunction(API, 'stockBinsAvailable')) {
+        try {
+          const offer = await API.stockBinsAvailable();
+
+          // Only while there is something left to fill in — an offer that
+          // stays up after it has been taken reads as a failure.
+          if (offer && offer.available && offer.pending > 0) {
+            binOffer = offer;
+          }
+        } catch (error) {
+          console.warn('[Stock] Could not check the bundled bin sheet:', error);
+        }
+      }
+
+      data.bin_offer = binOffer;
+
       const content = document.querySelector('.content');
 
       if (!content) return;
@@ -5298,6 +5319,51 @@ function bindInvoiceListEvents(container) {
 
       if (newProduct) {
         newProduct.onclick = () => openNewProductDialog();
+      }
+
+      const applyBins = document.getElementById('btn-apply-bins');
+
+      if (applyBins) {
+        applyBins.onclick =
+          async () => {
+            const offer = data.bin_offer || {};
+
+            const confirmed =
+              await confirmDialog({
+                title: 'Fill in bins and stock groups?',
+                body:
+                  `${offer.pending_bins} bin${offer.pending_bins === 1 ? '' : 's'} and ` +
+                  `${offer.pending_groups} group${offer.pending_groups === 1 ? '' : 's'} ` +
+                  'will be filled in from ' +
+                  `${offer.source || 'the bundled stock sheet'}. ` +
+                  'No product is created, no quantity changes and nothing is ' +
+                  'posted to the ledger.',
+                confirmLabel: 'Fill them in',
+              });
+
+            if (!confirmed) return;
+
+            applyBins.disabled = true;
+            applyBins.textContent = 'Filling in…';
+
+            try {
+
+              const result = await API.applyStockBins();
+
+              toast(
+                `${result.bins_recorded} bin${result.bins_recorded === 1 ? '' : 's'} and ` +
+                `${result.grouped} group${result.grouped === 1 ? '' : 's'} filled in`,
+                'success'
+              );
+
+              await loadProducts();
+
+            } catch (error) {
+              applyBins.disabled = false;
+              applyBins.textContent = 'Fill in bins & groups';
+              handleApiError(error, 'Unable to fill in the bins.');
+            }
+          };
       }
 
     } catch (error) {

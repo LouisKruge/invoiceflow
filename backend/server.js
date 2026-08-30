@@ -26,6 +26,39 @@ app.use(
 // START SERVER
 // ---------------------------------------------------------------------------
 
+// The running build, so "did my deploy take?" has an answer on screen rather
+// than being inferred from whether a feature appears to work.
+const BUILD = (() => {
+  let version = 'unknown';
+
+  try {
+    version = require('./package.json').version || 'unknown';
+  } catch (error) {
+    // Keep the fallback.
+  }
+
+  const commit =
+    process.env.RENDER_GIT_COMMIT ||
+    process.env.GIT_COMMIT ||
+    process.env.SOURCE_VERSION ||
+    null;
+
+  return {
+    version,
+    commit: commit ? String(commit).slice(0, 7) : null,
+    // Named so a person can check a capability is present without having to
+    // find the screen it lives on.
+    features: [
+      'invoices',
+      'stock-ledger',
+      'stock-sign-out',
+      'bin-numbers',
+      'stock-groups',
+      'bundled-bin-sheet',
+    ],
+  };
+})();
+
 async function startServer() {
   try {
     // -----------------------------------------------------------------------
@@ -181,6 +214,12 @@ async function startServer() {
 
             database:
               'postgresql',
+
+            // What is actually running. A deploy that did not take is
+            // otherwise indistinguishable from a feature that does not work.
+            version: BUILD.version,
+            commit: BUILD.commit,
+            features: BUILD.features,
 
             ai_provider:
               provider,
@@ -352,6 +391,10 @@ async function startServer() {
 
         console.log(
           'Database: PostgreSQL / Neon'
+        );
+
+        console.log(
+          `Build: ${BUILD.version}${BUILD.commit ? ` (${BUILD.commit})` : ''}`
         );
 
         console.log(

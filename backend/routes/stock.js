@@ -26,6 +26,7 @@ const ledger = require('../services/stockLedger');
 const matching = require('../services/productMatching');
 const importer = require('../services/stockImport');
 const sheets = require('../services/stockSheet');
+const binSeed = require('../services/binSeed');
 const ai = require('../services/aiExtraction');
 
 const router = express.Router();
@@ -1927,6 +1928,93 @@ router.post(
 
       return res.status(500).json({
         error: `Unable to match product: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// GET /api/stock/bins/available
+//
+// What the bin sheet that ships with the app holds, and how much of it would
+// land on the product master as it stands. Changes nothing.
+// ============================================================================
+
+router.get(
+  '/bins/available',
+  requireAuth,
+  async (req, res) => {
+    try {
+
+      const info = binSeed.summary();
+
+      if (!info.row_count) {
+        return res.json({ ...info, matched: 0, available: false });
+      }
+
+      const preview = await binSeed.preview();
+
+      const withBin =
+        await db.get(
+          `
+            SELECT COUNT(*)::int AS c
+            FROM products
+            WHERE is_active = TRUE
+              AND COALESCE(NULLIF(TRIM(bin_location), ''), '') <> ''
+          `
+        );
+
+      return res.json({
+        ...info,
+        available: true,
+        matched: preview.matched,
+        unmatched: preview.unmatched,
+        pending_bins: preview.pending_bins,
+        pending_groups: preview.pending_groups,
+        pending: preview.pending_bins + preview.pending_groups,
+        products_with_bin: Number(withBin?.c || 0),
+      });
+
+    } catch (error) {
+      console.error('[stock/bins/available]', error);
+
+      return res.status(500).json({
+        error: `Unable to read the bundled bin sheet: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// POST /api/stock/bins/apply
+//
+// Fills in the bins and stock groups from that sheet. Creates no product,
+// moves no stock, writes no ledger entry.
+// ============================================================================
+
+router.post(
+  '/bins/apply',
+  requireAuth,
+  requireRole('admin', 'reviewer'),
+  async (req, res) => {
+    try {
+
+      const result = await binSeed.apply({ userId: req.user.id });
+
+      if (!result.applied) {
+        return res.status(404).json({
+          error: 'No bin sheet ships with this version of InvoiceFlow.',
+          ...result,
+        });
+      }
+
+      return res.json(result);
+
+    } catch (error) {
+      console.error('[stock/bins/apply]', error);
+
+      return res.status(500).json({
+        error: `Unable to apply the bin sheet: ${error.message}`,
       });
     }
   }
