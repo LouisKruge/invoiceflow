@@ -903,7 +903,14 @@ async function revalidateSheet(sheetId) {
   const sheet =
     await db.get('SELECT * FROM stock_sheets WHERE id = $1', [sheetId]);
 
-  if (!sheet || sheet.status === 'POSTED' || sheet.status === 'CANCELLED') {
+  // Only a sheet that is actually up for review is re-checked. A sheet that
+  // is posted, cancelled, still extracting, or that failed to extract has no
+  // review state to refresh — and re-deriving one from its rows would hand a
+  // failed sheet a READY badge it never earned.
+  if (
+    !sheet ||
+    (sheet.status !== 'READY' && sheet.status !== 'REVIEW_REQUIRED')
+  ) {
     return sheet;
   }
 
@@ -919,6 +926,47 @@ async function revalidateSheet(sheetId) {
   let review = 0;
   let totalQuantity = 0;
 
+  // One sheet can name the same product on more than one line — the same bin
+  // written down twice, for two jobs in a morning. Each line on its own may
+  // fit inside the balance while the sheet as a whole does not, so what the
+  // sheet has already claimed is carried down the rows. Checking a line
+  // against the bare balance is what let a sheet look approvable and then be
+  // refused by the ledger.
+  const claimed = new Map();
+
+  // What the whole sheet asks of each product, so a line that is refused can
+  // say how much is being asked for altogether rather than just its own share.
+  const demanded = new Map();
+
+  for (const row of rows) {
+    if (row.status === 'EXCLUDED') continue;
+
+    if (row.product_id && Number(row.quantity) > 0) {
+      demanded.set(
+        row.product_id,
+        (demanded.get(row.product_id) || 0) + Number(row.quantity)
+      );
+    }
+  }
+
+  const balances = new Map();
+
+  const productIds = [...new Set(
+    rows
+      .filter((row) => row.status !== 'EXCLUDED' && row.product_id)
+      .map((row) => row.product_id)
+  )];
+
+  const products = new Map(
+    (productIds.length
+      ? await db.all(
+          'SELECT id, is_active FROM products WHERE id = ANY($1::text[])',
+          [productIds]
+        )
+      : []
+    ).map((product) => [product.id, product])
+  );
+
   for (const row of rows) {
 
     if (row.status === 'EXCLUDED') continue;
@@ -930,11 +978,7 @@ async function revalidateSheet(sheetId) {
 
     if (row.product_id && row.quantity != null && Number(row.quantity) > 0) {
 
-      const product =
-        await db.get(
-          'SELECT is_active FROM products WHERE id = $1',
-          [row.product_id]
-        );
+      const product = products.get(row.product_id);
 
       if (!product) {
         status = 'REVIEW_REQUIRED';
@@ -943,18 +987,45 @@ async function revalidateSheet(sheetId) {
         status = 'REVIEW_REQUIRED';
         issue = 'This product is marked inactive in the product master.';
       } else {
-        stockBefore =
-          await ledger.currentQuantity(null, row.product_id, locationId);
 
+        if (!balances.has(row.product_id)) {
+          balances.set(
+            row.product_id,
+            await ledger.currentQuantity(null, row.product_id, locationId)
+          );
+        }
+
+        const onHand = balances.get(row.product_id);
+        const already = claimed.get(row.product_id) || 0;
+
+        // What this line leaves behind, counting the lines above it.
+        stockBefore = onHand - already;
         stockAfter = stockBefore - Number(row.quantity);
 
         if (stockAfter < 0 && !ledger.negativeStockAllowed()) {
+          const wanted = demanded.get(row.product_id) || Number(row.quantity);
+
           status = 'INSUFFICIENT_STOCK';
-          issue = `Only ${stockBefore} in stock, ${row.quantity} requested.`;
+
+          issue =
+            wanted > Number(row.quantity)
+              ? `This sheet asks for ${wanted} altogether across ${
+                  rows.filter(
+                    (other) =>
+                      other.status !== 'EXCLUDED' &&
+                      other.product_id === row.product_id &&
+                      Number(other.quantity) > 0
+                  ).length
+                } lines, but only ${onHand} are on hand.`
+              : `Only ${onHand} in stock, ${row.quantity} requested.`;
+
           stockAfter = null;
         } else {
           status = row.status === 'RESOLVED' ? 'RESOLVED' : 'MATCHED';
           issue = null;
+
+          // Only a line that will actually post lays claim to the stock.
+          claimed.set(row.product_id, already + Number(row.quantity));
         }
       }
 

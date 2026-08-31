@@ -2622,6 +2622,12 @@ router.get(
   async (req, res) => {
     try {
 
+      // Re-check against live stock before showing it. Stock moves between
+      // extraction and review — another sheet consumes it, a count corrects
+      // it — and a screen that says a sheet is ready when the ledger will
+      // refuse it is worse than no screen at all.
+      await sheets.revalidateSheet(req.params.id);
+
       const sheet = await loadSheet(req.params.id);
 
       if (!sheet) {
@@ -3070,6 +3076,46 @@ router.post(
       // A posting failure must leave stock exactly as it was; postDocument
       // rolls the whole document back, so the sheet stays un-posted.
       const status = error.code === 'INSUFFICIENT_STOCK' ? 409 : 400;
+
+      // Two bare numbers are no use on a sheet of thirty lines. Say what ran
+      // out and which line asked for it.
+      if (error.code === 'INSUFFICIENT_STOCK' && error.product_id) {
+
+        const product =
+          await db.get(
+            'SELECT description, sku, bin_location FROM products WHERE id = $1',
+            [error.product_id]
+          );
+
+        const row =
+          error.source_line_id
+            ? await db.get(
+                'SELECT row_number FROM stock_sheet_rows WHERE id = $1',
+                [error.source_line_id]
+              )
+            : null;
+
+        const name =
+          product
+            ? product.description ||
+              product.sku ||
+              product.bin_location ||
+              'that product'
+            : 'that product';
+
+        return res.status(status).json({
+          posted: false,
+          reason: 'insufficient_stock',
+          error:
+            `Not enough ${name}${row ? ` on line ${row.row_number}` : ''}: ` +
+            `${error.available} on hand, ${error.requested} requested.`,
+          available: error.available,
+          requested: error.requested,
+          product_id: error.product_id,
+          row_number: row ? row.row_number : null,
+          sheet: await loadSheet(req.params.id),
+        });
+      }
 
       return res.status(status).json({
         posted: false,
