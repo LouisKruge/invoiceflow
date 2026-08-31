@@ -79,6 +79,7 @@ const Icons = {
 
   signoutSheet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4.5H9a2 2 0 014 0h2.5A1.5 1.5 0 0117 6v13.5H5V6a1.5 1.5 0 011.5-1.5z"/><path d="M8.5 12.5h6M14.5 12.5L12 10M14.5 12.5L12 15"/></svg>',
   review: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20.5 20.5l-4.7-4.7M11 8v3.5M11 14h.01"/></svg>',
+  jobs: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5h6l1.5 2h9.5V19a1.5 1.5 0 01-1.5 1.5h-14A1.5 1.5 0 013.5 19z"/><path d="M3.5 7.5V5.5A1.5 1.5 0 015 4h3.5l1.5 2"/></svg>',
 };
 
 // ---------------------------------------------------------------------------
@@ -480,6 +481,10 @@ const NAV_GROUPS = [
     ['#/suppliers', 'suppliers', 'Suppliers'],
     ['#/approvals', 'approvals', 'Approvals'],
   ]],
+  ['Jobs', [
+    ['#/jobs', 'jobs', 'Jobs'],
+    ['#/jobs/approvals', 'approvals', 'New Job Approvals'],
+  ]],
   ['Stock', [
     ['#/stock', 'stock', 'Stock Overview'],
     ['#/stock/products', 'products', 'Products'],
@@ -510,6 +515,8 @@ const ROUTE_TITLES = {
   '#/stock/import': 'Import Stock',
   '#/stock/review': 'Stock Review',
   '#/stock/signout': 'Stock Sign-Out',
+  '#/jobs': 'Jobs',
+  '#/jobs/approvals': 'New Job Approvals',
 };
 
 function routeTitle(route) {
@@ -520,6 +527,7 @@ function routeTitle(route) {
   if (route && route.startsWith('#/stock/products/')) return 'Product';
   if (route && route.startsWith('#/stock/transactions/')) return 'Stock Transaction';
   if (route && route.startsWith('#/stock/signout/')) return 'Sign-Out Sheet';
+  if (route && route.startsWith('#/jobs/')) return 'Job';
 
   return 'InvoiceFlow';
 }
@@ -4090,10 +4098,12 @@ function renderStockSheetDetail(sheet, opts = {}) {
 
   const rows = sheet.rows || [];
 
+  const pendingJobs = sheet.pending_jobs || [];
+
   const blocking =
     rows.filter(
       r => r.status === 'REVIEW_REQUIRED' || r.status === 'INSUFFICIENT_STOCK'
-    ).length;
+    ).length + pendingJobs.length;
 
   const included = rows.filter(r => r.status !== 'EXCLUDED');
 
@@ -4156,6 +4166,64 @@ function renderStockSheetDetail(sheet, opts = {}) {
               <span class="glyph">${Icons.warning}</span>
               <span>${esc(opts.warning)}</span>
             </div>
+          </div>
+        </div>
+      `
+      : ''
+  }
+
+  ${
+    pendingJobs.length
+      ? `
+        <div class="detail-block" style="border-color:var(--caution);margin-bottom:20px;">
+          <div class="head">
+            <div>
+              <div class="cell-strong">New job detected</div>
+              <div class="cell-muted" style="font-size:12.5px;">
+                Stock will not move until this is answered.
+              </div>
+            </div>
+          </div>
+          <div class="body" style="padding:16px 18px;">
+            ${pendingJobs.map(job => `
+              <div class="pending-job" data-pending-job="${esc(job.id)}">
+                <div class="kv-grid">
+                  <div class="kv">
+                    <div class="k">Job number</div>
+                    <div class="v mono">${esc(job.job_number)}</div>
+                  </div>
+                  <div class="kv">
+                    <div class="k">On line</div>
+                    <div class="v">${job.row_number != null ? esc(String(job.row_number)) : 'the whole sheet'}</div>
+                  </div>
+                  <div class="kv">
+                    <div class="k">Product</div>
+                    <div class="v">${esc(job.row_product_description || job.row_description || job.row_bin || '—')}</div>
+                  </div>
+                  <div class="kv">
+                    <div class="k">Quantity</div>
+                    <div class="v">${job.row_quantity != null ? fmtQty(job.row_quantity) : '—'}</div>
+                  </div>
+                </div>
+
+                <p class="cell-muted" style="margin:12px 0 0;">
+                  ${esc(job.job_number)} does not currently exist. Nothing has
+                  been created and no stock has moved.
+                </p>
+
+                <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
+                  <button class="btn btn-primary" data-approve-job="${esc(job.id)}">
+                    Approve &amp; create job
+                  </button>
+                  <button class="btn btn-secondary" data-reject-job-inline="${esc(job.id)}">
+                    Reject and leave unassigned
+                  </button>
+                  <button class="btn btn-secondary" data-route="#/jobs/approvals">
+                    More options
+                  </button>
+                </div>
+              </div>
+            `).join('')}
           </div>
         </div>
       `
@@ -4650,4 +4718,551 @@ function renderInvoiceStock(plan, opts = {}) {
         : ''
     }
   </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// JOBS
+//
+// A job is only a number here. What makes the page worth opening is everything
+// that points at that number: whole invoices with their lines, and the stock
+// movements that left the store against it. Nothing on these screens is a copy
+// — every figure is read from the invoice and stock records themselves.
+// ---------------------------------------------------------------------------
+
+function renderJobsPage(data) {
+  const jobs = data?.jobs || [];
+  const pending = data?.pending || [];
+
+  const row = (job) => `
+    <tr data-job-id="${esc(job.id)}" class="clickable">
+      <td class="cell-strong mono" style="padding-left:18px;">
+        ${esc(job.job_number)}
+      </td>
+      <td class="cell-num">${job.invoice_count || 0}</td>
+      <td class="cell-num">${job.stock_issue_count || 0}</td>
+      <td class="cell-muted">${esc(fmtDate(job.last_activity_at))}</td>
+    </tr>
+  `;
+
+  return `
+  <div class="page-head">
+    <div>
+      <h1>Jobs</h1>
+      <p class="sub">
+        Every job number, and everything charged to it.
+      </p>
+    </div>
+  </div>
+
+  ${
+    pending.length
+      ? `
+        <div class="detail-block" style="border-color:var(--caution);margin-bottom:18px;">
+          <div class="body" style="padding:14px 18px;">
+            <div class="check-row warn" style="border:none;padding:0;">
+              <span class="glyph">${Icons.warning}</span>
+              <span>
+                ${pending.length} job number${pending.length === 1 ? '' : 's'}
+                found on a document ${pending.length === 1 ? 'is' : 'are'}
+                waiting to be approved.
+                <button class="btn btn-secondary" data-route="#/jobs/approvals" style="margin-left:8px;">Review ${pending.length === 1 ? 'it' : 'them'}</button>
+              </span>
+            </div>
+          </div>
+        </div>
+      `
+      : ''
+  }
+
+  <div class="toolbar">
+    <div class="toolbar-search">
+      ${Icons.search}
+      <input
+        type="text"
+        id="job-search"
+        placeholder="Search job numbers…"
+        value="${esc(data?.query || '')}"
+      />
+    </div>
+  </div>
+
+  ${
+    jobs.length
+      ? `
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="padding-left:18px;">Job</th>
+                <th class="th-num">Invoices</th>
+                <th class="th-num">Stock issues</th>
+                <th>Last activity</th>
+              </tr>
+            </thead>
+            <tbody>${jobs.map(row).join('')}</tbody>
+          </table>
+        </div>
+      `
+      : `
+        <div class="empty-state">
+          <h3>No jobs yet</h3>
+          <p class="hint">
+            A job appears here once a job number found on an invoice or a
+            sign-out sheet has been approved.
+          </p>
+        </div>
+      `
+  }
+  `;
+}
+
+/**
+ * One job: the counts at the top are a summary, and everything below them is
+ * the real record.
+ */
+function renderJobDetail(detail, opts = {}) {
+  const job = detail?.job || {};
+  const summary = detail?.summary || {};
+  const tab = opts.tab || 'invoices';
+
+  return `
+  <button class="back-link" data-route="#/jobs">
+    ${Icons.arrowLeft} Jobs
+  </button>
+
+  <div class="page-head">
+    <div>
+      <h1 class="mono">${esc(job.job_number)}</h1>
+      <p class="sub">
+        Opened ${esc(fmtDate(job.created_at))}
+      </p>
+    </div>
+  </div>
+
+  <div class="stat-inline">
+    <div class="item">
+      <div class="l">Invoices</div>
+      <div class="v">${summary.invoice_count || 0}</div>
+    </div>
+    <div class="item">
+      <div class="l">Invoice total</div>
+      <div class="v">${fmtMoney(summary.invoice_total || 0)}</div>
+    </div>
+    <div class="item">
+      <div class="l">Stock issues</div>
+      <div class="v">${summary.stock_issue_count || 0}</div>
+    </div>
+    <div class="item">
+      <div class="l">Units issued</div>
+      <div class="v">${fmtQty(summary.stock_quantity || 0)}</div>
+    </div>
+  </div>
+
+  <div class="tab-bar" role="tablist">
+    <button class="tab ${tab === 'invoices' ? 'active' : ''}" data-job-tab="invoices">
+      Invoices <span class="count">${summary.invoice_count || 0}</span>
+    </button>
+    <button class="tab ${tab === 'stock' ? 'active' : ''}" data-job-tab="stock">
+      Stock issued <span class="count">${summary.stock_issue_count || 0}</span>
+    </button>
+    <button class="tab ${tab === 'activity' ? 'active' : ''}" data-job-tab="activity">
+      Activity
+    </button>
+  </div>
+
+  <div id="job-tab-body">
+    ${
+      tab === 'stock'
+        ? renderJobStock(detail.stock_issues || [])
+        : tab === 'activity'
+          ? renderJobActivity(detail.activity || [])
+          : renderJobInvoices(detail.invoices || [], opts)
+    }
+  </div>
+  `;
+}
+
+function renderJobInvoices(invoices, opts = {}) {
+  if (!invoices.length) {
+    return `
+      <div class="empty-state">
+        <h3>No invoices on this job</h3>
+        <p class="hint">
+          An invoice appears here when its job number matches this job.
+        </p>
+      </div>
+    `;
+  }
+
+  const open = opts.openInvoice || null;
+
+  const lineRow = (line) => `
+    <tr>
+      <td style="padding-left:18px;">
+        <div class="cell-strong">${esc(line.product_name || line.description || '—')}</div>
+        ${
+          line.product_name && line.description && line.product_name !== line.description
+            ? `<div class="cell-muted" style="font-size:12px;">as written: ${esc(line.description)}</div>`
+            : ''
+        }
+      </td>
+      <td class="mono cell-muted">${esc(line.product_sku || line.supplier_product_code || '—')}</td>
+      <td class="cell-num">${fmtQty(line.quantity)}</td>
+      <td class="cell-num">${fmtMoney(line.unit_price)}</td>
+      <td class="cell-num cell-strong">${fmtMoney(line.total)}</td>
+    </tr>
+  `;
+
+  const card = (invoice) => {
+    const expanded = open === invoice.id;
+
+    return `
+    <div class="detail-block job-invoice" data-invoice-card="${esc(invoice.id)}">
+      <div class="head" style="cursor:pointer;" data-invoice-toggle="${esc(invoice.id)}">
+        <div>
+          <div class="cell-strong mono">${esc(invoice.invoice_number || 'No number')}</div>
+          <div class="cell-muted" style="font-size:12.5px;">
+            ${esc(invoice.supplier_name || invoice.supplier_display_name || 'Unknown supplier')}
+            · ${esc(fmtDate(invoice.invoice_date))}
+            · ${invoice.line_item_count || 0} item${invoice.line_item_count === 1 ? '' : 's'}
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:14px;">
+          ${statusMark(invoice.status)}
+          <div class="cell-strong" style="font-size:15px;">
+            ${fmtMoney(invoice.total_amount, invoice.currency)}
+          </div>
+          <span class="cell-muted">${expanded ? '−' : '+'}</span>
+        </div>
+      </div>
+
+      ${
+        expanded
+          ? `
+            <div class="body" style="padding:16px 18px;">
+              <div class="kv-grid">
+                <div class="kv"><div class="k">Supplier</div><div class="v">${esc(invoice.supplier_name || invoice.supplier_display_name || '—')}</div></div>
+                <div class="kv"><div class="k">Invoice date</div><div class="v">${esc(fmtDate(invoice.invoice_date))}</div></div>
+                <div class="kv"><div class="k">PO number</div><div class="v mono">${esc(invoice.purchase_order_number || '—')}</div></div>
+                <div class="kv"><div class="k">Reference</div><div class="v mono">${esc(invoice.job_reference || '—')}</div></div>
+                <div class="kv"><div class="k">Account code</div><div class="v mono">${esc(invoice.account_code || '—')}</div></div>
+                <div class="kv"><div class="k">Currency</div><div class="v">${esc(invoice.currency || 'ZAR')}</div></div>
+                <div class="kv"><div class="k">Subtotal</div><div class="v">${fmtMoney(invoice.subtotal, invoice.currency)}</div></div>
+                <div class="kv"><div class="k">VAT</div><div class="v">${fmtMoney(invoice.vat_amount, invoice.currency)}</div></div>
+                <div class="kv"><div class="k">Total</div><div class="v cell-strong">${fmtMoney(invoice.total_amount, invoice.currency)}</div></div>
+                <div class="kv"><div class="k">Status</div><div class="v">${statusMark(invoice.status)}</div></div>
+              </div>
+
+              ${
+                (invoice.line_items || []).length
+                  ? `
+                    <div class="table-wrap" style="margin-top:16px;">
+                      <table class="data-table">
+                        <thead>
+                          <tr>
+                            <th style="padding-left:18px;">Product</th>
+                            <th>Code</th>
+                            <th class="th-num">Qty</th>
+                            <th class="th-num">Unit price</th>
+                            <th class="th-num">Line total</th>
+                          </tr>
+                        </thead>
+                        <tbody>${invoice.line_items.map(lineRow).join('')}</tbody>
+                      </table>
+                    </div>
+                  `
+                  : `<p class="cell-muted" style="margin-top:14px;">No line items were captured on this invoice.</p>`
+              }
+
+              <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;">
+                <button class="btn btn-secondary" data-open-invoice="${esc(invoice.id)}">
+                  Open the invoice
+                </button>
+                ${
+                  invoice.document_count
+                    ? `<button class="btn btn-secondary" data-view-document="${esc(invoice.id)}">
+                         View original invoice
+                       </button>`
+                    : `<span class="cell-muted" style="align-self:center;font-size:12.5px;">
+                         No original document was stored with this invoice.
+                       </span>`
+                }
+              </div>
+            </div>
+          `
+          : ''
+      }
+    </div>
+    `;
+  };
+
+  return `<div class="job-invoices">${invoices.map(card).join('')}</div>`;
+}
+
+function renderJobStock(issues) {
+  if (!issues.length) {
+    return `
+      <div class="empty-state">
+        <h3>No stock issued to this job</h3>
+        <p class="hint">
+          A movement appears here when a sign-out sheet naming this job is
+          approved.
+        </p>
+      </div>
+    `;
+  }
+
+  const card = (issue) => `
+    <div class="detail-block">
+      <div class="head">
+        <div>
+          <div class="cell-strong">${esc(issue.product_description || 'Unknown product')}</div>
+          <div class="cell-muted mono" style="font-size:12.5px;">
+            ${esc(issue.product_sku || '—')}
+            ${issue.product_bin ? ` · bin ${esc(issue.product_bin)}` : ''}
+          </div>
+        </div>
+        <div class="cell-strong" style="font-size:15px;">
+          ${fmtQty(issue.quantity)} out
+        </div>
+      </div>
+
+      <div class="body" style="padding:14px 18px;">
+        <div class="kv-grid">
+          <div class="kv"><div class="k">Quantity issued</div><div class="v">${fmtQty(issue.quantity)}</div></div>
+          <div class="kv"><div class="k">Issued by</div><div class="v">${esc(issue.created_by_name || issue.employee_name || '—')}</div></div>
+          <div class="kv"><div class="k">Date</div><div class="v">${esc(fmtDateTime(issue.created_at))}</div></div>
+          <div class="kv"><div class="k">Location</div><div class="v">${esc(issue.location_name || issue.location_code || '—')}</div></div>
+          <div class="kv"><div class="k">Transaction</div><div class="v mono">${esc(String(issue.id).slice(0, 8).toUpperCase())}</div></div>
+          <div class="kv"><div class="k">Job reference</div><div class="v mono">${esc(issue.job_reference || '—')}</div></div>
+        </div>
+
+        <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+          ${
+            issue.sheet_id
+              ? `<button class="btn btn-secondary" data-open-sheet="${esc(issue.sheet_id)}">
+                   Source: sheet ${esc(issue.sheet_number || '')}
+                 </button>`
+              : `<span class="cell-muted" style="font-size:12.5px;">
+                   ${esc(issue.source_document_type || 'No source document')}
+                 </span>`
+          }
+          ${
+            issue.product_id
+              ? `<button class="btn btn-secondary" data-open-product="${esc(issue.product_id)}">
+                   Open the product
+                 </button>`
+              : ''
+          }
+        </div>
+      </div>
+    </div>
+  `;
+
+  return `<div class="job-stock">${issues.map(card).join('')}</div>`;
+}
+
+function renderJobActivity(activity) {
+  if (!activity.length) {
+    return `
+      <div class="empty-state">
+        <h3>Nothing has happened on this job yet</h3>
+      </div>
+    `;
+  }
+
+  const row = (entry) => `
+    <tr>
+      <td class="cell-muted" style="padding-left:18px;white-space:nowrap;">
+        ${esc(fmtDateTime(entry.at))}
+      </td>
+      <td>${esc(entry.label)}</td>
+      <td class="cell-muted">${esc(entry.detail || '')}</td>
+      <td class="cell-num">${entry.amount != null ? fmtMoney(entry.amount) : ''}</td>
+    </tr>
+  `;
+
+  return `
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th style="padding-left:18px;">When</th>
+            <th>What</th>
+            <th>Detail</th>
+            <th class="th-num">Amount</th>
+          </tr>
+        </thead>
+        <tbody>${activity.map(row).join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+/**
+ * The approval gate.
+ *
+ * Everything here is a question, never a notification: a job number was found
+ * on a document and nothing has been created because of it.
+ */
+function renderJobApprovals(data) {
+  const approvals = data?.approvals || [];
+  const jobs = data?.jobs || [];
+
+  const pending = approvals.filter((a) => a.status === 'PENDING');
+  const answered = approvals.filter((a) => a.status !== 'PENDING');
+
+  const jobOptions =
+    jobs
+      .map((job) => `<option value="${esc(job.id)}">${esc(job.job_number)}</option>`)
+      .join('');
+
+  const card = (approval) => `
+    <div class="detail-block decision-card" data-approval="${esc(approval.id)}">
+      <div class="head">
+        <div>
+          <div class="cell-strong">New job detected</div>
+          <div class="cell-muted" style="font-size:12.5px;">
+            ${esc(fmtDateTime(approval.created_at))}
+          </div>
+        </div>
+        <div class="mono cell-strong" style="font-size:16px;">
+          ${esc(approval.job_number)}
+        </div>
+      </div>
+
+      <div class="body" style="padding:16px 18px;">
+        <div class="kv-grid">
+          <div class="kv">
+            <div class="k">Job number</div>
+            <div class="v mono">${esc(approval.job_number)}</div>
+          </div>
+          <div class="kv">
+            <div class="k">Found on</div>
+            <div class="v">
+              ${
+                approval.source_type === 'INVOICE'
+                  ? `Invoice ${esc(approval.invoice_number || '')}`
+                  : `Sign-out sheet ${esc(approval.sheet_number || '')}`
+              }
+            </div>
+          </div>
+          ${
+            approval.source_type === 'INVOICE'
+              ? `
+                <div class="kv"><div class="k">Supplier</div><div class="v">${esc(approval.supplier_name || '—')}</div></div>
+                <div class="kv"><div class="k">Invoice total</div><div class="v">${fmtMoney(approval.total_amount)}</div></div>
+              `
+              : `
+                <div class="kv"><div class="k">Product</div><div class="v">${esc(approval.row_product_description || approval.row_description || approval.row_bin || '—')}</div></div>
+                <div class="kv"><div class="k">Quantity</div><div class="v">${fmtQty(approval.row_quantity)}</div></div>
+                <div class="kv"><div class="k">Employee</div><div class="v">${esc(approval.sheet_employee_name || '—')}</div></div>
+              `
+          }
+        </div>
+
+        <p class="cell-muted" style="margin:14px 0 0;">
+          This job number does not currently exist. Nothing has been created.
+        </p>
+
+        <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+          <button class="btn btn-primary" data-approve-job="${esc(approval.id)}">
+            Approve &amp; create job
+          </button>
+          <button class="btn btn-secondary" data-reject-job="${esc(approval.id)}">
+            Reject
+          </button>
+        </div>
+
+        <div class="reject-options" data-reject-panel="${esc(approval.id)}" hidden>
+          <p class="cell-muted" style="margin:14px 0 8px;">
+            ${esc(approval.job_number)} will not be created. What should happen
+            to this ${approval.source_type === 'INVOICE' ? 'invoice' : 'stock issue'}?
+          </p>
+
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+            <select class="btn btn-secondary" data-assign-job="${esc(approval.id)}" style="max-width:260px;padding-right:28px;">
+              <option value="">Assign to an existing job…</option>
+              ${jobOptions}
+            </select>
+            <button class="btn btn-secondary" data-confirm-assign="${esc(approval.id)}">
+              Assign
+            </button>
+            <button class="btn btn-secondary" data-leave-unassigned="${esc(approval.id)}">
+              Leave unassigned
+            </button>
+            <button class="btn btn-secondary" data-cancel-reject="${esc(approval.id)}">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const answeredRow = (approval) => `
+    <tr>
+      <td class="mono" style="padding-left:18px;">${esc(approval.job_number)}</td>
+      <td>${approval.status === 'APPROVED' ? 'Approved' : 'Rejected'}</td>
+      <td class="cell-muted">
+        ${
+          approval.resolution === 'CREATED'
+            ? 'Job created'
+            : approval.resolution === 'ASSIGNED_EXISTING'
+              ? 'Assigned to an existing job'
+              : 'Left unassigned'
+        }
+      </td>
+      <td class="cell-muted">${esc(approval.resolved_by_name || '')}</td>
+      <td class="cell-muted">${esc(fmtDateTime(approval.resolved_at))}</td>
+    </tr>
+  `;
+
+  return `
+  <div class="page-head">
+    <div>
+      <h1>New job approvals</h1>
+      <p class="sub">
+        Job numbers found on documents. A job is created only when you say so.
+      </p>
+    </div>
+  </div>
+
+  ${
+    pending.length
+      ? `<div class="job-approvals">${pending.map(card).join('')}</div>`
+      : `
+        <div class="empty-state">
+          <h3>Nothing waiting</h3>
+          <p class="hint">
+            Every job number found so far has been answered.
+          </p>
+        </div>
+      `
+  }
+
+  ${
+    answered.length
+      ? `
+        <div class="section" style="margin-top:26px;">
+          <div class="section-head"><h2>Already answered</h2></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="padding-left:18px;">Job number</th>
+                  <th>Decision</th>
+                  <th>Outcome</th>
+                  <th>By</th>
+                  <th>When</th>
+                </tr>
+              </thead>
+              <tbody>${answered.map(answeredRow).join('')}</tbody>
+            </table>
+          </div>
+        </div>
+      `
+      : ''
+  }
+  `;
 }

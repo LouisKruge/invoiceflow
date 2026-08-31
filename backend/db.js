@@ -1063,6 +1063,120 @@ async function initializeDatabase() {
       ON invoices(account_code);
   `);
 
+  // -------------------------------------------------------------------------
+  // JOBS
+  //
+  // A job number is the thread that ties an invoice and a stock issue to the
+  // same piece of work. The record is deliberately only the number: what a job
+  // costs, who it is for and how it is going are all questions for later.
+  //
+  // A job is never created by detection alone. A number read off a document
+  // that matches nothing here raises an approval instead, and only a person
+  // saying yes writes a row into this table.
+  // -------------------------------------------------------------------------
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+
+      -- As a person writes it: JOB-1001.
+      job_number TEXT NOT NULL,
+
+      -- The same number with the formatting taken out, so JOB-1001, JOB 1001
+      -- and JOB1001 cannot become three jobs. This is the column uniqueness
+      -- is really enforced on.
+      normalized_key TEXT NOT NULL,
+
+      -- Where the number was first seen. Kept for traceability only.
+      first_source_type TEXT,
+      first_source_id TEXT,
+
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    -- One job per number, whichever way it was written. The database is the
+    -- last line of defence: two people approving the same new number at the
+    -- same moment both re-check first, and the loser of the race lands here.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_key
+      ON jobs(normalized_key);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_number
+      ON jobs(job_number);
+  `);
+
+  // A job number found on a document that does not exist yet. Nothing is
+  // created from one of these until a person answers it.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS job_approvals (
+      id TEXT PRIMARY KEY,
+
+      job_number TEXT NOT NULL,
+      normalized_key TEXT NOT NULL,
+
+      -- What the number was read off: INVOICE or STOCK_SHEET, and which one.
+      source_type TEXT NOT NULL CHECK (source_type IN ('INVOICE', 'STOCK_SHEET')),
+      source_id TEXT NOT NULL,
+
+      -- The sheet line it came from, when a sheet names a job per line.
+      source_line_id TEXT,
+
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (
+        status IN ('PENDING', 'APPROVED', 'REJECTED')
+      ),
+
+      -- What the person decided to do instead, when they said no.
+      resolution TEXT CHECK (
+        resolution IN ('CREATED', 'ASSIGNED_EXISTING', 'UNASSIGNED')
+      ),
+
+      resolved_job_id TEXT,
+      resolved_by TEXT,
+      resolved_at TIMESTAMPTZ,
+
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (resolved_job_id) REFERENCES jobs(id),
+      FOREIGN KEY (resolved_by) REFERENCES users(id)
+    );
+
+    -- One question per number per source line. Re-reading a document must not
+    -- stack up the same ask.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_job_approvals_source
+      ON job_approvals(source_type, source_id, COALESCE(source_line_id, ''), normalized_key);
+
+    CREATE INDEX IF NOT EXISTS idx_job_approvals_pending
+      ON job_approvals(status, created_at DESC);
+  `);
+
+  // The links themselves. An invoice and a stock movement each point at a job;
+  // neither is copied into it.
+  await pool.query(`
+    ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS job_id TEXT REFERENCES jobs(id),
+      ADD COLUMN IF NOT EXISTS job_reference TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_invoices_job ON invoices(job_id);
+
+    ALTER TABLE stock_transactions
+      ADD COLUMN IF NOT EXISTS job_id TEXT REFERENCES jobs(id);
+
+    CREATE INDEX IF NOT EXISTS idx_stock_transactions_job
+      ON stock_transactions(job_id);
+
+    -- A sheet can name a different job on each line, so the line carries its
+    -- own reading and its own resolution.
+    ALTER TABLE stock_sheet_rows
+      ADD COLUMN IF NOT EXISTS raw_job TEXT,
+      ADD COLUMN IF NOT EXISTS job_id TEXT REFERENCES jobs(id);
+
+    ALTER TABLE stock_sheets
+      ADD COLUMN IF NOT EXISTS job_id TEXT REFERENCES jobs(id);
+  `);
+
   console.log('[db] PostgreSQL schema ready.');
 
   return true;

@@ -273,6 +273,7 @@ async function postMovement(client, movement) {
           supplier_id,
           employee_name,
           job_reference,
+          job_id,
           reason,
           notes,
           match_confidence,
@@ -280,7 +281,7 @@ async function postMovement(client, movement) {
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-          $11, $12, $13, $14, $15, $16, $17
+          $11, $12, $13, $14, $15, $16, $17, $18
         )
         RETURNING *
       `,
@@ -298,6 +299,7 @@ async function postMovement(client, movement) {
         movement.supplier_id || null,
         movement.employee_name || null,
         movement.job_reference || null,
+        movement.job_id || null,
         movement.reason || null,
         movement.notes || null,
         movement.match_confidence ?? null,

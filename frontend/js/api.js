@@ -1111,6 +1111,63 @@
     return query ? `?${query}` : '';
   }
 
+  // -------------------------------------------------------------------------
+  // Jobs
+  // -------------------------------------------------------------------------
+
+  async function listJobs(params = {}) {
+    const query = new URLSearchParams();
+
+    if (params.q) query.set('q', params.q);
+    if (params.limit) query.set('limit', params.limit);
+    if (params.offset) query.set('offset', params.offset);
+
+    const suffix = query.toString();
+
+    return request(`/jobs${suffix ? `?${suffix}` : ''}`);
+  }
+
+  async function getJob(id) {
+    if (!id) throw new Error('Job ID is required.');
+
+    return request(`/jobs/${encodeURIComponent(id)}`);
+  }
+
+  async function listJobApprovals(status) {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+
+    return request(`/jobs/approvals${query}`);
+  }
+
+  async function approveJob(approvalId) {
+    if (!approvalId) throw new Error('An approval is required.');
+
+    return request(`/jobs/approvals/${encodeURIComponent(approvalId)}/approve`, {
+      method: 'POST',
+    });
+  }
+
+  // Passing a jobId means "not this new job — that existing one instead".
+  async function rejectJob(approvalId, jobId) {
+    if (!approvalId) throw new Error('An approval is required.');
+
+    return request(`/jobs/approvals/${encodeURIComponent(approvalId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify(jobId ? { job_id: jobId } : {}),
+    });
+  }
+
+  async function resolveJobNumber(payload) {
+    return request('/jobs/resolve', {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Stock
+  // -------------------------------------------------------------------------
+
   async function stockOverview() {
     return request('/stock/overview');
   }
@@ -1711,6 +1768,14 @@
     evaluateInvoiceStock,
     setInvoiceLineStock,
     createProductFromLine,
+
+    // Jobs
+    listJobs,
+    getJob,
+    listJobApprovals,
+    approveJob,
+    rejectJob,
+    resolveJobNumber,
 
     // Stock
     stockOverview,

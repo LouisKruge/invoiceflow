@@ -2242,9 +2242,35 @@ async function loadSheet(sheetId) {
       [sheetId]
     );
 
+  // Job numbers on this sheet that nobody has answered. They hold the sheet
+  // at the gate, so the screen has to be able to show what is being asked
+  // rather than only refusing when Approve is pressed.
+  const pendingJobs =
+    await db.all(
+      `
+        SELECT
+          a.*,
+          r.row_number,
+          r.raw_description AS row_description,
+          r.raw_bin AS row_bin,
+          r.quantity AS row_quantity,
+          pr.description AS row_product_description,
+          pr.sku AS row_product_sku
+        FROM job_approvals a
+        LEFT JOIN stock_sheet_rows r ON r.id = a.source_line_id
+        LEFT JOIN products pr ON pr.id = r.product_id
+        WHERE a.source_type = 'STOCK_SHEET'
+          AND a.source_id = $1
+          AND a.status = 'PENDING'
+        ORDER BY r.row_number NULLS LAST, a.created_at
+      `,
+      [sheetId]
+    );
+
   return {
     ...sheet,
     header_confidence: safeParse(sheet.header_confidence, {}),
+    pending_jobs: pendingJobs,
     rows: rows.map((row) => ({
       ...row,
       quantity: row.quantity == null ? null : Number(row.quantity),
@@ -3055,6 +3081,8 @@ router.post(
         no_movements: 'This sheet has no lines to post',
         unresolved_rows:
           'Every line must be matched before stock can be deducted',
+        job_approval_required:
+          'A job number on this sheet has not been approved yet',
       };
 
       const status = result.reason === 'not_found' ? 404 : 409;
@@ -3064,6 +3092,7 @@ router.post(
         reason: result.reason,
         error: messages[result.reason] || 'This sheet could not be posted',
         blocking: result.blocking || [],
+        pending_jobs: result.pending_jobs || [],
         sheet:
           result.reason === 'not_found'
             ? null
