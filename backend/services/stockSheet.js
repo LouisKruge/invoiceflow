@@ -821,6 +821,20 @@ async function evaluateRow(row, { locationId }) {
     };
   }
 
+  // Nor if the product is not inventory. Issuing from something nobody counts
+  // would be recording a movement in a figure that does not exist.
+  if (
+    match.match.inventory_type === 'NON_STOCK' ||
+    match.match.track_inventory === false
+  ) {
+    return {
+      ...base,
+      productId: match.match.id,
+      status: 'REVIEW_REQUIRED',
+      issue: 'This product is not tracked as inventory.',
+    };
+  }
+
   // 3. Is there a usable quantity?
   if (quantityRead.value === null) {
     return {

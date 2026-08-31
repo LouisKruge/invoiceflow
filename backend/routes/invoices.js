@@ -26,9 +26,11 @@ const {
   lowConfidenceFields
 } = require('../services/validation');
 
+const invoiceStock = require('../services/invoiceStock');
+
 const {
   postInvoiceToStock
-} = require('../services/invoiceStock');
+} = invoiceStock;
 
 const router = express.Router();
 
@@ -1003,10 +1005,12 @@ router.post(
               quantity,
               unit_price,
               vat,
-              total
+              total,
+              supplier_product_code,
+              unit_of_measure
             )
             VALUES
-            ($1, $2, $3, $4, $5, $6, $7)
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           `,
           [
 
@@ -1022,11 +1026,26 @@ router.post(
 
             li.vat ?? null,
 
-            li.total ?? null
+            li.total ?? null,
+
+            li.supplier_product_code || null,
+
+            li.unit_of_measure || null
 
           ]
         );
 
+      }
+
+      // Match the lines now, so the review screen can show what each one would
+      // do to stock. This records a reading; it moves nothing.
+      try {
+        await invoiceStock.evaluateInvoiceLines(invoiceId);
+      } catch (stockError) {
+        console.warn(
+          '[invoices] Could not evaluate stock lines:',
+          stockError.message
+        );
       }
 
       // ----------------------------------------------------------------------
@@ -2649,10 +2668,12 @@ router.post(
               quantity,
               unit_price,
               vat,
-              total
+              total,
+              supplier_product_code,
+              unit_of_measure
             )
             VALUES
-            ($1, $2, $3, $4, $5, $6, $7)
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           `,
           [
 
@@ -2668,11 +2689,26 @@ router.post(
 
             li.vat ?? null,
 
-            li.total ?? null
+            li.total ?? null,
+
+            li.supplier_product_code || null,
+
+            li.unit_of_measure || null
 
           ]
         );
 
+      }
+
+      // Re-reading a document re-reads its stock lines with it. Decisions a
+      // person has already made are left alone.
+      try {
+        await invoiceStock.evaluateInvoiceLines(req.params.id);
+      } catch (stockError) {
+        console.warn(
+          '[invoices] Could not evaluate stock lines:',
+          stockError.message
+        );
       }
 
       // ----------------------------------------------------------------------
@@ -2813,6 +2849,215 @@ router.post(
 // ============================================================================
 // EXPORTS
 // ============================================================================
+
+// ============================================================================
+// GET /api/invoices/:id/stock
+//
+// What posting this invoice would do to stock, line by line, before it is
+// posted. Projections only.
+// ============================================================================
+
+router.get(
+  '/:id/stock',
+  requireAuth,
+  async (req, res) => {
+    try {
+
+      const plan =
+        await invoiceStock.invoiceStockPlan(req.params.id);
+
+      if (!plan) {
+        return res.status(404).json({ error: 'Invoice not found' });
+      }
+
+      return res.json(plan);
+
+    } catch (error) {
+      console.error('[invoices/stock]', error);
+
+      return res.status(500).json({
+        error: `Unable to work out the stock impact: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// POST /api/invoices/:id/stock/evaluate
+//
+// Re-reads the lines against the Product Master. Creates nothing, moves
+// nothing, and leaves decisions a person has made alone.
+// ============================================================================
+
+router.post(
+  '/:id/stock/evaluate',
+  requireAuth,
+  requireRole('admin', 'reviewer', 'processor'),
+  async (req, res) => {
+    try {
+
+      const result =
+        await invoiceStock.evaluateInvoiceLines(req.params.id);
+
+      if (!result.evaluated) {
+        return res.status(404).json({ error: 'Invoice not found' });
+      }
+
+      return res.json({
+        ...result,
+        plan: await invoiceStock.invoiceStockPlan(req.params.id),
+      });
+
+    } catch (error) {
+      console.error('[invoices/stock/evaluate]', error);
+
+      return res.status(500).json({
+        error: `Unable to match the invoice lines: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// PATCH /api/invoices/:id/lines/:lineId/stock
+//
+// The decision a person makes about one line: match it to a product, or keep
+// it off the books. Reversible until the invoice is posted.
+// ============================================================================
+
+router.patch(
+  '/:id/lines/:lineId/stock',
+  requireAuth,
+  requireRole('admin', 'reviewer', 'processor'),
+  async (req, res) => {
+    try {
+
+      const result =
+        await invoiceStock.setLineDecision(
+          req.params.id,
+          req.params.lineId,
+          req.body || {},
+          req.user.id
+        );
+
+      if (!result.updated) {
+        const status =
+          result.reason === 'line_not_found'
+            ? 404
+            : result.reason === 'already_posted'
+              ? 409
+              : 400;
+
+        const messages = {
+          line_not_found: 'That invoice line does not exist',
+          already_posted:
+            'This line has already been posted to stock and cannot be changed',
+          product_required: 'Choose the product this line refers to',
+          product_not_found: 'That product does not exist',
+          unknown_decision: 'That is not a decision this line can take',
+        };
+
+        return res.status(status).json({
+          error: messages[result.reason] || 'Unable to record that decision',
+          reason: result.reason,
+        });
+      }
+
+      await log(
+        req.params.id,
+        'stock_decision',
+        req.user.id,
+        `${result.decision} for line ${req.params.lineId}`
+      );
+
+      return res.json({
+        ...result,
+        plan: await invoiceStock.invoiceStockPlan(req.params.id),
+      });
+
+    } catch (error) {
+      console.error('[invoices/lines/stock]', error);
+
+      return res.status(500).json({
+        error: `Unable to record that decision: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// POST /api/invoices/:id/lines/:lineId/product
+//
+// Adds an invoice line to the Product Master as a new product. The only path
+// in the application by which an invoice can create one, and it exists so
+// that doing so is always a deliberate act.
+// ============================================================================
+
+router.post(
+  '/:id/lines/:lineId/product',
+  requireAuth,
+  requireRole('admin', 'reviewer'),
+  async (req, res) => {
+    try {
+
+      if (req.body?.confirm !== true && req.body?.confirm !== 'true') {
+        return res.status(400).json({
+          error:
+            'Creating a product from an invoice line has to be confirmed explicitly',
+        });
+      }
+
+      const result =
+        await invoiceStock.createProductForLine(
+          req.params.id,
+          req.params.lineId,
+          req.body || {},
+          req.user.id
+        );
+
+      if (!result.created) {
+        const status =
+          result.reason === 'line_not_found'
+            ? 404
+            : result.reason === 'already_posted'
+              ? 409
+              : 400;
+
+        const messages = {
+          line_not_found: 'That invoice line does not exist',
+          already_posted:
+            'This line has already been posted to stock and cannot be changed',
+          description_required: 'A product description is required',
+        };
+
+        return res.status(status).json({
+          error: messages[result.reason] || 'Unable to create that product',
+          reason: result.reason,
+        });
+      }
+
+      await log(
+        req.params.id,
+        'product_created',
+        req.user.id,
+        `${result.product.description} from line ${req.params.lineId}`
+      );
+
+      return res.status(201).json({
+        ...result,
+        plan: await invoiceStock.invoiceStockPlan(req.params.id),
+      });
+
+    } catch (error) {
+      console.error('[invoices/lines/product]', error);
+
+      return res.status(500).json({
+        error: `Unable to create that product: ${error.message}`,
+      });
+    }
+  }
+);
+
 
 module.exports = {
   router,

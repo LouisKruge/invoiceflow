@@ -106,6 +106,8 @@ The JSON must have exactly this structure:
   "line_items": [
     {
       "description": string|null,
+      "supplier_product_code": string|null,
+      "unit_of_measure": string|null,
       "quantity": number|null,
       "unit_price": number|null,
       "vat": number|null,
@@ -147,6 +149,9 @@ RULES:
 13. If the invoice clearly uses R or ZAR, return ZAR.
 14. Extract every visible invoice line item.
 15. Do not create line items that are not visible.
+16. Where a line prints the supplier's own part or stock code, copy it into
+    supplier_product_code exactly as shown, and any unit (ea, m, kg, box) into
+    unit_of_measure. Leave them null when the invoice does not show them.
 16. Preserve supplier names and invoice numbers as printed wherever possible.
 17. Extract purchase/order numbers into purchase_order_number.
 17a. Extract the customer/trading ACCOUNT CODE into account_code.
@@ -1156,7 +1161,20 @@ function normalizeExtraction(
             total:
               normalizeNumber(
                 item?.total
-              )
+              ),
+
+            // The supplier's own code for the part, where the invoice prints
+            // one. It identifies a product far more reliably than the wording
+            // does, so it is worth carrying even when it is often absent.
+            supplier_product_code:
+              item?.supplier_product_code
+                ? String(item.supplier_product_code).trim()
+                : null,
+
+            unit_of_measure:
+              item?.unit_of_measure
+                ? String(item.unit_of_measure).trim()
+                : null
 
           })
         )

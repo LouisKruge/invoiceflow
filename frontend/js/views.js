@@ -1473,6 +1473,8 @@ function renderInvoiceDetail(invoice, opts = {}) {
 
       ${confidencePanel(invoice)}
 
+      ${renderInvoiceStock(opts.stockPlan, { openLine: opts.openLine })}
+
       ${
         lineItems
           ? `
@@ -2917,6 +2919,16 @@ function renderProductDetail(detail, history) {
       >${product.bin_location ? 'Edit bin' : 'Set bin'}</button>
       <button
         class="btn btn-secondary"
+        id="btn-inventory-type"
+        data-product-id="${esc(product.id)}"
+        data-inventory-type="${esc(product.inventory_type || 'STOCK')}"
+      >${
+        product.inventory_type === 'NON_STOCK'
+          ? 'Make this stock'
+          : 'Mark as non-stock'
+      }</button>
+      <button
+        class="btn btn-secondary"
         id="btn-adjust-product"
         data-product-id="${esc(product.id)}"
       >${Icons.adjust} Adjust</button>
@@ -2943,6 +2955,14 @@ function renderProductDetail(detail, history) {
     <div class="item">
       <div class="l">Group</div>
       <div class="v">${esc(product.stock_group || '—')}</div>
+    </div>
+    <div class="item">
+      <div class="l">Inventory</div>
+      <div class="v">${
+        product.inventory_type === 'NON_STOCK' || product.track_inventory === false
+          ? 'Not stock'
+          : 'Stock'
+      }</div>
     </div>
     <div class="item">
       <div class="l">${(detail.bins || []).length > 1 ? 'Bins' : 'Bin'}</div>
@@ -4332,5 +4352,302 @@ function renderStockSheetDetail(sheet, opts = {}) {
         </table>
       </div>
     </div>
+  </div>`;
+}
+
+// --------------------------- Invoice → stock impact -------------------------
+
+// What each decision means on screen. The wording matters: a person reading
+// this is deciding whether something becomes inventory, and "unmatched" has to
+// look like a question rather than a failure.
+const STOCK_DECISIONS = {
+  STOCK_MATCHED: ['approved',        'Stock'],
+  POSTED:        ['approved',        'Posted'],
+  NON_STOCK:     ['rejected',        'Non-stock'],
+  UNMATCHED:     ['exception',       'Needs a decision'],
+  DO_NOT_STOCK:  ['rejected',        'Not stocked'],
+  NOT_STOCKABLE: ['processing',      'No quantity'],
+};
+
+const DO_NOT_STOCK_REASONS = [
+  ['JOB_SPECIFIC',     'Job-specific material'],
+  ['ONE_OFF_PURCHASE', 'One-off purchase'],
+  ['DIRECT_TO_JOB',    'Direct-to-job'],
+  ['NON_INVENTORY',    'Non-inventory item'],
+  ['OTHER',            'Other'],
+];
+
+function decisionMark(decision) {
+  const [cls, label] = STOCK_DECISIONS[decision] || ['processing', decision || '—'];
+
+  return `
+    <span class="status status-${cls}">
+      <span class="mark"></span>${esc(label)}
+    </span>
+  `;
+}
+
+function reasonLabel(reason) {
+  const found = DO_NOT_STOCK_REASONS.find(([value]) => value === reason);
+
+  return found ? found[1] : reason;
+}
+
+/**
+ * The stock consequence of an invoice, line by line, before it is posted.
+ *
+ * Nothing here has happened yet: the figures are what stock would become. The
+ * point of the screen is that a person can see it before approving rather than
+ * discover it afterwards.
+ */
+function renderInvoiceStock(plan, opts = {}) {
+  if (!plan) return '';
+
+  const totals = plan.totals || {};
+  const lines = plan.lines || [];
+
+  if (!lines.length) return '';
+
+  const editable = !plan.posted && plan.invoice_status !== 'approved';
+
+  const row = (line) => {
+    const needsDecision = line.stock_decision === 'UNMATCHED';
+    const open = opts.openLine === line.id;
+
+    return `
+      <tr class="${needsDecision ? 'row-attention' : ''}">
+        <td>
+          <div class="cell-strong">${esc(line.description || '—')}</div>
+          ${
+            line.supplier_product_code
+              ? `<div class="cell-muted" style="font-size:12px;">${esc(line.supplier_product_code)}</div>`
+              : ''
+          }
+        </td>
+        <td class="cell-num">${fmtQty(line.quantity)}</td>
+        <td>
+          ${
+            line.product_id
+              ? `
+                <div class="cell-strong">${esc(line.product_description || '—')}</div>
+                <div class="cell-muted" style="font-size:12px;">
+                  ${esc(line.sku || line.product_code || 'No SKU')}
+                  ${line.match_method ? ` · ${esc(String(line.match_method).replace(/_/g, ' '))}` : ''}
+                </div>
+              `
+              : '<span class="cell-muted">Not found</span>'
+          }
+        </td>
+        <td class="cell-num">${confidenceText(line.match_confidence)}</td>
+        <td class="cell-num">
+          ${line.current_quantity == null ? '—' : fmtQty(line.current_quantity)}
+        </td>
+        <td class="cell-num ${line.stock_impact ? 'cell-strong' : 'cell-muted'}">
+          ${line.stock_impact ? `+${fmtQty(line.stock_impact)}` : '0'}
+        </td>
+        <td class="cell-num">
+          ${line.projected_quantity == null ? '—' : fmtQty(line.projected_quantity)}
+        </td>
+        <td>
+          ${decisionMark(line.stock_decision)}
+          ${
+            line.stock_decision === 'DO_NOT_STOCK' && line.stock_decision_reason
+              ? `<div class="cell-muted" style="font-size:12px;margin-top:3px;">${esc(reasonLabel(line.stock_decision_reason))}</div>`
+              : ''
+          }
+        </td>
+        <td class="sheet-actions">
+          ${
+            editable
+              ? `<button class="btn btn-secondary btn-sm" data-line-decide="${esc(line.id)}">
+                   ${open ? 'Close' : needsDecision ? 'Decide' : 'Change'}
+                 </button>`
+              : ''
+          }
+        </td>
+      </tr>
+
+      ${
+        open && editable
+          ? `
+            <tr class="row-editor">
+              <td colspan="9">
+                <div class="sheet-editor">
+                  <div class="eyebrow">What is this line?</div>
+                  <div class="cell-muted" style="font-size:13px;margin-bottom:14px;">
+                    “${esc(line.description || '')}” · ${fmtQty(line.quantity)}
+                    ${line.unit_price != null ? ` at ${fmtMoney(line.unit_price)}` : ''}
+                  </div>
+
+                  <div class="decision-grid">
+
+                    <div class="decision-card">
+                      <div class="head">Match an existing product</div>
+                      <div class="field">
+                        <label>Search the product master</label>
+                        <input
+                          type="search"
+                          id="line-search-${esc(line.id)}"
+                          placeholder="SKU, bin or description"
+                          autocomplete="off"
+                        />
+                      </div>
+                      <div id="line-results-${esc(line.id)}">
+                        ${
+                          (line.candidates || []).length
+                            ? line.candidates.map(c => `
+                                <label class="intel-row" style="cursor:pointer;align-items:center;">
+                                  <input
+                                    type="radio"
+                                    name="line-${esc(line.id)}"
+                                    value="${esc(c.product_id)}"
+                                    style="width:14px;height:14px;margin-right:2px;"
+                                  />
+                                  <div style="flex:1;min-width:0;">
+                                    <div class="title">${esc(c.description)}</div>
+                                    <div class="detail">
+                                      ${esc(c.sku || 'No SKU')}
+                                      ${c.inventory_type === 'NON_STOCK' ? ' · not inventory' : ''}
+                                    </div>
+                                  </div>
+                                  <span class="confidence ${c.confidence < 0.9 ? 'low' : ''}">
+                                    ${Math.round(Number(c.confidence || 0) * 100)}%
+                                  </span>
+                                </label>
+                              `).join('')
+                            : '<div class="cell-muted" style="font-size:13px;">Nothing close. Search above.</div>'
+                        }
+                      </div>
+                      <button class="btn btn-primary btn-sm" style="margin-top:12px;" data-line-match="${esc(line.id)}">
+                        Use this product
+                      </button>
+                    </div>
+
+                    <div class="decision-card">
+                      <div class="head">Add as a new stock product</div>
+                      <div class="cell-muted" style="font-size:12.5px;margin-bottom:12px;">
+                        Creates a product on the master and gives it this
+                        quantity when the invoice is approved.
+                      </div>
+                      <div class="field">
+                        <label>Product code</label>
+                        <input id="line-sku-${esc(line.id)}" placeholder="Optional" />
+                      </div>
+                      <div class="field">
+                        <label>Description</label>
+                        <input id="line-desc-${esc(line.id)}" value="${esc(line.description || '')}" />
+                      </div>
+                      <div style="display:flex;gap:12px;">
+                        <div class="field" style="flex:1;">
+                          <label>Bin</label>
+                          <input id="line-bin-${esc(line.id)}" placeholder="Optional" />
+                        </div>
+                        <div class="field" style="flex:1;">
+                          <label>Stock group</label>
+                          <input id="line-group-${esc(line.id)}" placeholder="Optional" />
+                        </div>
+                      </div>
+                      <button class="btn btn-secondary btn-sm" data-line-create="${esc(line.id)}">
+                        Create product
+                      </button>
+                    </div>
+
+                    <div class="decision-card">
+                      <div class="head">Do not add to stock</div>
+                      <div class="cell-muted" style="font-size:12.5px;margin-bottom:12px;">
+                        The line stays on the invoice. Inventory is untouched.
+                      </div>
+                      <div class="field">
+                        <label>Reason</label>
+                        <select id="line-reason-${esc(line.id)}">
+                          ${DO_NOT_STOCK_REASONS.map(([v, l]) => `
+                            <option value="${esc(v)}">${esc(l)}</option>
+                          `).join('')}
+                        </select>
+                      </div>
+                      <button class="btn btn-secondary btn-sm" data-line-skip="${esc(line.id)}">
+                        Keep off the books
+                      </button>
+                    </div>
+
+                  </div>
+                </div>
+              </td>
+            </tr>
+          `
+          : ''
+      }
+    `;
+  };
+
+  return `
+  <div class="detail-block">
+    <div class="head">
+      <h3>Stock impact</h3>
+      <span class="confidence">
+        ${plan.posted ? 'Posted to the ledger' : 'Nothing has moved yet'}
+      </span>
+    </div>
+
+    <div class="body" style="padding-top:14px;padding-bottom:4px;">
+      <div class="stat-inline" style="margin:0 0 4px;">
+        <div class="item">
+          <div class="l">Stock items</div>
+          <div class="v">${totals.stock ?? 0}</div>
+        </div>
+        <div class="item">
+          <div class="l">Non-stock</div>
+          <div class="v">${totals.non_stock ?? 0}</div>
+        </div>
+        <div class="item">
+          <div class="l">Need a decision</div>
+          <div class="v ${totals.unmatched ? 'critical' : ''}">${totals.unmatched ?? 0}</div>
+        </div>
+        <div class="item">
+          <div class="l">Kept off stock</div>
+          <div class="v">${totals.excluded ?? 0}</div>
+        </div>
+        <div class="item">
+          <div class="l">${plan.posted ? 'Units added' : 'Units it would add'}</div>
+          <div class="v">${fmtQty(totals.expected_increase)}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table sheet-lines">
+        <thead>
+          <tr>
+            <th style="padding-left:18px;">Invoice item</th>
+            <th class="th-num">Qty</th>
+            <th>Product match</th>
+            <th class="th-num">Confidence</th>
+            <th class="th-num">In stock</th>
+            <th class="th-num">Impact</th>
+            <th class="th-num">After posting</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>${lines.map(row).join('')}</tbody>
+      </table>
+    </div>
+
+    ${
+      totals.unmatched
+        ? `
+          <div class="body" style="padding:12px 18px 16px;">
+            <div class="check-row warn">
+              <span class="glyph">${Icons.warning}</span>
+              <span>
+                ${totals.unmatched} line${totals.unmatched === 1 ? '' : 's'} not on the
+                product master. Approving now captures the invoice and leaves
+                ${totals.unmatched === 1 ? 'it' : 'them'} out of stock.
+              </span>
+            </div>
+          </div>
+        `
+        : ''
+    }
   </div>`;
 }

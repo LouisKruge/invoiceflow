@@ -1047,6 +1047,53 @@
   }
 
   // ===========================================================================
+  // INVOICE → STOCK
+  // ===========================================================================
+
+  /**
+   * What posting this invoice would do to stock. Projections only.
+   */
+  async function invoiceStockPlan(id) {
+    if (!id) throw new Error('Invoice ID is required.');
+
+    return request(`/invoices/${encodeURIComponent(id)}/stock`);
+  }
+
+  async function evaluateInvoiceStock(id) {
+    if (!id) throw new Error('Invoice ID is required.');
+
+    return request(`/invoices/${encodeURIComponent(id)}/stock/evaluate`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * The decision about one line: match it to a product, or keep it off the
+   * books. Reversible until the invoice is posted.
+   */
+  async function setInvoiceLineStock(invoiceId, lineId, body) {
+    if (!invoiceId || !lineId) throw new Error('Invoice and line IDs are required.');
+
+    return request(
+      `/invoices/${encodeURIComponent(invoiceId)}/lines/${encodeURIComponent(lineId)}/stock`,
+      { method: 'PATCH', body: JSON.stringify(body || {}) }
+    );
+  }
+
+  /**
+   * Adds an invoice line to the Product Master. Always an explicit act — the
+   * server refuses it without confirm.
+   */
+  async function createProductFromLine(invoiceId, lineId, fields) {
+    if (!invoiceId || !lineId) throw new Error('Invoice and line IDs are required.');
+
+    return request(
+      `/invoices/${encodeURIComponent(invoiceId)}/lines/${encodeURIComponent(lineId)}/product`,
+      { method: 'POST', body: JSON.stringify({ ...(fields || {}), confirm: true }) }
+    );
+  }
+
+  // ===========================================================================
   // STOCK
   // ===========================================================================
 
@@ -1658,6 +1705,12 @@
     // Suppliers
     listSuppliers,
     getSupplier,
+
+    // Invoice → stock
+    invoiceStockPlan,
+    evaluateInvoiceStock,
+    setInvoiceLineStock,
+    createProductFromLine,
 
     // Stock
     stockOverview,

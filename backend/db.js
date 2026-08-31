@@ -439,6 +439,15 @@ async function initializeDatabase() {
       -- separately, so the product master keeps them apart too.
       stock_group TEXT,
 
+      -- Whether this product is inventory at all. A great deal of what a
+      -- company buys is bought for a job and never held: services, one-off
+      -- materials, direct-to-site deliveries. Those belong on the invoice and
+      -- nowhere near the ledger.
+      inventory_type TEXT NOT NULL DEFAULT 'STOCK'
+        CHECK (inventory_type IN ('STOCK', 'NON_STOCK')),
+
+      track_inventory BOOLEAN NOT NULL DEFAULT TRUE,
+
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
 
       created_by TEXT,
@@ -949,6 +958,34 @@ async function initializeDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_products_stock_group
       ON products(stock_group);
+  `);
+
+  // What an invoice line is allowed to do to stock.
+  //
+  // An invoice is a record of what was bought, which is not the same as a
+  // record of what is held. Every line keeps the decision made about it —
+  // matched to a stock product, matched to something deliberately not
+  // tracked, not matched at all, or matched and then excluded by a person —
+  // so that posting reads a decision rather than making one.
+  await pool.query(`
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS inventory_type TEXT NOT NULL DEFAULT 'STOCK',
+      ADD COLUMN IF NOT EXISTS track_inventory BOOLEAN NOT NULL DEFAULT TRUE;
+
+    ALTER TABLE invoice_line_items
+      ADD COLUMN IF NOT EXISTS supplier_product_code TEXT,
+      ADD COLUMN IF NOT EXISTS unit_of_measure TEXT,
+      ADD COLUMN IF NOT EXISTS stock_decision TEXT,
+      ADD COLUMN IF NOT EXISTS stock_decision_reason TEXT,
+      ADD COLUMN IF NOT EXISTS stock_decision_by TEXT,
+      ADD COLUMN IF NOT EXISTS stock_decision_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS match_candidates TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_line_items_decision
+      ON invoice_line_items(stock_decision);
+
+    CREATE INDEX IF NOT EXISTS idx_products_inventory_type
+      ON products(inventory_type);
   `);
 
   // A product can occupy more than one bin. Real stock sheets show the same
