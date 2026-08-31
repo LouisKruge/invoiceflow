@@ -246,6 +246,9 @@ async function postMovement(client, movement) {
       error.code = 'INSUFFICIENT_STOCK';
       error.available = available;
       error.requested = quantity;
+      error.product_id = movement.product_id;
+      error.location_id = locationId;
+      error.source_line_id = movement.source_line_id || null;
 
       throw error;
     }
