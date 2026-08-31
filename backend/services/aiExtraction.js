@@ -63,6 +63,8 @@ const REQUIRED_FIELDS = [
   'due_date',
   'purchase_order_number',
   'account_code',
+  'job_number',
+  'customer_reference',
   'subtotal',
   'vat_amount',
   'total_amount',
@@ -96,6 +98,8 @@ The JSON must have exactly this structure:
   "due_date": string|null,
   "purchase_order_number": string|null,
   "account_code": string|null,
+  "job_number": string|null,
+  "customer_reference": string|null,
   "subtotal": number|null,
   "vat_amount": number|null,
   "total_amount": number|null,
@@ -154,6 +158,12 @@ RULES:
     unit_of_measure. Leave them null when the invoice does not show them.
 16. Preserve supplier names and invoice numbers as printed wherever possible.
 17. Extract purchase/order numbers into purchase_order_number.
+17aa. If the invoice names a JOB, JOB CARD, JOB NUMBER, WORKS ORDER or
+     similar, put that identifier in job_number exactly as printed. Put any
+     other customer reference, "your ref" or order reference in
+     customer_reference. Do not invent either: leave them null when the
+     invoice shows no such field. Never copy the invoice number, the account
+     code or the supplier's own document number into job_number.
 17a. Extract the customer/trading ACCOUNT CODE into account_code.
 17b. The account code is the supplier's internal code for the customer being
      invoiced. It is usually a short alphanumeric code such as EVE001, ABC123,

@@ -20,6 +20,7 @@ const { v4: uuid } = require('uuid');
 const db = require('../db');
 
 const ledger = require('./stockLedger');
+const jobsService = require('./jobs');
 const matching = require('./productMatching');
 const importer = require('./stockImport');
 const ai = require('./aiExtraction');
@@ -68,6 +69,7 @@ Return ONLY valid JSON with exactly this structure:
       "quantity": number|null,
       "raw_quantity": string|null,
       "unit": string|null,
+      "job": string|null,
       "notes": string|null,
       "quantity_confidence": number,
       "confidence": number
@@ -109,7 +111,11 @@ RULES:
 13. The employee is the person taking the stock, not a supplier or a manager
     signature, when the two can be distinguished.
 14. A job may appear as a job number, a work order, a registration or a
-    customer name. Put it in job.
+    customer name. Put the sheet's job in the top-level job.
+14a. Some sheets name a different job on each line, in a Job column beside the
+    quantity. When a line names its own job, put it in that row's job. Leave a
+    row's job null when the line does not name one — do not copy the sheet's
+    job down into every row.
 15. If a field is not on the sheet, return null. Do not infer it.
 16. Return ONLY the JSON object.
 `;
@@ -430,10 +436,17 @@ async function extractFromSpreadsheet(filePath, mimeType) {
         ? String(raw[perRow[name]] ?? '').trim() || null
         : null;
 
-    // A repeated value down the sheet still describes the sheet as a whole.
-    ['employee', 'job', 'department', 'vehicle', 'date'].forEach((field) => {
+    // A repeated value down the sheet still describes the sheet as a whole —
+    // except the job, which a sheet may name differently on every line. When
+    // there is a job column the lines own it, and the sheet claims no job of
+    // its own.
+    ['employee', 'department', 'vehicle', 'date'].forEach((field) => {
       if (!header[field]) header[field] = readColumn(field);
     });
+
+    if (perRow.job === undefined && !header.job) {
+      header.job = readColumn('job');
+    }
 
     const bin =
       binColumn !== undefined
@@ -465,6 +478,7 @@ async function extractFromSpreadsheet(filePath, mimeType) {
       // it holds is actually a usable number.
       quantity: null,
       unit: parsed.unit_of_measure,
+      job: readColumn('job'),
       notes: null,
       quantity_confidence: null,
       confidence: 1,
@@ -506,6 +520,7 @@ async function extractFromDocument(filePath, mimeType) {
               ? row.quantity
               : null,
           unit: row.unit || null,
+          job: row.job || null,
           notes: row.notes || null,
           quantity_confidence:
             typeof row.quantity_confidence === 'number'
@@ -642,12 +657,12 @@ async function processSheet(sheetId) {
         INSERT INTO stock_sheet_rows (
           id, sheet_id, row_number,
           raw_product_code, raw_description, raw_bin, raw_quantity, raw_unit,
-          raw_notes,
+          raw_notes, raw_job,
           quantity, unit_of_measure,
           product_id, match_confidence, match_method, quantity_confidence,
           candidates, stock_before, stock_after, status, issue
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
       `,
       [
         uuid(),
@@ -659,6 +674,7 @@ async function processSheet(sheetId) {
         row.raw_quantity,
         row.unit,
         row.notes,
+        row.job || null,
         evaluated.quantity,
         row.unit || evaluated.unitOfMeasure || null,
         evaluated.productId,
@@ -721,6 +737,17 @@ async function processSheet(sheetId) {
       sheetId,
     ]
   );
+
+  // Now that the lines exist and the sheet's own header has been written, work
+  // out which job each line belongs to. A line inherits the sheet's job when it
+  // names none of its own — which is why this runs after the update above and
+  // not before it. An existing job is linked; a number we do not have raises an
+  // approval and stock waits. Nothing here creates a job or moves stock.
+  try {
+    await resolveSheetJobs(sheetId);
+  } catch (jobError) {
+    console.warn('[stockSheet] Could not resolve job numbers:', jobError.message);
+  }
 
   return {
     status,
@@ -893,6 +920,90 @@ async function evaluateRow(row, { locationId }) {
     status: 'MATCHED',
     issue: null,
   };
+}
+
+/**
+ * Works out which job each line of a sheet belongs to.
+ *
+ * A line's job is the one written on it, or the sheet's when the line names
+ * none. Known jobs are linked straight away. An unknown number becomes a
+ * question for a person — one per line, so a sheet issuing to three different
+ * new jobs asks three times rather than lumping them together.
+ *
+ * Creates no jobs and moves no stock.
+ */
+async function resolveSheetJobs(sheetId) {
+  const sheet =
+    await db.get('SELECT * FROM stock_sheets WHERE id = $1', [sheetId]);
+
+  if (!sheet) return { resolved: false };
+
+  const rows =
+    await db.all(
+      'SELECT * FROM stock_sheet_rows WHERE sheet_id = $1 ORDER BY row_number',
+      [sheetId]
+    );
+
+  const counts = { linked: 0, pending: 0, none: 0 };
+
+  for (const row of rows) {
+
+    // A person's answer is not undone by a re-read.
+    if (row.job_id) {
+      counts.linked += 1;
+
+      continue;
+    }
+
+    const written = row.raw_job || sheet.job_reference;
+
+    const resolution = await jobsService.resolveJob(written);
+
+    if (resolution.status === jobsService.RESOLUTION.NO_JOB) {
+      counts.none += 1;
+
+      continue;
+    }
+
+    if (resolution.status === jobsService.RESOLUTION.EXISTING) {
+      await db.run(
+        'UPDATE stock_sheet_rows SET job_id = $1 WHERE id = $2',
+        [resolution.job.id, row.id]
+      );
+
+      counts.linked += 1;
+
+      continue;
+    }
+
+    await jobsService.requestApproval({
+      jobNumber: resolution.job_number,
+      sourceType: jobsService.SOURCE_TYPES.STOCK_SHEET,
+      sourceId: sheetId,
+      sourceLineId: row.id,
+    });
+
+    counts.pending += 1;
+  }
+
+  // The sheet itself points at a job only when every line agrees on one.
+  const jobIds = [
+    ...new Set(
+      (
+        await db.all(
+          'SELECT DISTINCT job_id FROM stock_sheet_rows WHERE sheet_id = $1 AND job_id IS NOT NULL',
+          [sheetId]
+        )
+      ).map((r) => r.job_id)
+    ),
+  ];
+
+  await db.run(
+    'UPDATE stock_sheets SET job_id = $1 WHERE id = $2',
+    [jobIds.length === 1 ? jobIds[0] : null, sheetId]
+  );
+
+  return { resolved: true, counts };
 }
 
 /**
@@ -1109,6 +1220,31 @@ async function postSheet(sheetId, userId) {
   // Re-check against live stock; another sheet may have consumed it since.
   await revalidateSheet(sheetId);
 
+  // A job number may have been created elsewhere since this sheet was read,
+  // which turns an open question into a straight link.
+  await resolveSheetJobs(sheetId);
+
+  // Stock does not move against a job nobody has agreed to. This is the same
+  // rule the invoice side follows: detection asks, a person answers, and only
+  // then does anything happen.
+  const pendingJobs =
+    await jobsService.pendingForSource(
+      jobsService.SOURCE_TYPES.STOCK_SHEET,
+      sheetId
+    );
+
+  if (pendingJobs.length) {
+    return {
+      posted: false,
+      reason: 'job_approval_required',
+      pending_jobs: pendingJobs.map((approval) => ({
+        approval_id: approval.id,
+        job_number: approval.job_number,
+        source_line_id: approval.source_line_id,
+      })),
+    };
+  }
+
   const rows =
     await db.all(
       `
@@ -1152,7 +1288,8 @@ async function postSheet(sheetId, userId) {
       quantity: Number(row.quantity),
       source_line_id: row.id,
       employee_name: sheet.employee_name,
-      job_reference: sheet.job_reference,
+      job_id: row.job_id || null,
+      job_reference: row.raw_job || sheet.job_reference,
       reason: `Issued on stock sheet ${sheet.sheet_number}`,
       match_confidence: row.match_confidence,
       created_by: userId,
@@ -1214,6 +1351,7 @@ module.exports = {
   extractFromDocument,
   evaluateRow,
   processSheet,
+  resolveSheetJobs,
   revalidateSheet,
   postSheet,
 };

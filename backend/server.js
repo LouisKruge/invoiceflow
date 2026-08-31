@@ -169,6 +169,9 @@ async function startServer() {
     const stockRoutes =
       require('./routes/stock');
 
+    const jobRoutes =
+      require('./routes/jobs');
+
     // -----------------------------------------------------------------------
     // API ROUTES
     // -----------------------------------------------------------------------
@@ -211,6 +214,11 @@ async function startServer() {
     app.use(
       '/api/export',
       exportRoutes
+    );
+
+    app.use(
+      '/api/jobs',
+      jobRoutes
     );
 
     app.use(

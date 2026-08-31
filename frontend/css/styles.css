@@ -1882,3 +1882,90 @@ input[type='checkbox']:indeterminate::after {
   line-height: 1.5;
   color: var(--ink-faint);
 }
+
+/* ---------------------------------------------------------------------------
+   JOBS
+   --------------------------------------------------------------------------- */
+
+/* Tabs on the job page. The job itself is one thing; invoices, stock and
+   activity are three views of it, not three pages. */
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--line);
+  margin: 22px 0 18px;
+}
+
+.tab-bar .tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: .01em;
+  padding: 10px 16px;
+  transition: color .12s ease, border-color .12s ease;
+}
+
+.tab-bar .tab:hover { color: var(--ink); }
+
+.tab-bar .tab.active {
+  border-bottom-color: var(--ink);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.tab-bar .tab .count {
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+
+.tab-bar .tab.active .count { color: var(--ink-soft); }
+
+/* An invoice or a stock issue laid out as labelled facts rather than a table:
+   a job page is read one record at a time. */
+.kv-grid {
+  display: grid;
+  gap: 14px 26px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.kv .k {
+  color: var(--ink-faint);
+  font-size: 11px;
+  letter-spacing: .06em;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+
+.kv .v {
+  color: var(--ink);
+  font-size: 13.5px;
+}
+
+.job-invoices .detail-block,
+.job-stock .detail-block,
+.job-approvals .detail-block {
+  margin-bottom: 12px;
+}
+
+.job-invoice .head:hover { background: var(--surface-hover); }
+
+/* Only shown once somebody has said no, so the choices that follow a refusal
+   are not clutter on the way to approving. */
+.reject-options {
+  border-top: 1px solid var(--line);
+  margin-top: 14px;
+  padding-top: 4px;
+}
+
+/* One unanswered job number on a sign-out sheet. */
+.pending-job + .pending-job {
+  border-top: 1px solid var(--line);
+  margin-top: 16px;
+  padding-top: 16px;
+}

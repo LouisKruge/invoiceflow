@@ -334,6 +334,12 @@
 
     '#/stock/signout':
       renderStockSignOutPage,
+
+    '#/jobs':
+      renderJobsPageView,
+
+    '#/jobs/approvals':
+      renderJobApprovalsPage,
   };
 
   let routerRunning =
@@ -508,6 +514,11 @@
     const stockSheetMatch =
       hash.match(
         /^#\/stock\/signout\/(.+)$/
+      );
+
+    const jobMatch =
+      hash.match(
+        /^#\/jobs\/(.+)$/
       );
 
     // -----------------------------------------------------------------------
@@ -770,6 +781,14 @@
           () =>
             renderStockSheetPage(
               stockSheetMatch[1]
+            );
+
+      } else if (jobMatch) {
+
+        routeHandler =
+          () =>
+            renderJobDetailPage(
+              jobMatch[1]
             );
       }
     }
@@ -7116,6 +7135,54 @@ function bindInvoiceListEvents(container) {
   }
 
   function bindSheetDecisions(sheet) {
+
+    // A job number nobody has agreed to holds the sheet. Answer it here rather
+    // than sending a person off to another screen to find out why Approve is
+    // greyed out.
+    document
+      .querySelectorAll('[data-approve-job]')
+      .forEach((button) => {
+        button.onclick =
+          async () => {
+            button.disabled = true;
+
+            try {
+
+              const result = await API.approveJob(button.dataset.approveJob);
+
+              toast(`${result.job.job_number} created.`, 'success');
+
+              await renderStockSheetPage(sheet.id);
+
+            } catch (error) {
+              button.disabled = false;
+              handleApiError(error, 'Unable to create the job.');
+            }
+          };
+      });
+
+    document
+      .querySelectorAll('[data-reject-job-inline]')
+      .forEach((button) => {
+        button.onclick =
+          async () => {
+            button.disabled = true;
+
+            try {
+
+              await API.rejectJob(button.dataset.rejectJobInline, null);
+
+              toast('No job created. The line stays unassigned.', 'success');
+
+              await renderStockSheetPage(sheet.id);
+
+            } catch (error) {
+              button.disabled = false;
+              handleApiError(error, 'Unable to record that decision.');
+            }
+          };
+      });
+
     const approve = document.getElementById('btn-approve-sheet');
 
     if (approve) {
@@ -7407,6 +7474,363 @@ function bindInvoiceListEvents(container) {
       );
     }
   );
+
+  // ===========================================================================
+  // JOBS
+  //
+  // A job number is the thread between an invoice and a stock issue. These
+  // screens read the records those two systems already keep; they hold no data
+  // of their own, so a change made anywhere else shows up here on reload.
+  // ===========================================================================
+
+  const JobState = {
+    query: '',
+    tab: 'invoices',
+    openInvoice: null,
+    jobId: null,
+  };
+
+  /**
+   * Opens the document the invoice was captured from.
+   *
+   * The same stored file the invoice detail screen shows — fetched, not
+   * copied, so a job never holds a second version of anything.
+   */
+  async function openInvoiceDocument(invoiceId) {
+    try {
+
+      const url = await API.fetchDocumentBlob(invoiceId);
+
+      if (!url) {
+        toast('No original document was stored with this invoice.', 'error');
+
+        return;
+      }
+
+      const opened = window.open(url, '_blank');
+
+      if (!opened) {
+        toast('Allow pop-ups to view the original invoice.', 'error');
+      }
+
+    } catch (error) {
+      handleApiError(error, 'Unable to open the original invoice.');
+    }
+  }
+
+  async function renderJobsPageView() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading jobs…</div>',
+        '#/jobs'
+      );
+
+    if (!mounted) return;
+
+    try {
+
+      const [list, approvals] =
+        await Promise.all([
+          API.listJobs({ q: JobState.query }),
+          API.listJobApprovals('PENDING').catch(() => ({ approvals: [] })),
+        ]);
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML =
+        renderJobsPage({
+          jobs: list.jobs || [],
+          pending: approvals.approvals || [],
+          query: JobState.query,
+        });
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-job-id]')
+        .forEach((row) => {
+          row.onclick =
+            () => {
+              location.hash = `#/jobs/${row.dataset.jobId}`;
+            };
+        });
+
+      const search = document.getElementById('job-search');
+
+      if (search) {
+        let timer = null;
+
+        search.oninput =
+          () => {
+            clearTimeout(timer);
+
+            timer =
+              setTimeout(
+                () => {
+                  JobState.query = search.value.trim();
+                  renderJobsPageView();
+                },
+                250
+              );
+          };
+      }
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load jobs.');
+    }
+  }
+
+  async function renderJobDetailPage(jobId) {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading job…</div>',
+        '#/jobs'
+      );
+
+    if (!mounted) return;
+
+    // A different job starts on its own first tab rather than inheriting the
+    // last one looked at.
+    if (JobState.jobId !== jobId) {
+      JobState.jobId = jobId;
+      JobState.tab = 'invoices';
+      JobState.openInvoice = null;
+    }
+
+    try {
+
+      const detail = await API.getJob(jobId);
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML =
+        renderJobDetail(detail, {
+          tab: JobState.tab,
+          openInvoice: JobState.openInvoice,
+        });
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-job-tab]')
+        .forEach((tab) => {
+          tab.onclick =
+            () => {
+              JobState.tab = tab.dataset.jobTab;
+              renderJobDetailPage(jobId);
+            };
+        });
+
+      // Opening one invoice closes the one before it: a job page is read one
+      // record at a time.
+      content
+        .querySelectorAll('[data-invoice-toggle]')
+        .forEach((head) => {
+          head.onclick =
+            () => {
+              const id = head.dataset.invoiceToggle;
+
+              JobState.openInvoice = JobState.openInvoice === id ? null : id;
+
+              renderJobDetailPage(jobId);
+            };
+        });
+
+      content
+        .querySelectorAll('[data-open-invoice]')
+        .forEach((button) => {
+          button.onclick =
+            (event) => {
+              event.stopPropagation();
+              location.hash = `#/invoices/${button.dataset.openInvoice}`;
+            };
+        });
+
+      content
+        .querySelectorAll('[data-view-document]')
+        .forEach((button) => {
+          button.onclick =
+            (event) => {
+              event.stopPropagation();
+              openInvoiceDocument(button.dataset.viewDocument);
+            };
+        });
+
+      content
+        .querySelectorAll('[data-open-sheet]')
+        .forEach((button) => {
+          button.onclick =
+            () => {
+              location.hash = `#/stock/signout/${button.dataset.openSheet}`;
+            };
+        });
+
+      content
+        .querySelectorAll('[data-open-product]')
+        .forEach((button) => {
+          button.onclick =
+            () => {
+              location.hash = `#/stock/products/${button.dataset.openProduct}`;
+            };
+        });
+
+    } catch (error) {
+
+      if (handleApiError(error, 'Unable to load the job.')) return;
+
+      location.hash = '#/jobs';
+    }
+  }
+
+  /**
+   * The approval gate.
+   *
+   * Nothing on this screen has happened yet. Each card is a job number found on
+   * a document, and the job it names does not exist until somebody presses the
+   * button.
+   */
+  async function renderJobApprovalsPage() {
+    const mounted =
+      await mountShell(
+        '<div class="loading-inline">Loading job approvals…</div>',
+        '#/jobs/approvals'
+      );
+
+    if (!mounted) return;
+
+    try {
+
+      const [approvals, list] =
+        await Promise.all([
+          API.listJobApprovals('ALL'),
+          API.listJobs({ limit: 500 }),
+        ]);
+
+      const content = document.querySelector('.content');
+
+      if (!content) return;
+
+      content.innerHTML =
+        renderJobApprovals({
+          approvals: approvals.approvals || [],
+          jobs: list.jobs || [],
+        });
+
+      bindShellEvents();
+
+      content
+        .querySelectorAll('[data-approve-job]')
+        .forEach((button) => {
+          button.onclick =
+            async () => {
+              button.disabled = true;
+
+              try {
+
+                const result = await API.approveJob(button.dataset.approveJob);
+
+                toast(
+                  result.created
+                    ? `${result.job.job_number} created.`
+                    : `${result.job.job_number} already existed — attached to it.`,
+                  'success'
+                );
+
+                await renderJobApprovalsPage();
+
+              } catch (error) {
+                button.disabled = false;
+                handleApiError(error, 'Unable to create the job.');
+              }
+            };
+        });
+
+      // Rejecting is not one click: refusing the new job still leaves a
+      // document that has to go somewhere.
+      content
+        .querySelectorAll('[data-reject-job]')
+        .forEach((button) => {
+          button.onclick =
+            () => {
+              const panel =
+                content.querySelector(
+                  `[data-reject-panel="${button.dataset.rejectJob}"]`
+                );
+
+              if (panel) panel.hidden = false;
+            };
+        });
+
+      content
+        .querySelectorAll('[data-cancel-reject]')
+        .forEach((button) => {
+          button.onclick =
+            () => {
+              const panel =
+                content.querySelector(
+                  `[data-reject-panel="${button.dataset.cancelReject}"]`
+                );
+
+              if (panel) panel.hidden = true;
+            };
+        });
+
+      const refuse = async (approvalId, jobId, message) => {
+        try {
+
+          await API.rejectJob(approvalId, jobId || null);
+
+          toast(message, 'success');
+
+          await renderJobApprovalsPage();
+
+        } catch (error) {
+          handleApiError(error, 'Unable to record that decision.');
+        }
+      };
+
+      content
+        .querySelectorAll('[data-confirm-assign]')
+        .forEach((button) => {
+          button.onclick =
+            () => {
+              const id = button.dataset.confirmAssign;
+
+              const select =
+                content.querySelector(`[data-assign-job="${id}"]`);
+
+              const jobId = select ? select.value : '';
+
+              if (!jobId) {
+                toast('Choose the job it belongs to first.', 'error');
+
+                return;
+              }
+
+              refuse(id, jobId, 'Assigned to the existing job.');
+            };
+        });
+
+      content
+        .querySelectorAll('[data-leave-unassigned]')
+        .forEach((button) => {
+          button.onclick =
+            () =>
+              refuse(
+                button.dataset.leaveUnassigned,
+                null,
+                'Left unassigned. No job was created.'
+              );
+        });
+
+    } catch (error) {
+      handleApiError(error, 'Unable to load job approvals.');
+    }
+  }
 
   // ===========================================================================
   // EXPOSE GLOBAL STATE

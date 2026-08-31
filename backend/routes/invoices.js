@@ -27,6 +27,7 @@ const {
 } = require('../services/validation');
 
 const invoiceStock = require('../services/invoiceStock');
+const jobsService = require('../services/jobs');
 
 const {
   postInvoiceToStock
@@ -1045,6 +1046,17 @@ router.post(
         console.warn(
           '[invoices] Could not evaluate stock lines:',
           stockError.message
+        );
+      }
+
+      // Read the job number off the document. An existing job is linked; one
+      // we do not have raises an approval and waits. Never creates a job.
+      try {
+        await jobsService.applyToInvoice(invoiceId, f);
+      } catch (jobError) {
+        console.warn(
+          '[invoices] Could not resolve the job number:',
+          jobError.message
         );
       }
 
@@ -2704,6 +2716,8 @@ router.post(
       // person has already made are left alone.
       try {
         await invoiceStock.evaluateInvoiceLines(req.params.id);
+
+        await jobsService.applyToInvoice(req.params.id, f);
       } catch (stockError) {
         console.warn(
           '[invoices] Could not evaluate stock lines:',
