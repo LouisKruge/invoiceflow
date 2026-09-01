@@ -4180,6 +4180,71 @@ function bindInvoiceListEvents(container) {
       await paintReview(invoice);
     };
 
+    // Every line still waiting, answered in one go. An invoice of consumables
+    // that none of them belong in stock is ordinary, and answering it line by
+    // line is a lot of clicks for a single decision. Each line is still
+    // recorded separately, with the reason given, and any one of them can be
+    // reopened and changed afterwards.
+    const noneToStock = content.querySelector('#btn-none-to-stock');
+
+    if (noneToStock) {
+      noneToStock.onclick =
+        async () => {
+          const lines =
+            (ReviewState.stockPlan?.lines || [])
+              .filter((line) => line.stock_decision === 'UNMATCHED');
+
+          if (!lines.length) return;
+
+          const reason =
+            document.getElementById('bulk-off-stock-reason')?.value || 'NON_INVENTORY';
+
+          const confirmed =
+            await confirmDialog({
+              title: `Keep ${lines.length} lines off stock?`,
+              body:
+                `They stay on the invoice and are captured as normal. ` +
+                `No quantity moves for any of them. You can change any line ` +
+                `afterwards.`,
+              confirmLabel: `Keep all ${lines.length} off stock`,
+            });
+
+          if (!confirmed) return;
+
+          noneToStock.disabled = true;
+
+          let plan = null;
+          let failed = 0;
+
+          for (const line of lines) {
+            try {
+
+              const result =
+                await API.setInvoiceLineStock(invoice.id, line.id, {
+                  decision: 'DO_NOT_STOCK',
+                  reason,
+                });
+
+              plan = result.plan;
+
+            } catch (error) {
+              failed += 1;
+            }
+          }
+
+          ReviewState.openLine = null;
+
+          toast(
+            failed
+              ? `${lines.length - failed} of ${lines.length} kept off stock; ${failed} could not be recorded.`
+              : `${lines.length} lines kept off stock.`,
+            failed ? 'error' : 'success'
+          );
+
+          await repaint(plan);
+        };
+    }
+
     content
       .querySelectorAll('[data-line-decide]')
       .forEach((button) => {
