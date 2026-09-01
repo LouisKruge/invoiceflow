@@ -7549,6 +7549,9 @@ function bindInvoiceListEvents(container) {
   // ===========================================================================
 
   const JobState = {
+    // What the last scan of existing records found. Held here so answering a
+    // question does not wipe the summary that explains why it is being asked.
+    scan: null,
     query: '',
     tab: 'invoices',
     openInvoice: null,
@@ -7783,9 +7786,75 @@ function bindInvoiceListEvents(container) {
         renderJobApprovals({
           approvals: approvals.approvals || [],
           jobs: list.jobs || [],
+          scan: JobState.scan,
         });
 
       bindShellEvents();
+
+      // Reading the old records is two steps on purpose: see what is there,
+      // then decide. The first step changes nothing at all.
+      const scan = document.getElementById('btn-scan-existing');
+
+      if (scan) {
+        scan.onclick =
+          async () => {
+            scan.disabled = true;
+            scan.textContent = 'Reading…';
+
+            try {
+
+              JobState.scan = await API.backfillJobs(true);
+
+              await renderJobApprovalsPage();
+
+            } catch (error) {
+              scan.disabled = false;
+              scan.textContent = 'Scan existing records';
+              handleApiError(error, 'Unable to read the existing records.');
+            }
+          };
+      }
+
+      const runScan = document.getElementById('btn-run-backfill');
+
+      if (runScan) {
+        runScan.onclick =
+          async () => {
+            runScan.disabled = true;
+            runScan.textContent = 'Working…';
+
+            try {
+
+              const result = await API.backfillJobs(false);
+
+              JobState.scan = result;
+
+              toast(
+                `${result.counts.invoices_linked + result.counts.movements_linked} records linked; ` +
+                `${result.unknown_jobs.length} job number${result.unknown_jobs.length === 1 ? '' : 's'} to answer.`,
+                'success'
+              );
+
+              await renderJobApprovalsPage();
+
+            } catch (error) {
+              runScan.disabled = false;
+              runScan.textContent = 'Link them and ask about the rest';
+              handleApiError(error, 'Unable to read the existing records.');
+            }
+          };
+      }
+
+      const dismiss = document.getElementById('btn-dismiss-scan');
+
+      if (dismiss) {
+        dismiss.onclick =
+          async () => {
+            JobState.scan = null;
+
+            await renderJobApprovalsPage();
+          };
+      }
 
       content
         .querySelectorAll('[data-approve-job]')
@@ -7798,10 +7867,15 @@ function bindInvoiceListEvents(container) {
 
                 const result = await API.approveJob(button.dataset.approveJob);
 
+                const settled = result.also_settled || 0;
+
                 toast(
-                  result.created
+                  (result.created
                     ? `${result.job.job_number} created.`
-                    : `${result.job.job_number} already existed — attached to it.`,
+                    : `${result.job.job_number} already existed — attached to it.`) +
+                  (settled
+                    ? ` ${settled + 1} records attached.`
+                    : ''),
                   'success'
                 );
 

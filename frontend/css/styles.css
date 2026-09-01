@@ -2048,3 +2048,7 @@ input[type='checkbox']:indeterminate::after {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* A grouped approval lists everything the number was found on, which needs
+   the full row rather than one cell of the grid. */
+.kv-grid .span-2 { grid-column: 1 / -1; }

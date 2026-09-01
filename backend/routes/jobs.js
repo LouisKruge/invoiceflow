@@ -155,6 +155,9 @@ router.post(
         created: result.created,
 
         attached: result.attached,
+
+        // Other records that named the same number and were settled with it.
+        also_settled: result.also_settled || 0,
       });
 
     } catch (error) {
@@ -296,6 +299,37 @@ router.post(
 
       return res.status(500).json({
         error: `Unable to look that job number up: ${error.message}`,
+      });
+    }
+  }
+);
+
+// ============================================================================
+// POST /api/jobs/backfill
+//
+// Reads job numbers off records captured before jobs existed. Links what
+// matches a job we have; everything else becomes a question. Creates no jobs.
+//
+// Send { preview: true } to be told what it would find without changing
+// anything. Safe to run twice either way.
+// ============================================================================
+
+router.post(
+  '/backfill',
+  requireAuth,
+  requireRole('admin'),
+  async (req, res) => {
+    try {
+
+      const result = await jobs.backfill({ dryRun: Boolean(req.body?.preview) });
+
+      return res.json(result);
+
+    } catch (error) {
+      console.error('[jobs/backfill]', error);
+
+      return res.status(500).json({
+        error: `Unable to read the existing records: ${error.message}`,
       });
     }
   }
