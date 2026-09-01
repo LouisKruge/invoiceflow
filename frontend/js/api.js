@@ -1157,6 +1157,14 @@
     });
   }
 
+  // preview: true asks what a scan would find and changes nothing.
+  async function backfillJobs(preview) {
+    return request('/jobs/backfill', {
+      method: 'POST',
+      body: JSON.stringify({ preview: Boolean(preview) }),
+    });
+  }
+
   async function resolveJobNumber(payload) {
     return request('/jobs/resolve', {
       method: 'POST',
@@ -1776,6 +1784,7 @@
     approveJob,
     rejectJob,
     resolveJobNumber,
+    backfillJobs,
 
     // Stock
     stockOverview,

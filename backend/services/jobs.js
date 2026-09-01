@@ -387,9 +387,48 @@ async function reject(approvalId, userId, { action, jobId } = {}) {
     ]
   );
 
+  // Refusing a number refuses it everywhere, the way approving it settles it
+  // everywhere. Without this, a backfill that met JOB-1045 on thirty invoices
+  // would leave twenty-nine copies of a question already answered.
+  //
+  // Assigning to an existing job is the exception: the person picked that job
+  // for this document, and there is no reason to believe every other document
+  // carrying the same misread number belongs there too. Those stay open.
+  const settleSiblings = !resolvedJobId;
+
+  let alsoSettled = 0;
+
+  if (settleSiblings) {
+    const siblings =
+      await db.all(
+        `
+          SELECT * FROM job_approvals
+          WHERE normalized_key = $1 AND status = 'PENDING' AND id <> $2
+        `,
+        [approval.normalized_key, approval.id]
+      );
+
+    for (const other of siblings) {
+      await db.run(
+        `
+          UPDATE job_approvals
+          SET status = 'REJECTED',
+              resolution = 'UNASSIGNED',
+              resolved_by = $1,
+              resolved_at = NOW()
+          WHERE id = $2
+        `,
+        [userId || null, other.id]
+      );
+    }
+
+    alsoSettled = siblings.length;
+  }
+
   return {
     rejected: true,
     assigned_job_id: resolvedJobId,
+    also_settled: alsoSettled,
     approval: await db.get('SELECT * FROM job_approvals WHERE id = $1', [approval.id]),
   };
 }
@@ -451,6 +490,200 @@ async function applyToInvoice(invoiceId, fields) {
     });
 
   return { status: resolution.status, approval, field: found.field };
+}
+
+// ---------------------------------------------------------------------------
+// BACKFILL
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads job numbers off records captured before jobs existed.
+ *
+ * Same rule as everything else here: a number matching a job we have is
+ * linked, and a number matching nothing becomes a question. A backfill of two
+ * years of invoices creates no jobs on its own — it just stops the history
+ * being invisible.
+ *
+ * Safe to run twice. Records already linked are skipped, an assignment a
+ * person made is never overwritten, and asking the same question again is a
+ * no-op.
+ *
+ * @param {object} options
+ * @param {boolean} options.dryRun - count what would happen, change nothing
+ * @returns {Promise<object>} what was found, and the numbers still unanswered
+ */
+async function backfill({ dryRun = false } = {}) {
+  const counts = {
+    invoices_scanned: 0,
+    invoices_linked: 0,
+    invoices_pending: 0,
+    invoices_no_number: 0,
+    movements_scanned: 0,
+    movements_linked: 0,
+    movements_pending: 0,
+    sheet_rows_linked: 0,
+  };
+
+  // Job numbers this run met that do not exist yet, and what raised them.
+  const unknown = new Map();
+
+  const note = (number, kind, label) => {
+    const key = normalizeJobNumber(number)?.key;
+
+    if (!key) return;
+
+    if (!unknown.has(key)) {
+      unknown.set(key, { job_number: number, invoices: 0, movements: 0, examples: [] });
+    }
+
+    const entry = unknown.get(key);
+
+    entry[kind] += 1;
+
+    if (entry.examples.length < 5 && label) entry.examples.push(label);
+  };
+
+  // ---- invoices --------------------------------------------------------
+
+  // Only two of the fields jobNumberFrom knows about are kept on an invoice
+  // row: what a previous read stored in job_reference, and the PO. The rest
+  // (job_number, customer_reference) live in the extraction result, which is
+  // not replayed here — a document already captured is read as it was stored.
+  const invoices =
+    await db.all(
+      `
+        SELECT id, invoice_number, job_reference, purchase_order_number
+        FROM invoices
+        WHERE job_id IS NULL
+        ORDER BY created_at
+      `
+    );
+
+  for (const invoice of invoices) {
+    counts.invoices_scanned += 1;
+
+    const found = jobNumberFrom(invoice);
+
+    if (!found) {
+      counts.invoices_no_number += 1;
+
+      continue;
+    }
+
+    const job =
+      await db.get(
+        'SELECT * FROM jobs WHERE normalized_key = $1',
+        [found.key]
+      );
+
+    if (job) {
+      counts.invoices_linked += 1;
+
+      if (!dryRun) {
+        await db.run(
+          'UPDATE invoices SET job_id = $1, job_reference = COALESCE(job_reference, $2) WHERE id = $3',
+          [job.id, found.number, invoice.id]
+        );
+      }
+
+      continue;
+    }
+
+    counts.invoices_pending += 1;
+
+    note(found.number, 'invoices', invoice.invoice_number || invoice.id);
+
+    if (!dryRun) {
+      await db.run(
+        'UPDATE invoices SET job_reference = COALESCE(job_reference, $1) WHERE id = $2',
+        [found.number, invoice.id]
+      );
+
+      await requestApproval({
+        jobNumber: found.number,
+        sourceType: SOURCE_TYPES.INVOICE,
+        sourceId: invoice.id,
+      });
+    }
+  }
+
+  // ---- stock movements -------------------------------------------------
+  //
+  // A movement carries the wording written on the sheet. The question, when
+  // there is one, belongs to the sheet line it came from, so answering it
+  // later attaches the movement through the same path a fresh sheet uses.
+
+  const movements =
+    await db.all(
+      `
+        SELECT t.id, t.job_reference, t.source_document_id, t.source_line_id,
+               s.sheet_number
+        FROM stock_transactions t
+        LEFT JOIN stock_sheets s
+          ON s.id = t.source_document_id AND t.source_document_type = 'STOCK_SHEET'
+        WHERE t.job_id IS NULL
+          AND t.job_reference IS NOT NULL
+          AND t.job_reference <> ''
+        ORDER BY t.created_at
+      `
+    );
+
+  for (const movement of movements) {
+    counts.movements_scanned += 1;
+
+    const found = normalizeJobNumber(movement.job_reference);
+
+    if (!found) continue;
+
+    const job =
+      await db.get('SELECT * FROM jobs WHERE normalized_key = $1', [found.key]);
+
+    if (job) {
+      counts.movements_linked += 1;
+
+      if (!dryRun) {
+        await db.run(
+          'UPDATE stock_transactions SET job_id = $1 WHERE id = $2',
+          [job.id, movement.id]
+        );
+
+        if (movement.source_line_id) {
+          await db.run(
+            'UPDATE stock_sheet_rows SET job_id = $1 WHERE id = $2 AND job_id IS NULL',
+            [job.id, movement.source_line_id]
+          );
+
+          counts.sheet_rows_linked += 1;
+        }
+      }
+
+      continue;
+    }
+
+    counts.movements_pending += 1;
+
+    note(found.number, 'movements', movement.sheet_number || movement.id);
+
+    if (!dryRun && movement.source_document_id) {
+      await requestApproval({
+        jobNumber: found.number,
+        sourceType: SOURCE_TYPES.STOCK_SHEET,
+        sourceId: movement.source_document_id,
+        sourceLineId: movement.source_line_id || null,
+      });
+    }
+  }
+
+  return {
+    dry_run: dryRun,
+    counts,
+    unknown_jobs:
+      [...unknown.values()].sort(
+        (a, b) =>
+          (b.invoices + b.movements) - (a.invoices + a.movements) ||
+          a.job_number.localeCompare(b.job_number)
+      ),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +936,7 @@ module.exports = {
   normalizeJobNumber,
   jobNumberFrom,
   applyToInvoice,
+  backfill,
   resolveJob,
   requestApproval,
   pendingForSource,

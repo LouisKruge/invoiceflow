@@ -5136,25 +5136,73 @@ function renderJobApprovals(data) {
   const approvals = data?.approvals || [];
   const jobs = data?.jobs || [];
 
-  const pending = approvals.filter((a) => a.status === 'PENDING');
   const answered = approvals.filter((a) => a.status !== 'PENDING');
+
+  // One question per number, not per document. A backfill that meets JOB-1045
+  // on thirty invoices should ask once and say where it found it — thirty
+  // identical cards is the same question thirty times. Answering any one of
+  // them settles the rest, so the group acts through its first.
+  const groups = [];
+  const byNumber = new Map();
+
+  for (const approval of approvals) {
+    if (approval.status !== 'PENDING') continue;
+
+    const key = approval.normalized_key || approval.job_number;
+
+    if (!byNumber.has(key)) {
+      const group = {
+        key,
+        job_number: approval.job_number,
+        lead: approval,
+        invoices: [],
+        sheets: [],
+        count: 0,
+      };
+
+      byNumber.set(key, group);
+      groups.push(group);
+    }
+
+    const group = byNumber.get(key);
+
+    group.count += 1;
+
+    if (approval.source_type === 'INVOICE') {
+      if (approval.invoice_number) group.invoices.push(approval.invoice_number);
+    } else if (approval.sheet_number) {
+      if (!group.sheets.includes(approval.sheet_number)) {
+        group.sheets.push(approval.sheet_number);
+      }
+    }
+  }
+
+  const pending = groups;
 
   const jobOptions =
     jobs
       .map((job) => `<option value="${esc(job.id)}">${esc(job.job_number)}</option>`)
       .join('');
 
-  const card = (approval) => `
-    <div class="detail-block decision-card" data-approval="${esc(approval.id)}">
+  const card = (group) => {
+    const approval = group.lead;
+    const many = group.count > 1;
+
+    return `
+    <div class="detail-block decision-card" data-approval="${esc(approval.id)}" data-job-number="${esc(group.job_number)}">
       <div class="head">
         <div>
           <div class="cell-strong">New job detected</div>
           <div class="cell-muted" style="font-size:12.5px;">
-            ${esc(fmtDateTime(approval.created_at))}
+            ${
+              many
+                ? `found on ${group.count} records`
+                : esc(fmtDateTime(approval.created_at))
+            }
           </div>
         </div>
         <div class="mono cell-strong" style="font-size:16px;">
-          ${esc(approval.job_number)}
+          ${esc(group.job_number)}
         </div>
       </div>
 
@@ -5162,34 +5210,56 @@ function renderJobApprovals(data) {
         <div class="kv-grid">
           <div class="kv">
             <div class="k">Job number</div>
-            <div class="v mono">${esc(approval.job_number)}</div>
+            <div class="v mono">${esc(group.job_number)}</div>
           </div>
           <div class="kv">
             <div class="k">Found on</div>
             <div class="v">
               ${
-                approval.source_type === 'INVOICE'
-                  ? `Invoice ${esc(approval.invoice_number || '')}`
-                  : `Sign-out sheet ${esc(approval.sheet_number || '')}`
+                many
+                  ? [
+                      group.invoices.length
+                        ? `${group.invoices.length} invoice${group.invoices.length === 1 ? '' : 's'}`
+                        : '',
+                      group.sheets.length
+                        ? `${group.sheets.length} sign-out sheet${group.sheets.length === 1 ? '' : 's'}`
+                        : '',
+                    ].filter(Boolean).join(' and ')
+                  : approval.source_type === 'INVOICE'
+                    ? `Invoice ${esc(approval.invoice_number || '')}`
+                    : `Sign-out sheet ${esc(approval.sheet_number || '')}`
               }
             </div>
           </div>
           ${
-            approval.source_type === 'INVOICE'
+            many
               ? `
-                <div class="kv"><div class="k">Supplier</div><div class="v">${esc(approval.supplier_name || '—')}</div></div>
-                <div class="kv"><div class="k">Invoice total</div><div class="v">${fmtMoney(approval.total_amount)}</div></div>
+                <div class="kv span-2">
+                  <div class="k">Which ones</div>
+                  <div class="v mono" style="font-size:12.5px;">
+                    ${esc(
+                      [...group.invoices, ...group.sheets].slice(0, 8).join(', ') +
+                      (group.count > 8 ? ` and ${group.count - 8} more` : '')
+                    )}
+                  </div>
+                </div>
               `
-              : `
-                <div class="kv"><div class="k">Product</div><div class="v">${esc(approval.row_product_description || approval.row_description || approval.row_bin || '—')}</div></div>
-                <div class="kv"><div class="k">Quantity</div><div class="v">${fmtQty(approval.row_quantity)}</div></div>
-                <div class="kv"><div class="k">Employee</div><div class="v">${esc(approval.sheet_employee_name || '—')}</div></div>
-              `
+              : approval.source_type === 'INVOICE'
+                ? `
+                  <div class="kv"><div class="k">Supplier</div><div class="v">${esc(approval.supplier_name || '—')}</div></div>
+                  <div class="kv"><div class="k">Invoice total</div><div class="v">${fmtMoney(approval.total_amount)}</div></div>
+                `
+                : `
+                  <div class="kv"><div class="k">Product</div><div class="v">${esc(approval.row_product_description || approval.row_description || approval.row_bin || '—')}</div></div>
+                  <div class="kv"><div class="k">Quantity</div><div class="v">${fmtQty(approval.row_quantity)}</div></div>
+                  <div class="kv"><div class="k">Employee</div><div class="v">${esc(approval.sheet_employee_name || '—')}</div></div>
+                `
           }
         </div>
 
         <p class="cell-muted" style="margin:14px 0 0;">
           This job number does not currently exist. Nothing has been created.
+          ${many ? `Answering it settles all ${group.count}.` : ''}
         </p>
 
         <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
@@ -5226,6 +5296,7 @@ function renderJobApprovals(data) {
       </div>
     </div>
   `;
+  };
 
   const answeredRow = (approval) => `
     <tr>
@@ -5253,7 +5324,118 @@ function renderJobApprovals(data) {
         Job numbers found on documents. A job is created only when you say so.
       </p>
     </div>
+    <div class="page-actions">
+      <button class="btn btn-secondary" id="btn-scan-existing">
+        Scan existing records
+      </button>
+    </div>
   </div>
+
+  ${
+    data?.scan
+      ? `
+        <div class="detail-block" style="margin-bottom:18px;">
+          <div class="head">
+            <div>
+              <div class="cell-strong">
+                ${data.scan.dry_run ? 'What a scan would find' : 'Scan complete'}
+              </div>
+              <div class="cell-muted" style="font-size:12.5px;">
+                Invoices and stock movements captured before jobs existed.
+              </div>
+            </div>
+          </div>
+          <div class="body" style="padding:16px 18px;">
+            <div class="stat-inline" style="margin:0;">
+              <div class="item">
+                <div class="l">Invoices read</div>
+                <div class="v">${data.scan.counts.invoices_scanned}</div>
+              </div>
+              <div class="item">
+                <div class="l">${data.scan.dry_run ? 'Would link' : 'Linked'}</div>
+                <div class="v">${data.scan.counts.invoices_linked}</div>
+              </div>
+              <div class="item">
+                <div class="l">No job number</div>
+                <div class="v">${data.scan.counts.invoices_no_number}</div>
+              </div>
+              <div class="item">
+                <div class="l">Movements read</div>
+                <div class="v">${data.scan.counts.movements_scanned}</div>
+              </div>
+              <div class="item">
+                <div class="l">${data.scan.dry_run ? 'Would link' : 'Linked'}</div>
+                <div class="v">${data.scan.counts.movements_linked}</div>
+              </div>
+              <div class="item">
+                <div class="l">New numbers</div>
+                <div class="v ${data.scan.unknown_jobs.length ? 'critical' : ''}">
+                  ${data.scan.unknown_jobs.length}
+                </div>
+              </div>
+            </div>
+
+            ${
+              data.scan.unknown_jobs.length
+                ? `
+                  <p class="cell-muted" style="margin:16px 0 8px;">
+                    ${data.scan.unknown_jobs.length} job number${data.scan.unknown_jobs.length === 1 ? '' : 's'}
+                    on those records ${data.scan.unknown_jobs.length === 1 ? 'does' : 'do'} not exist yet.
+                    ${
+                      data.scan.dry_run
+                        ? 'Running the scan will ask about each of them. Nothing is created until you answer.'
+                        : 'Each is waiting below.'
+                    }
+                  </p>
+                  <div class="table-wrap">
+                    <table class="data-table">
+                      <thead>
+                        <tr>
+                          <th style="padding-left:18px;">Job number</th>
+                          <th class="th-num">Invoices</th>
+                          <th class="th-num">Stock movements</th>
+                          <th>For example</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${data.scan.unknown_jobs.slice(0, 50).map(u => `
+                          <tr>
+                            <td class="mono cell-strong" style="padding-left:18px;">${esc(u.job_number)}</td>
+                            <td class="cell-num">${u.invoices}</td>
+                            <td class="cell-num">${u.movements}</td>
+                            <td class="cell-muted mono" style="font-size:12.5px;">${esc(u.examples.join(', '))}</td>
+                          </tr>
+                        `).join('')}
+                      </tbody>
+                    </table>
+                  </div>
+                `
+                : `
+                  <p class="cell-muted" style="margin:16px 0 0;">
+                    Every job number on those records is one you already have.
+                  </p>
+                `
+            }
+
+            ${
+              data.scan.dry_run
+                ? `
+                  <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;">
+                    <button class="btn btn-primary" id="btn-run-backfill">
+                      Link them and ask about the rest
+                    </button>
+                    <button class="btn btn-secondary" id="btn-dismiss-scan">
+                      Not now
+                    </button>
+                  </div>
+                `
+                : ''
+            }
+          </div>
+        </div>
+      `
+      : ''
+  }
 
   ${
     pending.length
