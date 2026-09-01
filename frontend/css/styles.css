@@ -1969,3 +1969,82 @@ input[type='checkbox']:indeterminate::after {
   margin-top: 16px;
   padding-top: 16px;
 }
+
+/* ---------------------------------------------------------------------------
+   STOCK IMPACT
+   --------------------------------------------------------------------------- */
+
+/* This panel used to sit beside the document, in half the page. A line of a
+   supplier's wording — "STR MLE STUD COUP BSPP - 6MM X 1/8BSPP" — wrapped
+   across four lines there and the decision beside it was unreadable. It now
+   runs the full width below the workspace, and the item column is given the
+   room it needs while the figures stay narrow. */
+.stock-impact {
+  margin-top: 20px;
+}
+
+.stock-impact table.data-table {
+  table-layout: auto;
+}
+
+/* The two things a person actually reads — the supplier's wording and the
+   product it matched — take the slack. Everything else is a short figure or a
+   badge, so it is pinned to its content and the words get the rest. */
+.stock-impact table.data-table th:first-child,
+.stock-impact table.data-table td:first-child {
+  min-width: 240px;
+}
+
+/* A percentage is only a suggestion to an auto table layout, and the layout
+   kept handing the slack to the empty middle columns instead. Telling the
+   wording not to wrap makes its full width the layout's problem to solve, so
+   a supplier line is read on one line as it is printed. The table can scroll
+   inside its own box if a description is genuinely enormous. */
+.stock-impact table.data-table td:first-child .cell-strong {
+  white-space: nowrap;
+}
+
+.stock-impact table.data-table th:nth-child(3),
+.stock-impact table.data-table td:nth-child(3) {
+  min-width: 160px;
+}
+
+/* Figures, the status badge and the Decide button: as narrow as their content,
+   never wrapped. Without this they absorb width the wording needs. */
+.stock-impact table.data-table th.th-num,
+.stock-impact table.data-table td.cell-num,
+.stock-impact table.data-table th:nth-child(n + 8),
+.stock-impact table.data-table td:nth-child(n + 8) {
+  white-space: nowrap;
+  width: 1%;
+}
+
+/* A decision row spans the table, so it must not be pinned by any of that. */
+.stock-impact table.data-table td[colspan] {
+  white-space: normal;
+  width: auto;
+}
+
+.stock-impact .decision-grid {
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+/* One answer for every line still waiting. Sits under the summary so the
+   counts above it explain what "all" means. */
+.bulk-decision {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding: 14px 0 4px;
+}
+
+.bulk-decision .bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

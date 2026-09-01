@@ -1481,8 +1481,6 @@ function renderInvoiceDetail(invoice, opts = {}) {
 
       ${confidencePanel(invoice)}
 
-      ${renderInvoiceStock(opts.stockPlan, { openLine: opts.openLine })}
-
       ${
         lineItems
           ? `
@@ -1538,7 +1536,9 @@ function renderInvoiceDetail(invoice, opts = {}) {
 
     </div>
 
-  </div>`;
+  </div>
+
+  ${renderInvoiceStock(opts.stockPlan, { openLine: opts.openLine })}`;
 }
 
 // Kept so existing callers continue to work.
@@ -4648,8 +4648,13 @@ function renderInvoiceStock(plan, opts = {}) {
     `;
   };
 
+  // Lines still waiting on a person. An invoice of twenty consumables that
+  // none of them belong in stock is an ordinary invoice, and answering it one
+  // line at a time is twenty clicks for one decision.
+  const undecided = lines.filter((line) => line.stock_decision === 'UNMATCHED');
+
   return `
-  <div class="detail-block">
+  <div class="detail-block stock-impact">
     <div class="head">
       <h3>Stock impact</h3>
       <span class="confidence">
@@ -4680,6 +4685,28 @@ function renderInvoiceStock(plan, opts = {}) {
           <div class="v">${fmtQty(totals.expected_increase)}</div>
         </div>
       </div>
+
+      ${
+        editable && undecided.length > 1
+          ? `
+            <div class="bulk-decision">
+              <span class="cell-muted">
+                ${undecided.length} lines still need a decision.
+              </span>
+              <div class="bulk-actions">
+                <select id="bulk-off-stock-reason" class="btn btn-secondary" style="padding-right:28px;">
+                  ${DO_NOT_STOCK_REASONS.map(([v, l]) => `
+                    <option value="${esc(v)}">${esc(l)}</option>
+                  `).join('')}
+                </select>
+                <button class="btn btn-secondary" id="btn-none-to-stock">
+                  Keep all ${undecided.length} off stock
+                </button>
+              </div>
+            </div>
+          `
+          : ''
+      }
     </div>
 
     <div class="table-wrap">
