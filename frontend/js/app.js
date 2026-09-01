@@ -3521,7 +3521,7 @@ function bindInvoiceListEvents(container) {
 
         const response =
           await API.captureInvoice(
-            file
+            await shrinkForUpload(file)
           );
 
         if (
@@ -3533,6 +3533,11 @@ function bindInvoiceListEvents(container) {
             'The server processed the invoice but did not return an invoice ID.'
           );
         }
+
+        // Capture answers as soon as the file is stored, so a file is not
+        // done until its reading is. Waiting here keeps each file's result
+        // meaning what it said before: read, not merely uploaded.
+        await waitForInvoice(response.invoice.id);
 
         successful++;
 
@@ -3787,6 +3792,128 @@ function bindInvoiceListEvents(container) {
     'Saving invoice',
   ];
 
+  // The long edge an uploaded photo is scaled to before it is sent.
+  //
+  // The camera path already produces something reasonable — the stream is
+  // asked for 1920 and encoded as JPEG. A photo chosen from the gallery is
+  // whatever the phone took, often 4000px and several megabytes, and every
+  // one of those bytes is upload time on a site connection before the reading
+  // even starts.
+  //
+  // Invoice text is legible well below this. A PDF is never touched: it is
+  // not an image, and its text is what the reader wants.
+  const MAX_UPLOAD_EDGE = 2200;
+
+  async function shrinkForUpload(file) {
+    if (!file || !String(file.type || '').startsWith('image/')) return file;
+
+    try {
+
+      const bitmap =
+        typeof createImageBitmap === 'function'
+          ? await createImageBitmap(file)
+          : null;
+
+      if (!bitmap) return file;
+
+      const longest = Math.max(bitmap.width, bitmap.height);
+
+      if (longest <= MAX_UPLOAD_EDGE) {
+        bitmap.close?.();
+
+        return file;
+      }
+
+      const scale = MAX_UPLOAD_EDGE / longest;
+
+      const canvas = document.createElement('canvas');
+
+      canvas.width = Math.round(bitmap.width * scale);
+      canvas.height = Math.round(bitmap.height * scale);
+
+      const context = canvas.getContext('2d');
+
+      if (!context) {
+        bitmap.close?.();
+
+        return file;
+      }
+
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+      bitmap.close?.();
+
+      const blob =
+        await new Promise((resolve) => {
+          canvas.toBlob(resolve, 'image/jpeg', 0.9);
+        });
+
+      // Only worth it if it actually came out smaller.
+      if (!blob || blob.size >= file.size) return file;
+
+      console.log(
+        '[Capture] Scaled before upload:',
+        `${Math.round(file.size / 1024)}KB -> ${Math.round(blob.size / 1024)}KB`,
+        `(${bitmap.width}x${bitmap.height} -> ${canvas.width}x${canvas.height})`
+      );
+
+      return new File(
+        [blob],
+        file.name.replace(/\.[^.]+$/, '') + '.jpg',
+        { type: 'image/jpeg' }
+      );
+
+    } catch (error) {
+
+      // A browser that cannot do this sends the original, which still works.
+      console.warn('[Capture] Could not scale the image:', error.message);
+
+      return file;
+    }
+  }
+
+  /**
+   * Waits for a captured invoice to finish being read.
+   *
+   * Capture answers as soon as the document is stored, so the invoice exists
+   * before anything has been read off it. This follows its status the way the
+   * sign-out screen follows a sheet's, rather than holding a request open.
+   *
+   * A slow read is not a failure: if it is still going after the wait, the
+   * invoice is opened anyway and the review screen shows where it has got to.
+   */
+  async function waitForInvoice(invoiceId, { onTick } = {}) {
+    const DEADLINE_MS = 120000;
+    const started = Date.now();
+
+    let delay = 700;
+
+    while (Date.now() - started < DEADLINE_MS) {
+      try {
+
+        const response = await API.getInvoice(invoiceId);
+        const invoice = response?.invoice || response;
+
+        if (invoice && invoice.status && invoice.status !== 'processing') {
+          return invoice;
+        }
+
+        if (onTick) onTick(Date.now() - started);
+
+      } catch (error) {
+        // A hiccup mid-read is not a reason to give up on the invoice.
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delay));
+
+      // Ease off: most invoices land in the first few seconds, and the ones
+      // that do not are not helped by asking harder.
+      delay = Math.min(delay * 1.4, 3000);
+    }
+
+    return null;
+  }
+
   async function runCapture(
     file
   ) {
@@ -3846,7 +3973,7 @@ function bindInvoiceListEvents(container) {
 
       const result =
         await API.captureInvoice(
-          file
+          await shrinkForUpload(file)
         );
 
       clearInterval(
@@ -3866,12 +3993,22 @@ function bindInvoiceListEvents(container) {
         );
       }
 
+      // The upload is done; the reading is not. The stages keep moving while
+      // the invoice's own status is followed.
+      const finished = await waitForInvoice(result.invoice.id);
+
       root.innerHTML =
         renderProcessing(
           PROCESSING_STAGES.length - 1,
           PROCESSING_STAGES,
           false
         );
+
+      if (finished && finished.status === 'exception') {
+        result.warning =
+          "We couldn't confidently read this invoice. Please review and enter " +
+          'the details manually, or retake the photo.';
+      }
 
       setTimeout(
         () => {

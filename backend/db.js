@@ -1177,6 +1177,32 @@ async function initializeDatabase() {
       ADD COLUMN IF NOT EXISTS job_id TEXT REFERENCES jobs(id);
   `);
 
+  // -------------------------------------------------------------------------
+  // DOCUMENT STORAGE
+  //
+  // The bytes of an uploaded invoice or sign-out sheet, kept in the database
+  // rather than only on disk.
+  //
+  // A container filesystem does not survive a restart or a deploy. The record
+  // of an invoice lived in PostgreSQL and outlasted everything, but the scan
+  // it was read from sat on local disk and did not — so a month-old invoice
+  // was still listed, with nothing behind "View original invoice". The file is
+  // the evidence; it belongs where the record is.
+  //
+  // Disk is still written and still read first, as a cache. This is the copy
+  // that lasts.
+  // -------------------------------------------------------------------------
+
+  await pool.query(`
+    ALTER TABLE invoice_documents
+      ADD COLUMN IF NOT EXISTS content BYTEA,
+      ADD COLUMN IF NOT EXISTS byte_size INTEGER;
+
+    ALTER TABLE stock_sheets
+      ADD COLUMN IF NOT EXISTS content BYTEA,
+      ADD COLUMN IF NOT EXISTS byte_size INTEGER;
+  `);
+
   console.log('[db] PostgreSQL schema ready.');
 
   return true;

@@ -21,6 +21,7 @@ const db = require('../db');
 
 const ledger = require('./stockLedger');
 const jobsService = require('./jobs');
+const documentStore = require('./documentStore');
 const matching = require('./productMatching');
 const importer = require('./stockImport');
 const ai = require('./aiExtraction');
@@ -587,7 +588,12 @@ async function processSheet(sheetId) {
 
   try {
 
-    if (!fs.existsSync(absolutePath)) {
+    // A re-read after a restart finds an empty disk. The bytes kept with the
+    // record are written back so the reader below has a file to open.
+    const found =
+      await documentStore.read('stock_sheets', sheetId, absolutePath);
+
+    if (!found || !fs.existsSync(absolutePath)) {
       throw new Error('The uploaded document is no longer available on the server.');
     }
 

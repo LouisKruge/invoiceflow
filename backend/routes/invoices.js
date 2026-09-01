@@ -28,6 +28,7 @@ const {
 
 const invoiceStock = require('../services/invoiceStock');
 const jobsService = require('../services/jobs');
+const documentStore = require('../services/documentStore');
 
 const {
   postInvoiceToStock
@@ -55,6 +56,17 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 const storage = multer.diskStorage({
 
   destination: (req, file, cb) => {
+    // Checked here rather than only at boot: the directory is made once at
+    // start-up, and on a host whose disk is swept underneath a running
+    // process that is not enough.
+    try {
+      if (!fs.existsSync(UPLOAD_DIR)) {
+        fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+      }
+    } catch (error) {
+      return cb(error);
+    }
+
     cb(null, UPLOAD_DIR);
   },
 
@@ -706,6 +718,9 @@ router.post(
 
     const invoiceId = uuid();
 
+    // Declared out here so the bytes can be kept once the row exists.
+    let documentId = null;
+
     const filePath =
       req.file.path;
 
@@ -733,6 +748,8 @@ router.post(
         ]
       );
 
+      documentId = uuid();
+
       await db.run(
         `
           INSERT INTO invoice_documents
@@ -747,7 +764,7 @@ router.post(
           ($1, $2, $3, $4, $5)
         `,
         [
-          uuid(),
+          documentId,
 
           invoiceId,
 
@@ -778,6 +795,38 @@ router.post(
       });
 
     }
+
+    // Keep the bytes where the record is. The disk copy above does not survive
+    // a restart; this one does. A failure here is logged, never fatal — the
+    // invoice is still captured and the file is still on disk for now.
+    await documentStore.keep('invoice_documents', documentId, filePath);
+
+    // ------------------------------------------------------------------------
+    // ANSWER NOW
+    //
+    // Everything above is fast: a file written and two rows inserted. What
+    // follows — reading the document, matching a supplier, matching every line
+    // against the product master — takes as long as the model takes, and there
+    // is no reason to hold a phone on a building site open for it.
+    //
+    // The invoice exists and is addressable the moment this returns. Its
+    // status says what is happening to it, exactly as a sign-out sheet's does,
+    // and the screen follows that rather than a connection.
+    //
+    // Nothing below this line may touch res.
+    // ------------------------------------------------------------------------
+
+    res.status(202).json({
+
+      invoice: {
+        id: invoiceId,
+        status: 'processing',
+        created_at: new Date().toISOString(),
+      },
+
+      processing: true,
+
+    });
 
     // ------------------------------------------------------------------------
     // PROCESS INVOICE
@@ -1114,17 +1163,11 @@ router.post(
         `[capture] Invoice ${invoiceId} successfully processed`
       );
 
-      const completeInvoice =
-        await getInvoiceFull(
-          invoiceId
-        );
+      console.log(
+        `[capture] Invoice ${invoiceId} finished processing`
+      );
 
-      return res.json({
-
-        invoice:
-          completeInvoice
-
-      });
+      return;
 
     } catch (err) {
 
@@ -1236,38 +1279,14 @@ router.post(
       // TRY TO RETURN THE INVOICE
       // ----------------------------------------------------------------------
 
-      try {
+      // The caller has long since been answered. What went wrong is on the
+      // invoice's own status and in its processing history, which is where a
+      // person looks for it.
+      console.error(
+        `[capture] Invoice ${invoiceId} could not be read: ${err.message}`
+      );
 
-        const failedInvoice =
-          await getInvoiceFull(
-            invoiceId
-          );
-
-        return res.status(200).json({
-
-          invoice:
-            failedInvoice,
-
-          warning:
-            "We couldn't confidently read this invoice. Please review and enter the details manually, or retake the photo."
-
-        });
-
-      } catch (finalError) {
-
-        console.error(
-          '[capture/final-response]',
-          finalError
-        );
-
-        return res.status(500).json({
-
-          error:
-            `Invoice processing failed: ${err.message}`
-
-        });
-
-      }
+      return;
 
     }
 
@@ -1540,24 +1559,38 @@ router.get(
       }
 
       const absolutePath =
-        path.join(
-          __dirname,
-          '..',
-          doc.file_path
+        path.isAbsolute(doc.file_path)
+          ? doc.file_path
+          : path.join(
+              __dirname,
+              '..',
+              doc.file_path
+            );
+
+      // Disk first, then the database. After a restart the disk is empty and
+      // the database is the only copy — which is the whole point of keeping
+      // one there.
+      const found =
+        await documentStore.read(
+          'invoice_documents',
+          doc.id,
+          absolutePath
         );
 
-      if (!fs.existsSync(absolutePath)) {
+      if (!found) {
 
         return res.status(404).json({
           error:
-            'Invoice document file could not be found on the server'
+            'The original document for this invoice is no longer stored'
         });
 
       }
 
-      return res.sendFile(
-        absolutePath
-      );
+      if (doc.mime_type) {
+        res.type(doc.mime_type);
+      }
+
+      return res.send(found.buffer);
 
     } catch (error) {
 
@@ -2782,6 +2815,8 @@ router.post(
       // SAVE NEW DOCUMENT
       // ----------------------------------------------------------------------
 
+      const retryDocumentId = uuid();
+
       await db.run(
         `
           INSERT INTO invoice_documents
@@ -2797,7 +2832,7 @@ router.post(
         `,
         [
 
-          uuid(),
+          retryDocumentId,
 
           req.params.id,
 
@@ -2814,6 +2849,12 @@ router.post(
           req.file.mimetype
 
         ]
+      );
+
+      await documentStore.keep(
+        'invoice_documents',
+        retryDocumentId,
+        req.file.path
       );
 
       // ----------------------------------------------------------------------
