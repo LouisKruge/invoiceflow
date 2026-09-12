@@ -28,6 +28,7 @@ const importer = require('../services/stockImport');
 const sheets = require('../services/stockSheet');
 const binSeed = require('../services/binSeed');
 const invoiceStock = require('../services/invoiceStock');
+const documentStore = require('../services/documentStore');
 const ai = require('../services/aiExtraction');
 
 const router = express.Router();
@@ -44,7 +45,16 @@ if (!fs.existsSync(IMPORT_DIR)) {
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, IMPORT_DIR),
+    destination: (req, file, cb) => {
+      // See the note in routes/invoices.js: made at boot, re-checked here.
+      try {
+        if (!fs.existsSync(IMPORT_DIR)) fs.mkdirSync(IMPORT_DIR, { recursive: true });
+      } catch (error) {
+        return cb(error);
+      }
+
+      cb(null, IMPORT_DIR);
+    },
     filename: (req, file, cb) =>
       cb(null, `${uuid()}${path.extname(file.originalname) || '.xlsx'}`),
   }),
@@ -2150,7 +2160,16 @@ const SHEET_EXTENSIONS = [
 
 const sheetUpload = multer({
   storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, SHEET_DIR),
+    destination: (req, file, cb) => {
+      // See the note in routes/invoices.js: made at boot, re-checked here.
+      try {
+        if (!fs.existsSync(SHEET_DIR)) fs.mkdirSync(SHEET_DIR, { recursive: true });
+      } catch (error) {
+        return cb(error);
+      }
+
+      cb(null, SHEET_DIR);
+    },
     filename: (req, file, cb) =>
       cb(null, `${uuid()}${path.extname(file.originalname) || '.jpg'}`),
   }),
@@ -2367,6 +2386,11 @@ router.post(
           req.user.id,
         ]
       );
+
+      // Keep the bytes where the record is. Container disks do not survive a
+      // restart, and a sheet somebody signed stock out on is worth as much
+      // later as the movements it produced.
+      await documentStore.keep('stock_sheets', sheetId, req.file.path);
 
       // Reading takes seconds; the upload response should not wait for it.
       // A failure is recorded on the sheet itself, never thrown away.
@@ -2693,26 +2717,36 @@ router.get(
 
       const sheet =
         await db.get(
-          'SELECT file_path, mime_type FROM stock_sheets WHERE id = $1',
+          'SELECT id, file_path, mime_type FROM stock_sheets WHERE id = $1',
           [req.params.id]
         );
 
-      if (!sheet || !sheet.file_path) {
+      if (!sheet) {
         return res.status(404).json({ error: 'Stock sheet document not found' });
       }
 
       const absolutePath =
-        path.isAbsolute(sheet.file_path)
-          ? sheet.file_path
-          : path.join(__dirname, '..', sheet.file_path);
+        sheet.file_path
+          ? (path.isAbsolute(sheet.file_path)
+              ? sheet.file_path
+              : path.join(__dirname, '..', sheet.file_path))
+          : null;
 
-      if (!fs.existsSync(absolutePath)) {
+      // Disk first, then the database. After a restart the disk is empty.
+      const found =
+        await documentStore.read('stock_sheets', sheet.id, absolutePath);
+
+      if (!found) {
         return res.status(404).json({
-          error: 'The sign-out sheet file could not be found on the server',
+          error: 'The original sign-out sheet is no longer stored',
         });
       }
 
-      return res.sendFile(absolutePath);
+      if (sheet.mime_type) {
+        res.type(sheet.mime_type);
+      }
+
+      return res.send(found.buffer);
 
     } catch (error) {
       console.error('[stock/sheets/document]', error);
